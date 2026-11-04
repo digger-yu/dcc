@@ -24,8 +24,23 @@ pub(crate) use elf::*;
 use std::fs;
 use std::process::Command;
 
+/// 每个临时文件都必须带一个**每次调用都不同**的序号。
+///
+/// 只用 pid 不够：`tests/integration.rs` 是**一个进程里的多线程测试**，而路径里的
+/// `name` 会重复——实测两条用例都用 `"cta-block-proto"`（一条钉「死臂不留重定位」、
+/// 一条钉「与 gcc 逐档对齐」），两条并发时其中一条 `remove_file` 把另一条刚写下的
+/// 源文件删了，症状是随机一条红：
+///   `dcc 应能编译: error[E0100]: cannot read /tmp/dcc-cta-block-proto-<pid>.c: No such file`
+/// 这不是被测编译器的缺陷，是判据自己的隔离问题；它会在完全无关的改动后随机重现，
+/// 所以必须堵在取名这一层（而不是给用例改名，那只是把冲突藏起来）。
+pub(crate) fn temp_tag() -> String {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
+}
+
 pub(crate) fn run_syntax_test(name: &str, source: &str) -> std::process::Output {
-    let path = std::env::temp_dir().join(format!("dcc-{name}-{}.c", std::process::id()));
+    let path = std::env::temp_dir().join(format!("dcc-{name}-{}.c", temp_tag()));
     fs::write(&path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-fsyntax-only")
@@ -48,7 +63,7 @@ pub(crate) fn run_syntax_test(name: &str, source: &str) -> std::process::Output 
 pub(crate) fn discard_out(tag: &str) -> std::path::PathBuf {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("dcc-discard-{tag}-{}-{n}.o", std::process::id()))
+    std::env::temp_dir().join(format!("dcc-discard-{tag}-{}-{n}.o", temp_tag()))
 }
 
 pub(crate) fn run_object_test(
@@ -64,8 +79,8 @@ pub(crate) fn run_object_test_flags(
     extra_flags: &[&str],
 ) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let object_path = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
+    let source_path = dir.join(format!("dcc-{name}-{}.c", temp_tag()));
+    let object_path = dir.join(format!("dcc-{name}-{}.o", temp_tag()));
     fs::write(&source_path, source).expect("write C fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.arg("-c");
@@ -97,8 +112,8 @@ pub(crate) fn run_asm_output_test_flags(
     extra_flags: &str,
 ) -> (std::process::Output, String) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let asm_path = dir.join(format!("dcc-{name}-{}.s", std::process::id()));
+    let source_path = dir.join(format!("dcc-{name}-{}.c", temp_tag()));
+    let asm_path = dir.join(format!("dcc-{name}-{}.s", temp_tag()));
     fs::write(&source_path, source).expect("write C fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     if !extra_flags.is_empty() {
@@ -184,8 +199,8 @@ pub(crate) fn run_compile_and_run_env(
     envs: &[(&str, &str)],
 ) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-{name}-{}-{}.exe", std::process::id(), env_tag(envs)));
+    let source_path = dir.join(format!("dcc-{name}-{}.c", temp_tag()));
+    let exe_path = dir.join(format!("dcc-{name}-{}-{}.exe", temp_tag(), env_tag(envs)));
     fs::write(&source_path, source).expect("write C fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.args(["-std=gnu23"]);
@@ -287,8 +302,8 @@ pub(crate) fn run_exe(path: &std::path::Path) -> i32 {
 /// 两边链接都用主机 cc, 因而 libc 的 `printf` 格式化行为一致。
 pub(crate) fn run_gcc_cross_check(name: &str, source: &str) -> i32 {
     let dir = std::env::temp_dir();
-    let gsrc = dir.join(format!("dcc-xcheck-{name}-{}.c", std::process::id()));
-    let gexe = dir.join(format!("dcc-xcheck-{name}-{}.gcc", std::process::id()));
+    let gsrc = dir.join(format!("dcc-xcheck-{name}-{}.c", temp_tag()));
+    let gexe = dir.join(format!("dcc-xcheck-{name}-{}.gcc", temp_tag()));
     fs::write(&gsrc, source).expect("write C fixture for gcc");
     let gbuild = Command::new("gcc")
         .args(["-O0", "-std=gnu2x", "-w", "-o"])
@@ -334,7 +349,7 @@ pub(crate) fn run_gcc_cross_check(name: &str, source: &str) -> i32 {
 /// 整个测试目标吊死而不是跑红。
 pub(crate) fn run_gcc_cross_check_opt(name: &str, source: &str, dcc_flags: &[&str]) -> i32 {
     let dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let pid = temp_tag();
     let gsrc = dir.join(format!("dcc-xopt-{name}-{pid}.c"));
     let gexe = dir.join(format!("dcc-xopt-{name}-{pid}.gcc"));
     fs::write(&gsrc, source).expect("write C fixture for gcc");
@@ -372,6 +387,56 @@ pub(crate) fn run_gcc_cross_check_opt(name: &str, source: &str, dcc_flags: &[&st
     dcode
 }
 
+/// 与 [`run_gcc_cross_check_opt`] 同一套路，但参照侧的 -O 档也能指定。
+///
+/// 为什么需要它：`__always_inline` 体里带 `"i"(形参)` 这一族写法（内核
+/// `cpufeature.h` 的 `_static_cpu_has`）在 **gcc -O0 下 gcc 自己就报错**
+/// `impossible constraint in 'asm'` —— GCC 在 -O0 的展开不把常量传给 asm 操作数。
+/// 拿这种夹具跑「gcc -O0 对照」只会测到 gcc 的报错，而内核的真实档位是 -O2，
+/// 所以两侧必须同档跑。返回两边一致的退出码供调用方再断言具体值。
+pub(crate) fn run_gcc_cross_check_both_opts(name: &str, source: &str, gcc_flags: &[&str], dcc_flags: &[&str]) -> i32 {
+    let dir = std::env::temp_dir();
+    let pid = temp_tag();
+    let gsrc = dir.join(format!("dcc-xboth-{name}-{pid}.c"));
+    let gexe = dir.join(format!("dcc-xboth-{name}-{pid}.gcc"));
+    fs::write(&gsrc, source).expect("write C fixture for gcc");
+    let mut gbuild = Command::new("gcc");
+    gbuild.args(gcc_flags).args(["-std=gnu2x", "-w", "-o"]).arg(&gexe).arg(&gsrc);
+    let gbuild = gbuild.output().expect("run gcc");
+    let (dbuild, dexe) = run_compile_and_run_flags(name, source, dcc_flags);
+    let _ = fs::remove_file(&gsrc);
+    assert!(
+        gbuild.status.success(),
+        "{name} [gcc {}]: gcc 应能编译: {}",
+        gcc_flags.join(" "),
+        String::from_utf8_lossy(&gbuild.stderr)
+    );
+    assert!(
+        dbuild.status.success(),
+        "{name} [{}]: dcc 应能编译: {}",
+        dcc_flags.join(" "),
+        String::from_utf8_lossy(&dbuild.stderr)
+    );
+    let (gcode, gstdout, _) = run_exe_bounded(&gexe);
+    let (dcode, dstdout, _) = run_exe_bounded(&dexe);
+    let _ = fs::remove_file(&gexe);
+    let _ = fs::remove_file(&dexe);
+    assert_eq!(
+        String::from_utf8_lossy(&gstdout),
+        String::from_utf8_lossy(&dstdout),
+        "{name}: gcc({}) 与 dcc({}) 的 stdout 不一致 (gcc_rc={gcode} dcc_rc={dcode})",
+        gcc_flags.join(" "),
+        dcc_flags.join(" ")
+    );
+    assert_eq!(
+        gcode, dcode,
+        "{name}: gcc({}) 与 dcc({}) 的退出码不一致",
+        gcc_flags.join(" "),
+        dcc_flags.join(" ")
+    );
+    dcode
+}
+
 /// 带环境变量与档位的汇编输出：给「某条 pass 是否真的改变了产物」这类断言用。
 ///
 /// 为什么必须有它：一次 pass 接进管线后，单测全绿并不能证明它到达了产物
@@ -387,7 +452,7 @@ pub(crate) fn compile_asm_text_with_env(
     envs: &[(&str, &str)],
 ) -> (String, String) {
     let dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let pid = temp_tag();
     let src = dir.join(format!("dcc-asmenv-{name}-{pid}.c"));
     let out = dir.join(format!("dcc-asmenv-{name}-{pid}.s"));
     fs::write(&src, source).expect("write C source");
@@ -426,7 +491,7 @@ pub(crate) fn compile_asm_text_with_env(
 #[cfg(unix)]
 pub(crate) fn run_gcc_two_tu_cross_check(name: &str, provider: &str, consumer: &str) -> i32 {
     let dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let pid = temp_tag();
     let psrc = dir.join(format!("dcc-2tu-{name}-{pid}-p.c"));
     let csrc = dir.join(format!("dcc-2tu-{name}-{pid}-c.c"));
     fs::write(&psrc, provider).expect("write provider");
@@ -591,8 +656,8 @@ pub(crate) fn qemu_runtime_target(
         return None;
     }
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
+    let source_path = dir.join(format!("dcc-{name}-{}.c", temp_tag()));
+    let exe_path = dir.join(format!("dcc-{name}-{}", temp_tag()));
     fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["--target", target, "-o"])
@@ -660,8 +725,8 @@ pub(crate) fn run_cpp_object_test(
     source: &str,
 ) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
-    let object_path = dir.join(format!("dcc-cpp-{name}-{}.o", std::process::id()));
+    let source_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", temp_tag()));
+    let object_path = dir.join(format!("dcc-cpp-{name}-{}.o", temp_tag()));
     fs::write(&source_path, source).expect("write C++ fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
@@ -681,7 +746,7 @@ pub(crate) fn host_link_cpp_object_and_run(name: &str, object: &std::path::Path)
         return -100;
     }
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!("dcc-m51-link-{name}-{}.bin", std::process::id()));
+    let exe = dir.join(format!("dcc-m51-link-{name}-{}.bin", temp_tag()));
     let link = Command::new("g++")
         .arg("-o")
         .arg(&exe)
@@ -713,8 +778,8 @@ pub(crate) fn gxx_native_cpp_exit_code(name: &str, source: &str) -> i32 {
         return -100;
     }
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-gxx-native-{name}-{}.cpp", std::process::id()));
-    let exe = dir.join(format!("dcc-gxx-native-{name}-{}.bin", std::process::id()));
+    let src = dir.join(format!("dcc-gxx-native-{name}-{}.cpp", temp_tag()));
+    let exe = dir.join(format!("dcc-gxx-native-{name}-{}.bin", temp_tag()));
     fs::write(&src, source).expect("write g++ fixture");
     let compile = Command::new("g++")
         .arg("-std=c++17")
@@ -746,9 +811,9 @@ pub(crate) fn run_host_link_and_run_with(
     link_extra_args: &[&str],
 ) -> (std::process::Output, i32) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-link-{name}-{}.c", std::process::id()));
-    let object_path = dir.join(format!("dcc-link-{name}-{}.o", std::process::id()));
-    let exe_path = dir.join(format!("dcc-link-{name}-{}", std::process::id()));
+    let source_path = dir.join(format!("dcc-link-{name}-{}.c", temp_tag()));
+    let object_path = dir.join(format!("dcc-link-{name}-{}.o", temp_tag()));
+    let exe_path = dir.join(format!("dcc-link-{name}-{}", temp_tag()));
     fs::write(&source_path, source).expect("write C fixture");
     let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
@@ -837,8 +902,8 @@ pub(crate) fn run_compile_o(
     opt: &str,
 ) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
+    let source_path = dir.join(format!("dcc-{name}-{}.c", temp_tag()));
+    let exe_path = dir.join(format!("dcc-{name}-{}", temp_tag()));
     fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-std=gnu23", opt, "-o"])
@@ -868,8 +933,8 @@ pub(crate) fn run_compile_object_env(
     envs: &[(&str, &str)],
 ) -> (std::process::Output, Vec<u8>) {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let obj_path = dir.join(format!("dcc-{name}-{}-{}.o", std::process::id(), env_tag(envs)));
+    let source_path = dir.join(format!("dcc-{name}-{}.c", temp_tag()));
+    let obj_path = dir.join(format!("dcc-{name}-{}-{}.o", temp_tag(), env_tag(envs)));
     fs::write(&source_path, source).expect("write C fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.args(["-std=gnu23", opt, "-c"]);
@@ -938,10 +1003,10 @@ pub(crate) fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
 #[cfg(unix)]
 pub(crate) fn cpp_std20_exit_code_cross_check(name: &str, source: &str) {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
+    let src = dir.join(format!("dcc-cpp-{name}-{}.cpp", temp_tag()));
     fs::write(&src, source).expect("write fixture");
     let reference: Option<i32> = if Command::new("g++").arg("--version").output().is_ok() {
-        let exe = dir.join(format!("dcc-cpp-{name}-{}-ref.bin", std::process::id()));
+        let exe = dir.join(format!("dcc-cpp-{name}-{}-ref.bin", temp_tag()));
         let g = Command::new("g++")
             .args(["-std=c++20", "-o"])
             .arg(&exe)
@@ -998,12 +1063,12 @@ pub(crate) const VA_LIST_TYPEDEF: &str = "typedef __builtin_va_list va_list;\n";
 /// 每次进程会得到不同代码而退出码随机翻转. 只跑一遍能偶然对上 g++, 掩盖这类 bug.
 pub(crate) fn cpp_coroutine_cross_check(name: &str, source: &str) {
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
+    let src_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", temp_tag()));
     fs::write(&src_path, source).expect("write C++ coroutine fixture");
 
     let mut reference: Option<(i32, String)> = None;
     if Command::new("g++").arg("--version").output().is_ok() {
-        let ref_bin = dir.join(format!("dcc-cpp-{name}-{}-ref.bin", std::process::id()));
+        let ref_bin = dir.join(format!("dcc-cpp-{name}-{}-ref.bin", temp_tag()));
         let g = Command::new("g++")
             .args(["-std=c++20", "-o"])
             .arg(&ref_bin)
@@ -1026,7 +1091,7 @@ pub(crate) fn cpp_coroutine_cross_check(name: &str, source: &str) {
         ));
     }
 
-    let obj = dir.join(format!("dcc-cpp-{name}-{}.o", std::process::id()));
+    let obj = dir.join(format!("dcc-cpp-{name}-{}.o", temp_tag()));
     let mut dcc_run: Option<(i32, String)> = None;
     for round in 0..3 {
         let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -1040,7 +1105,7 @@ pub(crate) fn cpp_coroutine_cross_check(name: &str, source: &str) {
             "{name}: dcc -c 失败 (round {round}): {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let exe = dir.join(format!("dcc-cpp-{name}-{}.bin", std::process::id()));
+        let exe = dir.join(format!("dcc-cpp-{name}-{}.bin", temp_tag()));
         let link = Command::new("gcc")
             .arg(&obj)
             .arg("-o")
@@ -1166,8 +1231,8 @@ pub(crate) fn run_cpp_with_mode(
         return None;
     }
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-cppmode-{name}-{}.cpp", std::process::id()));
-    let object_path = dir.join(format!("dcc-cppmode-{name}-{}.o", std::process::id()));
+    let source_path = dir.join(format!("dcc-cppmode-{name}-{}.cpp", temp_tag()));
+    let object_path = dir.join(format!("dcc-cppmode-{name}-{}.o", temp_tag()));
     fs::write(&source_path, source).expect("write cpp fixture");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-c")
@@ -1255,7 +1320,7 @@ pub(crate) fn asm_fallback_compile(
     out_ext: &str,
 ) -> (String, bool, std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let stem = format!("dcc-asm-fallback-{tag}-{}", std::process::id());
+    let stem = format!("dcc-asm-fallback-{tag}-{}", temp_tag());
     let obj_path = dir.join(format!("{stem}{out_ext}"));
     let text_path = dir.join(format!("{stem}.s"));
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1416,7 +1481,7 @@ pub(crate) fn dcc_link_exe(
     flags: &[&str],
 ) -> (bool, String, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let pid = temp_tag();
     let sf = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.c"));
     let exe = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.bin"));
     fs::write(&sf, src).expect("写临时源文件");
@@ -1434,7 +1499,7 @@ pub(crate) fn dcc_link_exe(
 /// 只编成 `.o` 并把它读回来（`.o` 侧的静态判据用）。
 pub(crate) fn dcc_obj_bytes(tag: &str, src: &str, flags: &[&str]) -> Vec<u8> {
     let dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let pid = temp_tag();
     let sf = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.c"));
     let obj = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.o"));
     fs::write(&sf, src).expect("写临时源文件");
@@ -1494,7 +1559,7 @@ pub(crate) fn dcc_link_capture_flags(
     flags: &[&str],
 ) -> (bool, String, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let tag = std::process::id();
+    let tag = temp_tag();
     let sf = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.c"));
     let exe = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.bin"));
     std::fs::write(&sf, c_src).expect("写临时源文件");
@@ -1539,8 +1604,8 @@ pub(crate) fn asm_body(asm: &str) -> String {
 /// （自 `tests/integration/opt_ssa_gate.rs` 上移；原先依赖壳的 `use std::env`，这里写全路径。）
 pub(crate) fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) -> String {
     let dir = std::env::temp_dir();
-    let sp = dir.join(format!("dcc-{name}-pipe-{}.c", std::process::id()));
-    let ap = dir.join(format!("dcc-{name}-pipe-{}.s", std::process::id()));
+    let sp = dir.join(format!("dcc-{name}-pipe-{}.c", temp_tag()));
+    let ap = dir.join(format!("dcc-{name}-pipe-{}.s", temp_tag()));
     fs::write(&sp, src).expect("写夹具");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.arg("-O2").args(["-S", "-o"]).arg(&ap).arg(&sp);
@@ -1707,7 +1772,7 @@ pub(crate) fn dwarf_gdb_build_env(
     envs: &[(&str, &str)],
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let pid = temp_tag();
     let sf = dir.join(format!("dcc-{tag}-{pid}.c"));
     let out = dir.join(format!("dcc-{tag}-{pid}.{}", if link { "bin" } else { "o" }));
     std::fs::write(&sf, src).expect("写临时 C 源");

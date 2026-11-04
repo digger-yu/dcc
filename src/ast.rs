@@ -2476,14 +2476,38 @@ impl Expr {
             Expr::VaArgPack { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
-            Expr::SizeofTy { .. }
-            | Expr::SizeofExpr { .. }
-            | Expr::AlignofTy { .. }
-            | Expr::AlignofExpr { .. }
-            | Expr::Offsetof { .. } => Type::Int,
+            // `sizeof`/`_Alignof`/`offsetof` 的结果类型是 **`size_t`**（C11 6.5.3.4p4 与
+            // 7.19p3；LP64 上就是 `unsigned long`），不是 `int`。以前这里写死 `Type::Int`，
+            // 子表达式一旦参与类型推导就错：`__auto_type b = sizeof(x) - 1;` 与
+            // `typeof(sizeof(x) - 1)` 在 dcc 里推成 **有符号 int**（实测：同一段表达式
+            // gcc 给 `unsigned long`，见 `.work_tmp/auto_type_probe.c` 的 a3/a4 两形），
+            // 于是内核 `min()/max()` 里的 `is_signed_type(typeof(...))` 判定走错臂，
+            // `__compiletime_assert_NNN` 那一族死臂折不掉（实测 `lib/kstrtox.o` 11 条）。
+            Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::AlignofTy { .. }
+            | Expr::AlignofExpr { .. } => Type::ULong,
+            // `offsetof` 自带 `result_ty`（parser 写的），跟着它走而不是另定一套。
+            Expr::Offsetof { result_ty, .. } => result_ty.clone(),
             Expr::StmtExpr { ty, .. } => ty.clone(),
         }
     }
+}
+
+/// 这个声明的**每一次访问本身是不是可观察事件**。
+///
+/// 为什么需要它（而且只能放在 `ast.rs`）：`volatile`/`_Atomic`/段限定记在
+/// [`VarDecl::quals`] / [`VarDecl::addr_space`] 上，**不在表达式里**：发射器与优化器
+/// 拿到一条 `Expr::Ident` 时只能看到名字，看到不了限定符。以前同一个判断有两份写法
+/// （`codegen::x86_64::emit::func_setup::frame_access_is_volatile` 与 `ast_gvn` 里的
+/// `volatile_globals`），而它们面不同（前者只问局部，后者只问文件作用域）。
+/// 本函数只回答「这个声明可不可观察」，**谁的**（局部/全局）由调用方的名字集决定。
+///
+/// 段限定（`__seg_gs`/`__seg_fs`）在本后端不会发段前缀，但它与 volatile 同类：值可能被
+/// 外部（per-cpu 基址、信号）改动，所以一并排除，宁可少削一条。
+pub fn var_decl_access_is_observable(v: &VarDecl) -> bool {
+    v.quals.is_volatile()
+        || v.quals.is_atomic()
+        || !matches!(v.addr_space, AddrSpace::None)
+        || matches!(v.ty, Type::Atomic(_))
 }
 
 /// Returns true if the type or any nested QualType carries volatile qualifier.

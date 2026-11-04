@@ -1125,10 +1125,7 @@ impl Codegen {
                 // int-store 会把这个地址当 8 字节写进目标 (pr79351:
                 // `states[j] = (struct state){0}` 后 states[].k 变地址字节)。
                 // 该兜底与 Ident 左值路径 (下方 `|| CompoundLit`) 同源同判据。
-                if !matches!(lv, Expr::Ident { .. })
-                    && (Self::value_is_whole_copy(&assign_l_ty)
-                        || (Self::is_aggregate_shape(&assign_l_ty)
-                            && matches!(r.as_ref(), Expr::CompoundLit { .. })))
+                if Self::assign_needs_addr_slot(lv, &assign_l_ty, r)
                     && self.gen_lvalue_addr(lv, Self::EVAL_BASE)
                 {
                     let addr_slot = self.alloc_sret_slot(8);
@@ -3558,6 +3555,14 @@ impl Codegen {
                         BlockItem::Decl(Decl::Var(v)) => {
                             // 绑在两条 `continue` 之前 (同 `gen_block_item`)。
                             self.bind_static_local(v);
+                            // extern 声明不分配帧槽，只作全局符号引用标记。
+                            // 这一份副本漏过这条早返：语句表达式里的 `extern int y;`
+                            // 于是被当成普通局部对象走到下面的 `register_var`，
+                            // 懒注册撞穿晚分配带预算（E1133）。同一 TU 里
+                            // 内核的 `({ extern ...; ... })` 形状都吃这一条。
+                            if v.is_extern && v.init.is_none() {
+                                continue;
+                            }
                             // static 局部变量已在全局数据段分配
                             if v.is_static
                                 && self
@@ -3625,8 +3630,14 @@ impl Codegen {
                                 self.gen_vla_alloc(v);
                             }
                             if let Some(init) = &v.init {
-                                // 字符数组 + 字符串字面量：复制内容而不是指针 (同 `gen_block_item`)。
-                                if let Expr::String { data, .. } = init {
+                                // 聚合初始化（`int v[] = {1,2,3}` / `struct S s = {…}`）：
+                                // 走与 `gen_block_item` 同一条路。原先 InitList 落到下面的
+                                // 值路径，只有首元素被写进槽位 ⇒ `({ int v[] = {1,2,3};
+                                // v[1] + v[2]; })` 读出栈上垃圾。
+                                if let Expr::InitList { inits, .. } = init {
+                                    self.gen_init_list(&v.name.name, &v.ty, inits);
+                                } else if let Expr::String { data, .. } = init {
+                                    // 字符数组 + 字符串字面量：复制内容而不是指针 (同 `gen_block_item`)。
                                     if matches!(&v.ty, Type::Array(_, _)) {
                                         let (name, ty) = (v.name.name.clone(), v.ty.clone());
                                         self.gen_char_array_str_init(&name, &ty, data);

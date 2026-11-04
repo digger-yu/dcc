@@ -233,32 +233,9 @@ impl Codegen {
         sz <= 64
     }
     pub(crate) fn asm_reg_modifier_subst(val: &str, modifier: char) -> Option<String> {
-        let (idx, sz) = Self::parse_asm_reg(val)?;
-        if sz >= 128 {
-            return None; // 向量/mask 寄存器无 b/w/k/q 修饰符
-        }
-        if modifier == 'h' {
-            // 高 8 位寄存器: 仅 ax/bx/cx/dx
-            let name = match idx {
-                0 => "%ah",
-                1 => "%ch",
-                2 => "%dh",
-                3 => "%bh",
-                _ => return None,
-            };
-            return Some(name.to_string());
-        }
-        let bits = match modifier {
-            'b' => 8,
-            'w' => 16,
-            'k' => 32,
-            'q' => 64,
-            'a' => sz,
-            _ => return None,
-        };
-        // 号→名只有一份表（`abi/regnames.rs`，Phase 6.1 的后半）：本文件以前自己保了
-        // 一份 68 条的副本，与 `asm/expansion.rs` 里那一份逐字相同。
-        crate::codegen::x86_64::abi::regnames::att_name_of_num(idx, bits)
+        // 本方法与 `asm/expansion.rs` 那份以前是逐字相同的两条实现（同一事实两处写），
+        // 修非寄存器操作数那一条时只要其中一份改了就会漂。现在就一条实现：这一份只转发。
+        crate::codegen::x86_64::asm::expansion::asm_reg_modifier_subst(val, modifier)
     }
     pub(crate) fn asm_rel32_symbol(&mut self, label: &str, opcode_len: u64) {
         let disp_off = self.pos() - 4;
@@ -383,12 +360,26 @@ impl Codegen {
         if expr.is_empty() {
             return (0, None, None);
         }
+        // 宏留下的外层括号先剥掉（`(1b) - .` 里的 `(1b)`），否则下面所有「这是不是一串纯数」
+        // /「这是不是一个数字标签引用」的判据都会被括号挡住（理由见 [`strip_outer_parens`]）。
+        let expr = Self::strip_outer_parens(expr);
         // 纯数字算术表达式 (含括号、*、+、-): 在交给 find_expr_operator 之前先
         // 尝试求值. 典型样本: `.altinstructions` 里 `.long (20*32+ 2)` — 整个
         // 表达式是一个"无符号名"的立即数, 但因为带括号/星号, 老代码会把它整串
         // 当 symbol 名发出去, 链接时报 undefined reference to '(20*32+ 2)'.
         if let Some(v) = Self::eval_pure_numeric_arith(expr) {
             return (v, None, None);
+        }
+        // 一个符号 + 若干部常数 + 一个「当前地址 `.`」的形，例如
+        // `arch/x86/include/asm/runtime-const.h` 的 `.long 1b - 8 - .`（以及
+        // `.long 1b - 1 - .`）。`find_expr_operator` 只拆一个二元运算符，遇到这种链
+        // 会在最后一个 `-` 处切成 `1b - 8` 与 `.`，于是把整个 `1b - 8` 当成符号名发出去
+        // ——实测链接报 `undefined reference to '1b - 8'`（站点 `runtime_ptr_USER_PTR_MAX`）。
+        // 这里先把项剥开：只允许**一个**非数值、非 `.` 的项，其余全是常数或 `.`，
+        // 并把常数带符号累加成重定位的 addend（`.` 由 PC32 本身承担，贡献 0）。
+        if let Some((sym_text, addend)) = Self::split_relative_terms(expr) {
+            let sym = Self::resolve_asm_data_symbol(&sym_text, locals, line_idx, numeric_label_map);
+            return (0, Some((sym, shared_elf::R_X86_64_PC32, addend)), None);
         }
         // 查找 '-' 和 '+' 操作符 (不在引号/括号内)
         let (expr_before, op, expr_after) = Self::find_expr_operator(expr);
@@ -793,16 +784,14 @@ impl Codegen {
         // 检测 disp 是否为符号 (而不是立即数): symbol(%rip) / sym(%base)
         let mut disp: i32 = 0;
         if !disp_str.is_empty() {
-            if let Some(hex) = disp_str
-                .strip_prefix("0x")
-                .or_else(|| disp_str.strip_prefix("0X"))
-            {
-                disp = i32::from_str_radix(hex, 16).unwrap_or(0);
-            } else if disp_str.parse::<i32>().is_err() {
+            // 与 `operand.rs::parse_asm_mem` 共用一份位移判据（含 `0*8`/`(4+1)*8` 这类四则式）：
+            // 这两份解析器逐字相同，以前各写一套就出现过「同一个字面量一边是立即数、
+            // 一边是符号」（见 `eval_pure_numeric_arith` 上方那条注释）。
+            if let Some(v) = super::operand::fold_asm_disp_number(disp_str) {
+                disp = v;
+            } else {
                 // 符号名: 转 SymDisp 携带符号名 (RIP-relative 默认)
                 return AsmOperand::SymDisp(disp_str.to_string(), 0);
-            } else {
-                disp = disp_str.parse::<i32>().unwrap_or(0);
             }
         }
         // 提取括号内的内容
@@ -957,6 +946,38 @@ impl Codegen {
         }
         AsmOperand::Sym(sym)
     }
+    /// 数据表达式里是否出现「当前地址 `.`」这一项（引号内不算）。
+    ///
+    /// 重定位类型要靠它选：`X - .` 是 PC 相对（宽度决定 PC32/PC64），`X + N` 是绝对。
+    /// `.` 必须独立成一个项，所以 `1.5`、`.Lx` 这种带点的名字不算。
+    pub(crate) fn asm_expr_has_current_addr(expr: &str) -> bool {
+        let b = expr.as_bytes();
+        let mut in_quote = false;
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c == b'"' {
+                in_quote = !in_quote;
+                i += 1;
+                continue;
+            }
+            if in_quote {
+                i += 1;
+                continue;
+            }
+            if c == b'.' {
+                let prev_ok = i == 0 || matches!(b[i - 1], b' ' | b'\t' | b'+' | b'-' | b'(' | b',');
+                let next_ok = i + 1 >= b.len()
+                    || matches!(b[i + 1], b' ' | b'\t' | b'+' | b'-' | b')' | b',' | b'*');
+                if prev_ok && next_ok {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
     pub(crate) fn parse_asm_pc_relative_long(expr: &str) -> Option<(String, i64)> {
         let expr = expr.trim();
         let (left, right) = expr.split_once('-')?;
@@ -1327,13 +1348,126 @@ impl Codegen {
 
         (gp_set, xmm_set, x87_count)
     }
+    /// 把 `sym - 8 - .` 这类「一个符号 + 若干常数项 + 可选的 `.`」拆成 (符号项文本, addend)。
+    ///
+    /// 返回 `None` 的三种情况（都交给原有路径，不改它们的行为）：表达式里根本没有 `.` 项
+    /// （不是 PC 相对形状）、符号项多于一个、或某个项既不是数也不是符号。
+    /// 符号项本身可以是 `1b`/`1f` 这种数字标号，由 `resolve_asm_data_symbol` 改名。
+    fn split_relative_terms(expr: &str) -> Option<(String, i64)> {
+        let mut terms: Vec<(char, String)> = Vec::new();
+        let mut sign = '-';
+        let mut cur = String::new();
+        let mut depth = 0i32;
+        for ch in expr.chars() {
+            match ch {
+                '(' => {
+                    depth += 1;
+                    cur.push(ch);
+                },
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return None;
+                    }
+                    cur.push(ch);
+                },
+                '+' | '-' if depth == 0 => {
+                    let t = cur.trim().to_string();
+                    if !t.is_empty() {
+                        terms.push((sign, t));
+                    } else if !terms.is_empty() {
+                        // 一元负号紧跟在运算符后（`a - -1`）：不猜，交给原路径
+                        return None;
+                    }
+                    sign = ch;
+                    cur.clear();
+                },
+                _ => cur.push(ch),
+            }
+        }
+        let tail = cur.trim().to_string();
+        if !tail.is_empty() {
+            terms.push((sign, tail));
+        }
+        // 必须有 `.` 项，否则不是这个形状（例如 `sym - other_sym`）
+        if !terms.iter().any(|(_, t)| t == ".") {
+            return None;
+        }
+        let mut sym: Option<String> = None;
+        let mut addend: i64 = 0;
+        for (sign, term) in terms {
+            let t = term.trim();
+            if t == "." {
+                continue;
+            }
+            let value = if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                i64::from_str_radix(hex, 16).ok()
+            } else {
+                t.parse::<i64>().ok()
+            };
+            match value {
+                Some(v) => {
+                    if sign == '-' {
+                        addend -= v;
+                    } else {
+                        addend += v;
+                    }
+                },
+                None => {
+                    if sym.is_some() {
+                        // 两个符号项：不是本形状
+                        return None;
+                    }
+                    sym = Some(t.to_string());
+                },
+            }
+        }
+        Some((sym?, addend))
+    }
+
+    /// 剥掉成对的外层括号：`(1b)` → `1b`、`((a))` → `a`；`(a)+(b)` 这种首尾不配对的不动。
+    ///
+    /// 为什么需要它：内核的数据伪指令几乎都带着宏留下的括号 ——
+    /// `_ASM_EXTABLE(from, to)` 展开就是 `.long (1b) - .` 与 `.long (2b) - .`。GAS 把括号
+    /// 当分组照样解析，而以前本文件直接拿整串当符号名：`1b` 因外面套着 `( )` 认不出
+    /// 数字标签，于是发一个名叫 `(1b)` 的 UND GLOBAL 符号 —— `__ex_table` 每一条都指向
+    /// 不存在的位置（实测 `arch/x86/kernel/ldt.o`：链接期 objtool 报
+    /// `special: can't find orig instruction`，而真正严重的是运行期的异常表整个是错的）。
+    fn strip_outer_parens(s: &str) -> &str {
+        let mut t = s.trim();
+        while t.starts_with('(') && t.ends_with(')') && t.len() >= 2 {
+            let inner = &t[1..t.len() - 1];
+            // 只有这一对括号确实把整串包住时才剥：扫内部时深度不能转负（那意味着
+            // 遇到一个不属于本对的 `)`，例如 `(a)+(b)`），结束时必须回到 0。
+            let mut depth = 0i32;
+            let mut wrapped = true;
+            for c in inner.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            wrapped = false;
+                            break;
+                        }
+                    },
+                    _ => {},
+                }
+            }
+            if !wrapped || depth != 0 {
+                break;
+            }
+            t = inner.trim();
+        }
+        t
+    }
     fn resolve_asm_data_symbol(
         expr: &str,
         locals: &AsmLocalLabels,
         line_idx: usize,
         numeric_label_map: &std::collections::HashMap<String, String>,
     ) -> String {
-        let expr = expr.trim();
+        let expr = Self::strip_outer_parens(expr.trim());
         // 数字标签: Nb 或 Nf
         if expr.len() >= 2 {
             let last = expr.as_bytes()[expr.len() - 1];

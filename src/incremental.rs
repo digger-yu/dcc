@@ -139,10 +139,11 @@ impl IncrementalCache {
         }
     }
 
-    /// 计算 (源内容 + 编译标志) 的指纹.
+    /// 计算 (源内容 + 编译标志 + 编译器自身) 的指纹.
     ///
-    /// 指纹 = hash(source_content, relevant_flags).
-    /// 相关标志: 影响输出二进制的所有编译选项.
+    /// 指纹 = hash(source_content, relevant_flags, exe_size, exe_mtime).
+    /// 相关标志: 影响输出二进制的所有编译选项; 最后两项把「哪一版 dcc 写的条目」也钉进
+    /// key（理由见下面第 6 条）。
     fn compute_fingerprint(&self, cfg: &Config, input: &Path) -> Option<String> {
         // 读源文件内容
         let source_content = fs::read(input).ok()?;
@@ -212,6 +213,8 @@ impl IncrementalCache {
         cfg.strict_aliasing.hash(&mut hasher);
         // Strict overflow
         cfg.strict_overflow.hash(&mut hasher);
+        // PIC: 改 switch 跳表能不能上表（直接改产物字节）
+        cfg.pic.hash(&mut hasher);
         // Short wchar
         cfg.short_wchar.hash(&mut hasher);
         // No common
@@ -221,6 +224,21 @@ impl IncrementalCache {
         cfg.align_loops.hash(&mut hasher);
         cfg.align_jumps.hash(&mut hasher);
         cfg.align_functions.hash(&mut hasher);
+        // 同一类的缺口（本轮逐个对过 `cli::Config` 的字段表）：这几项都直接改字节，
+        // 不进指纹就是拿旧字节当命中。
+        //   * `patchable_function_entry`：函数入口前的 nop 前缀长度（内核传 =16,16）；
+        //   * `cf_protection`：`branch/full` 时每个入口多一条 `endbr64`；
+        //   * `asm_fallback`：`gas` 档整 TU 走文本+`as`，产物由另一条发射路径出；
+        //   * `march`/`mcpu`：指令选型；
+        //   * `data_sections`：每个变量独立 section，节表与重定位全变；
+        //   * `file_prefix_maps`：调试目录前缀写进 DWARF。
+        cfg.patchable_function_entry.hash(&mut hasher);
+        cfg.cf_protection.hash(&mut hasher);
+        (cfg.asm_fallback as u8).hash(&mut hasher);
+        cfg.march.hash(&mut hasher);
+        cfg.mcpu.hash(&mut hasher);
+        cfg.data_sections.hash(&mut hasher);
+        cfg.file_prefix_maps.hash(&mut hasher);
         // Ftrace mode
         (cfg.ftrace_mode as u8).hash(&mut hasher);
         // Stack clash protection
@@ -257,6 +275,9 @@ impl IncrementalCache {
         for path in &cfg.include_paths {
             path.hash(&mut hasher);
         }
+
+        // 6. 编译器自身的指纹：换二进制就必须作废缓存。
+        crate::incremental::hash_compiler_binary(&mut hasher);
 
         let hash_value = hasher.finish();
         Some(format!("{:016x}", hash_value))
@@ -326,6 +347,10 @@ mod tests {
             link_mode: false,
             emit_asm: false,
             asm_fallback: crate::cli::AsmFallback::default(),
+            // 本轮补：指纹新增的 `cf_protection` 必须在夹具里有个确定值（只补字段，不改用例语义）。
+            // 其余五项（`patchable_function_entry`/`march`/`mcpu`/`data_sections`/
+            // `file_prefix_maps`）夹具本来就有，不在这里重复写。
+            cf_protection: false,
             preprocess_only: false,
             dump_macros: false,
             force_includes: vec![],
@@ -361,6 +386,7 @@ mod tests {
             input_lang: crate::cli::InputLang::C,
             as_options: vec![],
             m32: false,
+            m16: false,
             parallel_codegen: false,
             jobs: None,
             permissive: false,
@@ -404,6 +430,7 @@ mod tests {
             stack_clash_protection: false,
             strict_aliasing: true,
             strict_overflow: true,
+            pic: false,
             short_wchar: false,
             no_common: false,
             cli_warnings: vec![],
@@ -594,5 +621,48 @@ mod tests {
 
         let _ = fs::remove_file(&src);
         let _ = fs::remove_file(&out);
+    }
+}
+
+/// 把「当前这个编译器二进制」的身份混进任意 hasher。**只留一份实现**：compile 缓存
+/// （本模块 `compute_fingerprint`）与 include 预处理缓存（`preproc.rs::hash_macro_state`）
+/// 都必须带这一层。
+///
+/// 为什么必须：指纹原本只覆盖「源内容 + 影响输出的选项」，于是改一行前端/codegen 重编
+/// dcc 之后，全树仍会命中上一版编译器写下的条目。两个实测现场：
+///   * 修好解析器缺陷、`make clean` 重跑，产物里还是旧编译器的字节（几千条旧条目）；
+///   * 修好预处理器「宏体内跨行注释」的缺陷后，真树仍报同一个错 —— 因为 `~/.dcc` 里 12 GB
+///     的旧预处理输出在回放。当时只能手删缓存目录；而「记得手动清缓存」是纪律条款不是机制，
+///     目标要求「每一个字节都由当前这版 dcc 产生」，所以必须自动化。
+///
+/// 取**内容**而不是 size+mtime。两条都有实测代价：
+///   * 想要的判据是「字节相同的编译器 ⇒ 产物字节相同 ⇒ 缓存可继续用」。mtime 给不出这个
+///     判据，而且反向也不成立：按 §5.0e 用 `install -m 0755` 把 `target/release/dcc` 装成
+///     全树只读快照时，两个文件 md5 逐字相同、mtime 不同一 ⇒ 12 GB 预处理缓存整批作废。
+///     量到的代价：一个内核 TU 冷读 46.2 s、同一份输出命中缓存 0.8 s；~1 万个对象就是
+///     几十小时纯重复劳动（本机实测：`/tmp/twice.sh`）。
+///   * 读一次 12 MB 是毫秒级（`[u8]` 的 `Hash` 走 `write` 批量路径，不是逐字节），相对
+///     它省下的一次全树重预处理可以忽略。
+/// 拿不到就退回 size + mtime（只少一层精度，与旧行为一致），再拿不到就不混这一项。
+pub fn hash_compiler_binary<H: std::hash::Hasher>(hasher: &mut H) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    if let Ok(bytes) = fs::read(&exe) {
+        bytes.hash(hasher);
+        return;
+    }
+    if let Ok(md) = fs::metadata(&exe) {
+        md.len().hash(hasher);
+        if let Ok(t) = md.modified() {
+            match t.duration_since(std::time::UNIX_EPOCH) {
+                Ok(d) => {
+                    d.as_secs().hash(hasher);
+                    d.subsec_nanos().hash(hasher);
+                },
+                Err(_) => {
+                    // 系统时钟早于 epoch：拿不到单调可用的读数，这一层保护本轮不生效
+                    0u64.hash(hasher);
+                },
+            }
+        }
     }
 }

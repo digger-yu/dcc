@@ -5,7 +5,19 @@
 use std::env;
 use std::process::ExitCode;
 
+// 报障用的大分配追踪器（`DCC_BIG_ALLOC_TRACE=<字节数>`，默认不装）：
+// 内核 `fs/proc/kcore.c` 在 codegen 里一次申请 4.5 GiB，机器只有 7.9 GB，
+// `strace` 只看得见 mmap、看不见申请点。见该模块头的说明。
+mod bigalloc;
+
+#[global_allocator]
+static BIG_ALLOC: bigalloc::BigAllocTrace = bigalloc::BigAllocTrace;
+
 fn main() -> ExitCode {
+    // 必须在任何大分配之前：它的阈值**不能在 GlobalAlloc 里读**（env 读取自己要
+    // 分配，重入 `OnceLock` 会死锁）。未设 `DCC_BIG_ALLOC_TRACE` 时这一步只是一次
+    // 环境变量查询 + 一次 store。
+    bigalloc::init();
     // 使用大栈线程运行编译器,避免深度嵌套声明 (如 limits-declparen.c 的
     // 10000 层括号) 导致栈溢出. 256MB 足以处理极端嵌套场景.
     let stack_size = 256 * 1024 * 1024; // 256 MB

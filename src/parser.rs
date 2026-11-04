@@ -303,6 +303,10 @@ impl ScopeChain {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
+    /// 当前作用域深度（全局层 = 1）。给 `var_quals` 的遮蔽判据用。
+    fn depth(&self) -> usize {
+        self.scopes.len()
+    }
     fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {
             self.scopes.pop();
@@ -365,7 +369,15 @@ pub struct Parser<'a> {
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: ScopeChain,                        // 分层作用域链 (替代单 HashMap + clone)
-    var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const 检查用)
+    /// 变量名 → (登记时的作用域深度, 限定符)。`const` 赋值检查用。
+    /// 必须带深度：这张表以前只按**名字**建、只在换函数时清，于是
+    /// `{ const int order = 3; }` 出块后仍然遮蔽外层那个可变的 `order`，后面的
+    /// `order = 5;` 被误判成 `E0030: assignment of read-only variable 'order'`
+    /// （实测 `mm/compaction.c:643`：617 行块内的 `const unsigned int order` 遮蔽了
+    /// 函数作用域的同名变量；gcc 正常编过）。查表只认「登记深度 ≤ 当前深度」的
+    /// 最后一条 ⇒ 出块自动失效，不依赖 push/pop 记账（本解析器里 push 与 pop
+    /// 的次数并不配对：块入口 push 两处、出口 pop 四处）。
+    var_quals: HashMap<String, Vec<(usize, QualifierFlags)>>,
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
     func_alignments: HashMap<String, usize>,   // 函数名 → 对齐值 (from forward decl or def)
     func_decl_attrs: HashMap<String, ParsedAttrs>, // 函数名 → 声明时的属性 (用于继承到定义)
@@ -934,13 +946,14 @@ impl<'a> Parser<'a> {
                     self.advance();
                     if self.cur.kind == TokKind::LParen {
                         self.advance(); // (
-                                        // 解析对齐值
-                        if self.cur.kind == TokKind::Number {
-                            let value = parse_int_lit(&self.cur.text);
-                            if value > 0 {
-                                aligned = Some(value as usize);
+                                        // 解析对齐值：与声明级 `aligned` 同一个坑，
+                                        // 这里也只能吃字面量。字段级 `__aligned(PAGE_SIZE)`
+                                        // 同样要按常量表达式求值。
+                        let mut adepth = 0i32;
+                        if let Some(v) = self.parse_aligned_expr(&mut adepth) {
+                            if v > 0 {
+                                aligned = Some(v);
                             }
-                            self.advance();
                         }
                         // 跳过到匹配的 )
                         let mut inner_depth = 1i32;
@@ -1246,6 +1259,35 @@ impl<'a> Parser<'a> {
         a.usual_arith_type(b)
     }
 
+    /// 该表达式是不是 **空指针常量**（C11 6.2.5p18）：值为 0 的整型常量表达式，以及
+    /// 由它转成的指针类型。判据直接取自常量求值，不在这里再推一套常量折叠；
+    /// 地址常量（`ConstValue::Addr`）不算「值为 0」。只给 `?:` 的 6.5.15p6 取型规则用。
+    fn is_null_pointer_const(e: &Expr) -> bool {
+        if !matches!(
+            e.ty(),
+            Type::Ptr(_)
+                | Type::Array(_, _)
+                | Type::Int
+                | Type::UInt
+                | Type::Long
+                | Type::ULong
+                | Type::LongLong
+                | Type::ULongLong
+                | Type::Short
+                | Type::UShort
+                | Type::Char
+                | Type::SChar
+                | Type::UChar
+                | Type::Bool
+        ) {
+            return false;
+        }
+        matches!(
+            crate::const_eval::eval_full(e, false),
+            Ok(crate::const_eval::ConstValue::Int(0))
+        )
+    }
+
     /// 去除字符串字面量两端的引号
     fn strip_quotes(s: &str) -> String {
         let s = s.trim();
@@ -1305,27 +1347,30 @@ impl<'a> Parser<'a> {
                     "aligned" => {
                         self.advance();
                         if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            // 走 `parse_aligned_expr`，别只认「第一个 Number」：内核的
+                            // `__aligned(PAGE_SIZE)` / `__aligned(SMP_CACHE_BYTES)`
+                            // 预处理后是 `((1UL) << 12)` 这样的常量表达式，旧的「取
+                            // depth==1 上第一个数字字面量」写法会把对齐读成 1（或直接
+                            // 读不到，退回自然对齐）。实测 `struct debug_store` 的
+                            // `} __aligned(PAGE_SIZE);` 被算成 384 字节而不是 4096，
+                            // 于是 `BUILD_BUG_ON(sizeof(struct debug_store) % PAGE_SIZE)`
+                            // 被折成「断言失败」，整块留下对 `__compiletime_assert_*`
+                            // 的调用 ⇒ 链接期 undefined reference。
                             let mut depth = 0i32;
-                            loop {
-                                if self.cur.kind == TokKind::LParen {
-                                    depth += 1;
-                                } else if self.cur.kind == TokKind::RParen {
-                                    depth -= 1;
-                                    self.advance();
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                    continue;
-                                } else if depth == 1 && self.cur.kind == TokKind::Number {
-                                    let value = parse_int_lit(&self.cur.text);
-                                    if value > 0 {
-                                        attrs.alignment = Some(value as usize);
-                                    }
+                            if let Some(v) = self.parse_aligned_expr(&mut depth) {
+                                if v > 0 {
+                                    attrs.alignment = Some(v);
                                 }
+                            }
+                            // 兜底跳过表达式里没被消费的残余（如残缺的 `sizeof(x)`）
+                            while self.cur.kind != TokKind::RParen
+                                && self.cur.kind != TokKind::Eof
+                            {
                                 self.advance();
-                                if self.cur.kind == TokKind::Eof {
-                                    break;
-                                }
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
                             }
                         } else {
                             attrs.alignment = Some(16); // __attribute__((aligned)) 无参数默认16
@@ -1437,19 +1482,11 @@ impl<'a> Parser<'a> {
                             if self.cur.kind == TokKind::Comma {
                                 self.advance();
                             }
-                            if self.cur.kind == TokKind::Number {
-                                attrs.format_string_idx =
-                                    parse_int_lit(&self.cur.text).try_into().ok();
-                                self.advance();
-                            }
+                            attrs.format_string_idx = self.attr_uint_arg();
                             if self.cur.kind == TokKind::Comma {
                                 self.advance();
                             }
-                            if self.cur.kind == TokKind::Number {
-                                attrs.format_first_arg =
-                                    parse_int_lit(&self.cur.text).try_into().ok();
-                                self.advance();
-                            }
+                            attrs.format_first_arg = self.attr_uint_arg();
                             while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof
                             {
                                 self.advance();
@@ -3150,6 +3187,33 @@ impl<'a> Parser<'a> {
         matches!(e, Expr::Int { v: 0, .. })
     }
 
+    /// 登记变量限定符，连同登记时的作用域深度；同名多条时由 [`Self::var_qual_of`]
+    /// 取「深度不超过当前作用域」的最后一条。
+    fn register_var_qual(&mut self, name: &str, q: QualifierFlags) {
+        let d = self.locals.depth();
+        self.var_quals.entry(name.to_string()).or_default().push((d, q));
+    }
+
+    /// 查当前作用域里**看得到**的那一份限定符（出块的块级声明自然失效）。
+    fn var_qual_of(&self, name: &str) -> Option<QualifierFlags> {
+        let d = self.locals.depth();
+        self.var_quals
+            .get(name)
+            .and_then(|list| list.iter().rev().find(|(rd, _)| *rd <= d).map(|(_, q)| *q))
+    }
+
+    /// 是否为「按定义不返回」的内建调用（`__builtin_unreachable()` / `__builtin_trap()`）。
+    /// 只抽成小函数是为了上面那条注释能贴在 `stmt_terminates` 里读得通，
+    /// 而不是把五层嵌套的 `matches!` 塞进匹配臂。
+    fn is_noreturn_builtin_call(e: &Expr) -> bool {
+        if let Expr::Call { callee, .. } = e {
+            if let Expr::Ident { name, .. } = &**callee {
+                return name.name == "__builtin_unreachable" || name.name == "__builtin_trap";
+            }
+        }
+        false
+    }
+
     /// 判断 switch case 体最后一条语句是否会终止控制流 (break/return/continue/goto).
     /// 用于 GCC `-Wimplicit-fallthrough` 等价诊断.
     fn stmt_terminates(s: &Stmt) -> bool {
@@ -3160,6 +3224,11 @@ impl<'a> Parser<'a> {
             | Stmt::Goto { .. }
             | Stmt::GotoIndirect { .. } => true,
             Stmt::Fallthrough { .. } => true, // fallthrough 视为一种终止（有意贯穿）
+            // `__builtin_unreachable()` / `__builtin_trap()` 按定义不返回：内核的
+            // `BUG()` 在 x86 上展开成 `emit_trap_instr(); __builtin_unreachable();`
+            // （`arch/x86/include/asm/bug.h`），末尾就是这一条。不认它就把
+            // `arch/x86/kernel/kprobes/core.c:948` 那种以 `BUG();` 收尾的 case 判成
+            // 隐式贯穿（gcc 不报）。
             // if/while 等复合语句, 全部路径终止才视为终止.
             Stmt::If { then_, else_, .. } => {
                 Self::stmt_terminates(then_)
@@ -3170,8 +3239,16 @@ impl<'a> Parser<'a> {
             },
             Stmt::Label { stmt, .. } => Self::stmt_terminates(stmt),
             Stmt::Switch { .. } => true, // switch 内的 break 已在内部处理
-            Stmt::While { .. } | Stmt::For { .. } | Stmt::Do { .. } | Stmt::AsmGoto { .. } => false,
-            Stmt::Expr { .. } => false,
+            Stmt::While { .. } | Stmt::For { .. } | Stmt::AsmGoto { .. } => false,
+            // `do { … } while (0)` 是内核宏的标准包装形状（`BUG()` 就是它，体内末尾
+            // 是 `__builtin_unreachable();`）。条件恒假 ⇒ 循环体恰好执行一次且不回头，
+            // 终止性等价于体内最后一条语句；不认它就报 `arch/x86/kernel/kprobes/core.c:948`
+            // 这种以 `BUG();` 收尾的 case（gcc 不报）。而 `while (0)`/`for (;;)` 不进这一臂：
+            // 条件恒假的 while 是零次执行，控制流照常往下走，不是终止。
+            Stmt::Do { body, cond, .. } => {
+                matches!(crate::const_eval::eval(cond), Ok(0)) && Self::stmt_terminates(body)
+            },
+            Stmt::Expr { e, .. } => Self::is_noreturn_builtin_call(e),
             // C++ 零成本 EH: 受保护调用正常返回后落到下一条语句, 落地垫序言
             // 本身也不是终止语句, 两者都不影响 fallthrough 判定.
             Stmt::Invoke { .. } | Stmt::EhLandingPad { .. } => false,
@@ -3245,6 +3322,13 @@ impl<'a> Parser<'a> {
                         Some(Stmt::Fallthrough { .. }) => {},
                         // 最后一条有效语句终止控制流：不会贯穿
                         Some(s) if Self::stmt_terminates(s) => {},
+                        // 根本没有有效语句，而且连声明也没有：这一支只是又一组 `case` 标签
+                        // （`case A: case B:` 那种共享体的写法），没有语句被跨过。gcc 实测
+                        // 对这种写法不报（ft3.c 的 `e_case`），而 `case 1: int y = 2;` 这种
+                        // **只有一句声明**的仍要报（同实测的 `decl_bare`），所以不能一律跳过。
+                        // `items.is_empty()` 盖不住前者：展开后本支体里还剩一条空语句占位，
+                        // `last_effective_stmt` 只能返回 None（实测 `arch/x86/kernel/cpu/bugs.c:2945`）。
+                        None if !c.body.items.iter().any(|it| matches!(it, BlockItem::Decl(_))) => {},
                         // 其他情况：未标注的隐式贯穿
                         _ => {
                             // 如果 body 中有 fallthrough 但不在最后，额外发 misplaced 警告
@@ -3419,7 +3503,13 @@ impl<'a> Parser<'a> {
             // typedef 路径无需额外处理这两个属性.
             ty = self.parse_ptr_suffix(ty);
             // typedef ret_type (name)(params) — 无 * 的函数 typedef
-            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
+            // `(` 后是 `__attribute__` / `__seg_*` 时不是名字，是函数指针声明符里
+            // 写在 `*` 前的属性，必须交给下面的 (`(*name)`) 分支
+            // （efistub.h:216 的 `typedef void (__efiapi *efi_event_notify_t)(...)`）。
+            if self.cur.kind == TokKind::LParen
+                && self.peek.kind == TokKind::Ident
+                && !self.paren_decl_attr_ahead()
+            {
                 self.advance(); // (
                 let name = self.parse_typedef_name()?;
                 if !self.expect(TokKind::RParen, "')'") {
@@ -3453,9 +3543,28 @@ impl<'a> Parser<'a> {
             }
             // 函数指针 typedef: typedef ret_type (*name)(params)
             // 嵌套函数指针 typedef: typedef ret_type (*(*name)(params1))(params2)
+            // 属性/段限定符写在 `*` 前: typedef ret_type (__attribute__((ms_abi)) *name)(params);
+            // `__efiapi` 正是这样展开的（efistub.h:216/751）—— 只看 `(` 后是不是 `*`
+            // 会把 `__attribute__` 当成 typedef 名字，随后 expect(')') 报 E0001。
             // 吃掉外层的 ( 与 * (此时 cur 从 ( / * 变为 name 或 内层 ( / * )
-            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+            let mut attr_before_star = false;
+            if self.paren_decl_attr_ahead() {
+                let sv = self.save_parse_state();
                 self.advance(); // 外层 (
+                self.skip_attributes();
+                self.skip_ptr_qualifiers();
+                if self.cur.kind == TokKind::Star {
+                    attr_before_star = true;
+                } else {
+                    self.restore_parse_state(&sv);
+                }
+            }
+            if attr_before_star
+                || (self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star)
+            {
+                if !attr_before_star {
+                    self.advance(); // 外层 (
+                }
                 self.advance(); // 外层 *
                                 // 跳过 const/volatile/restrict
                 while matches!(
@@ -4220,6 +4329,8 @@ impl<'a> Parser<'a> {
         }
         // 否则: skip_ptr_qualifiers 设置的 decl_quals 属于变量, 保留
         let mid_attrs = Self::merge_attrs(mid_attrs, self.parse_attributes());
+        // 限定符归属在 `parse_ptr_suffix` 里统一处理（它与
+        // `parse_ptr_suffix_with_quals` 已合成一份实现），这里不再特殊分支。
         let ty = self.parse_ptr_suffix(ty);
         // 函数指针: void * (*name)(params) — * 已被 parse_ptr_suffix 吃掉, 现在是 (
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
@@ -4227,6 +4338,25 @@ impl<'a> Parser<'a> {
             self.advance(); // *
             let merged = Self::merge_attrs(leading_attrs, mid_attrs);
             return self.parse_func_ptr_inner(ty, merged, storage);
+        }
+        // 函数指针: void *(__attribute__((...)) *name)(params)
+        // 上面的属性分支（约 4185 行）在 parse_ptr_suffix **之前**检查, 基类型
+        // 本身就是指针时那里 cur 还是 `*`, 检查落空; 吃掉基类型 `*` 后 `(` 才
+        // 露出来。站点: `efi_char16_t *(__efiapi *convert_...)(...)`
+        // （efistub.h:184/187/202/204, `__efiapi` = `__attribute__((ms_abi))`）。
+        if self.paren_decl_attr_ahead() {
+            let sv = self.save_parse_state();
+            self.advance(); // (
+            let inner_attrs = self.parse_attributes();
+            self.skip_ptr_qualifiers();
+            if self.cur.kind == TokKind::Star {
+                self.advance(); // *
+                let merged =
+                    Self::merge_attrs(Self::merge_attrs(leading_attrs, mid_attrs), inner_attrs);
+                return self.parse_func_ptr_inner(ty, merged, storage);
+            }
+            // 括号内没有 `*`: 只是给名字加属性, 交回下面的声明符路径。
+            self.restore_parse_state(&sv);
         }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
         // 并把指针链里撞到的属性（`int *__weak f(void)`）一并合进来。
@@ -4268,6 +4398,17 @@ impl<'a> Parser<'a> {
                     self.parse_ident()?
                 },
             }
+        } else if self.paren_decl_attr_ahead() {
+            // 括号里先属性后名字: `void *(__attribute__((unused)) p)`。基类型
+            // 不带 `*` 的形式已在上面被属性分支吃掉外层 `(`, 这里接住带 `*` 的那一种。
+            self.advance(); // (
+            self.skip_attributes();
+            self.skip_ptr_qualifiers();
+            let id = self.parse_ident()?;
+            if !self.expect(TokKind::RParen, "')'") {
+                return None;
+            }
+            id
         } else if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
             self.advance(); // (
             let id = self.parse_ident()?;
@@ -4851,7 +4992,7 @@ impl<'a> Parser<'a> {
                 } else {
                     self.spec_quals | self.decl_quals
                 };
-                self.var_quals.insert(name_for_decl.name.clone(), var_q);
+                self.register_var_qual(&name_for_decl.name, var_q);
             }
             let init = if matches!(self.cur.kind, TokKind::Assign | TokKind::LBrace) {
                 // C23 允许省略 '=' 的大括号初始化: int a[] {1,2,3}
@@ -4963,7 +5104,7 @@ impl<'a> Parser<'a> {
                     } else {
                         self.spec_quals | self.decl_quals
                     };
-                    self.var_quals.insert(name_for_decl.name.clone(), var_q);
+                    self.register_var_qual(&name_for_decl.name, var_q);
                 }
                 let init = self.parse_expr_bp(2)?;
                 // C23 constexpr 变量: 初始化器必须是编译期常量
@@ -5032,7 +5173,7 @@ impl<'a> Parser<'a> {
                 } else {
                     self.spec_quals | self.decl_quals
                 };
-                self.var_quals.insert(name_for_decl.name.clone(), var_q);
+                self.register_var_qual(&name_for_decl.name, var_q);
                 if !self.in_function {
                     self.globals.insert(name_for_decl.name.clone(), ty.clone());
                 }
@@ -5073,7 +5214,7 @@ impl<'a> Parser<'a> {
                 } else {
                     self.spec_quals | self.decl_quals
                 };
-                self.var_quals.insert(name_for_decl.name.clone(), var_q);
+                self.register_var_qual(&name_for_decl.name, var_q);
                 if !self.in_function {
                     self.globals.insert(name_for_decl.name.clone(), ty.clone());
                 }
@@ -6281,6 +6422,9 @@ impl<'a> Parser<'a> {
 
     fn parse_type_mode(&mut self, specifiers_only: bool) -> Option<Type> {
         let mut is_unsigned = false;
+        // 源里有没有显式写 `signed` —— 只用来把 plain `char` 与 `signed char` 分开
+        // （见 [`Self::resolve_base`] 的理由）。
+        let mut is_signed = false;
         let mut is_long = 0u8;
         let mut is_short = false;
         let mut base: Option<Type> = None;
@@ -6498,20 +6642,40 @@ impl<'a> Parser<'a> {
                     self.advance();
                     if self.cur.kind == TokKind::LParen {
                         self.advance();
-                        if self.typeof_operand_is_type_form() {
+                        // typeof 的操作数是**表达式/类型**上下文，里面可以嵌块级声明
+                        // （内核 `max()` 的 `__compiletime_assert` 就是 `extern void f(void);`）。
+                        // 那类内层声明会把 `decl_storage`/`decl_attrs`/`spec_quals` 置脏，
+                        // 而外层 `typeof(...) name;` 随后读的正是这几个字段 ⇒ 变量被误判成
+                        // extern 纯声明（`hoist_block_extern` 把名字提到文件作用域当全局引用，
+                        // 遍历器也按“不占帧槽”跳过它，发射期再懒注册就撞 E1133）。
+                        // 所以操作数前后必须快照/回写声明状态，与 `parse_declaration` 的
+                        // 入口复位同一个口径。
+                        let saved_storage = self.decl_storage;
+                        let saved_attrs = self.decl_attrs.clone();
+                        let saved_spec_quals = self.spec_quals;
+                        let saved_decl_quals = self.decl_quals;
+                        let saved_addr_space = self.spec_addr_space;
+                        let saved_auto_type = self.decl_auto_type;
+                        let operand = if self.typeof_operand_is_type_form() {
                             self.allow_named_type = true;
                             let ty = self.parse_type()?;
                             self.allow_named_type = false;
-                            if self.cur.kind == TokKind::RParen {
-                                self.advance();
-                            }
-                            return Some(self.finish_type(ty, specifiers_only));
+                            Some(ty)
                         } else {
                             let e = self.parse_expr()?;
-                            if self.cur.kind == TokKind::RParen {
-                                self.advance();
-                            }
-                            return Some(self.finish_type(e.ty(), specifiers_only));
+                            Some(e.ty())
+                        };
+                        self.decl_storage = saved_storage;
+                        self.decl_attrs = saved_attrs;
+                        self.spec_quals = saved_spec_quals;
+                        self.decl_quals = saved_decl_quals;
+                        self.spec_addr_space = saved_addr_space;
+                        self.decl_auto_type = saved_auto_type;
+                        if self.cur.kind == TokKind::RParen {
+                            self.advance();
+                        }
+                        if let Some(ty) = operand {
+                            return Some(self.finish_type(ty, specifiers_only));
                         }
                     }
                 },
@@ -6825,7 +6989,7 @@ impl<'a> Parser<'a> {
             base = Some(Type::Int); // signed alone = signed int
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
-            let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            let ty = self.resolve_base(base, is_unsigned, is_long, is_short, is_signed);
             return Some(self.finish_type(ty, specifiers_only));
         }
         // 隐式 int + 指针声明: `*var;` 等价于 `int *var;`
@@ -7150,7 +7314,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if b.is_some() || uns || lng > 0 || shrt {
-                    under_ty = Some(Box::new(self.resolve_base(b, uns, lng, shrt).into()));
+                    // 这一小段是 `_BitInt` 的底层类型推导，它自己的循环不区分 `signed`
+                    // 关键字（只跟宽度/uns/lng/shrt 有关），`signed` 在这里按未显式书写处理。
+                    under_ty = Some(Box::new(self.resolve_base(b, uns, lng, shrt, false).into()));
                 }
             }
             if self.cur.kind == TokKind::LBrace {
@@ -7406,6 +7572,16 @@ impl<'a> Parser<'a> {
                     break;
                 },
                 TokKind::KwSigned => {
+                    // 以前只消费关键字不记事实，于是 `char`（C11 6.2.5p6：与 `signed char`
+                    // 是**不同**的类型，只是表示相同）与 `signed char` 到了 `resolve_base`
+                    // 里无法区分，只能两者都归 `SChar`。后果是同一件事两个出处：声明路径
+                    // 给的 `const char *` 成员类型是 `Ptr(SChar,const)`，而 `parse_type`
+                    // 写出来的 `const char *` 是 `Ptr(Char,const)` —— `__builtin_types_compatible_p`
+                    // 对同一个类型答 0（实测 `typeof(o.s)` vs `const char *` 不一致，而 gcc 两形都是 1）。
+                    // 真现场：`tools/objtool` 编不过 —— `check_vtype()` 里的
+                    // `BUILD_BUG_ON_ZERO(!cpt(typeof(v), type))` 宽度算成 `-!!1 = -1`，
+                    // 报 `error[E0012]: negative bit-field width`（4 个 OPT_STRING 站点）。
+                    is_signed = true;
                     self.advance();
                 },
                 TokKind::KwUnsigned => {
@@ -7568,7 +7744,7 @@ impl<'a> Parser<'a> {
             } else {
                 base
             };
-            let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            let ty = self.resolve_base(base, is_unsigned, is_long, is_short, is_signed);
             // __attribute__((mode(...))): 在 vector_size 之前应用到基类型
             // 例如: int __attribute__((mode(DI))) __attribute__((vector_size(16)))
             // 先将 int 覆盖为 DI (8 bytes), 然后 vector_size(16) 计算 count=2
@@ -7611,7 +7787,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
+    /// `signed` = 源里**显式写了** `signed` 关键字。plain `char` 必须保留 `Type::Char`
+    /// （它与 `signed char` 是不同的类型，见上面 `KwSigned` 那段），只有真写了 `signed`
+    /// 才给 `SChar`。以前没有这个入参，两形被迫合流。
+    fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool, signed: bool) -> Type {
         if let Some(
             ty @ (Type::Struct(_, _, _, _)
             | Type::Union(_, _, _, _)
@@ -7637,7 +7816,8 @@ impl<'a> Parser<'a> {
             (Some(Type::Float128), ..) => Type::Float128,
             (Some(Type::Fract), ..) => Type::Fract,
             (Some(Type::Accum), ..) => Type::Accum,
-            (Some(Type::Char), false, ..) => Type::SChar,
+            (Some(Type::Char), false, ..) if signed => Type::SChar,
+            (Some(Type::Char), false, ..) => Type::Char,
             (Some(Type::Char), true, ..) => Type::UChar,
             (_, _, _, true) if uns => Type::UShort,
             (_, _, _, true) => Type::Short,
@@ -7660,6 +7840,20 @@ impl<'a> Parser<'a> {
             text,
             "__seg_fs" | "__seg_gs" | "__seg_cs" | "__seg_ds" | "__seg_es" | "__seg_ss"
         )
+    }
+
+    /// `(` 后紧跟 `__attribute__` 或段限定符 `__seg_*`: 括号化的函数指针
+    /// 声明符把属性写在 `*` **前面**（`(__attribute__((ms_abi)) *fp)`）。
+    ///
+    /// 各条声明符路径都必须在「基类型的 `*` 已吃完」的位置判它: 基类型本身
+    /// 带指针时（`efi_char16_t *(__efiapi *cb)(...)`）若检查发生在
+    /// `parse_ptr_suffix` 之前, cur 还停在基类型的 `*` 上, 永远看不到这个 `(`,
+    /// 于是 `__attribute__` 被当成声明符名字（efistub.h:184/216 共 35 条
+    /// E0001/E0003）。
+    fn paren_decl_attr_ahead(&self) -> bool {
+        self.cur.kind == TokKind::LParen
+            && self.peek.kind == TokKind::Ident
+            && (self.peek.text == "__attribute__" || Self::seg_qualifier_text(&self.peek.text))
     }
 
     /// 当前 token 是 `__seg_*` 时：记录到 `spec_addr_space` 并消费它，返回是否消费。
@@ -7758,37 +7952,25 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_ptr_suffix(&mut self, mut ty: Type) -> Type {
-        loop {
-            // 在 * 之前可能出现的地址空间限定符 (如 __seg_gs)
-            self.skip_ptr_qualifiers();
-            if self.cur.kind != TokKind::Star {
-                break;
-            }
-            self.advance();
-            self.skip_ptr_qualifiers();
-            // 将 __seg_gs/__seg_fs 地址空间传播到指针类型的 QualType.
-            // 例如 `int __seg_gs *p` 或 cast `(__seg_gs int *)` 中,
-            // spec_addr_space 在类型说明符循环中被设置, 此处捕获并
-            // 写入指针的 QualType.addr_space, 使代码生成阶段能在
-            // 解引用时发射正确的段前缀 (%gs:/%fs:).
-            if matches!(self.spec_addr_space, AddrSpace::GS | AddrSpace::FS) {
-                let addr_space = self.spec_addr_space;
-                self.spec_addr_space = AddrSpace::None;
-                ty = Type::Ptr(Box::new(QualType::with_addr_space(ty, addr_space)));
-            } else {
-                ty = Type::Ptr(Box::new(ty.into()));
-            }
-            // 若后面还有下一层 *, 刚收集的限定符属于当前这个中间指针,
-            // 不应传染到外层变量. 清空 decl_quals, 让下一层 * 的限定符从干净状态累加.
-            if self.cur.kind == TokKind::Star {
-                self.decl_quals = QualifierFlags::NONE;
-            }
-            // 否则 (没有下一层 *): decl_quals 保留为最外层变量自身的限定符,
-            // 由调用方 (var_quals 注册点) 读取.
-        }
-        ty
+    fn parse_ptr_suffix(&mut self, ty: Type) -> Type {
+        // 两条指针后缀路必须共用一份实现：以前 `parse_ptr_suffix`（声明、字段、typedef 走）
+        // 不把声明说明符的限定符落到 pointee，而 `parse_ptr_suffix_with_quals`（类型名走）
+        // 会落 ⇒ 同一个 `const char *` 得到两种类型，`typeof(b)` 与写出来的 `const char *`
+        // 判不兼容（gcc 两形都是 1），连带把 objtool 的
+        // `BUILD_BUG_ON_ZERO(!cpt(typeof(v), const char **))` 算成宽 -1 ⇒ E0012。
+        // 现在统一成：只要真的吃掉第一颗 `*`，`spec_quals` 就穿过它落到 pointee 上；
+        // 没有 `*`（`const char c`）时限定符留在 `spec_quals` 里给声明自身用。
+        self.skip_ptr_qualifiers();
+        let inner_quals = if self.cur.kind == TokKind::Star {
+            let q = self.spec_quals;
+            self.spec_quals = QualifierFlags::NONE;
+            q
+        } else {
+            QualifierFlags::NONE
+        };
+        self.parse_ptr_suffix_with_quals(ty, inner_quals)
     }
+
 
     /// 类似 parse_ptr_suffix, 但在创建指针时将限定符应用到内部类型.
     /// 用于处理 `T const *p` 中 const 属于 pointed-to 类型的情况.
@@ -7812,13 +7994,21 @@ impl<'a> Parser<'a> {
             // 这个 gcc 认可的位置上的段限定符全部被静默丢掉 —— 实测只有 decl-specifier
             // 位置（`__seg_gs T *f(void)`）能活到 codegen。
             let addr_space = if first { self.spec_addr_space } else { AddrSpace::None };
+            // 本轮是不是第一条 `*`：必须在下面把 `first` 清掉**之前**抓住，
+            // 否则限定符那条判据会读到一个已经被推进的 false。
+            let first_star = first;
             if first {
                 self.spec_addr_space = AddrSpace::None;
                 first = false;
             }
             let inner = QualType {
                 base: ty.clone(),
-                quals: inner_quals,
+                // 内部限定符只属于**第一条** `*` 的算子对象。逐层都加就把
+                // `const char **` 做成了 `const char *const *`（第二层指向的那个指针自
+                // 身也被 const）—— 实测 `typeof(&o.s)` 与写出的 `const char **` 判不兼容，
+                // 而 objtool 的 `check_vtype(v, const char **)` 止不住这一错，直接
+                // 把四处 `OPT_STRING` 算成 `error[E0012]: negative bit-field width`。
+                quals: if first_star { inner_quals } else { QualifierFlags::NONE },
                 addr_space,
             };
             ty = Type::Ptr(Box::new(inner));
@@ -8086,8 +8276,26 @@ impl<'a> Parser<'a> {
         } else {
             let mut ty = self.parse_ptr_suffix(spec);
             // `void *(*name)(params)`：指针后再跟函数指针声明符
-            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+            // 属性/段限定符写在 `*` 前: `void *(__attribute__((...)) *name)(params)`
+            // （efistub.h:202/204 的 `efi_char16_t *(__efiapi *...)(...)`）
+            let mut attr_before_star = false;
+            if self.paren_decl_attr_ahead() {
+                let sv = self.save_parse_state();
                 self.advance(); // (
+                self.skip_attributes();
+                self.skip_ptr_qualifiers();
+                if self.cur.kind == TokKind::Star {
+                    attr_before_star = true;
+                } else {
+                    self.restore_parse_state(&sv);
+                }
+            }
+            if attr_before_star
+                || (self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star)
+            {
+                if !attr_before_star {
+                    self.advance(); // (
+                }
                 self.advance(); // *
                                 // 跳过可能的 const/volatile/restrict 限定符与段寄存器限定符
                                 // (__seg_fs/__seg_gs 等): 与 parse_ptr_suffix / parse_func_ptr_inner
@@ -8150,21 +8358,36 @@ impl<'a> Parser<'a> {
             // 匿名 struct/union 字段后直接接另一个字段的场景：
             //   union { struct {...} ATTRS; struct {...} ATTRS NAME; }  NAME_or_next_field;
             // 如果 spec 是 struct/union 且当前 ident 看起来是类型说明符 (typedef
-            // 或关键字), 则它其实是下一个字段的类型, 匿名 struct/union 名字为空。
+            // 或关键字), 则它其实是下一个字段的类型，匿名 struct/union 名字为空。
             // 这样可避免下个字段的类型名被当作当前匿名 struct/union 的字段名
             // (内核 struct_group(..., MEMBERS...) 展开丢失尾 `;` 后常出
             // 现这种状态)。
             // 深层嵌套 (3+ 层) 场景: 匿名 struct/union 内嵌匿名 struct/union,
             // 后续字段可能以 __attribute__ 开头 (GCC/内核宏常见模式).
-            // __attribute__ 是 Ident 但不是字段名, 必须排除.
+            // __attribute__ 是 Ident 但不是字段名，必须排除。
+            //
+            // 但这条启发式只能对**匿名**内联定义生效：具名的 `struct mutex regmap_lock;`
+            // 里那个标识符毫无疑问是声明符，而 C 的成员命名空间与 typedef 命名空间是
+            // 独立的。以前不分这两种情形，于是「成员名恰好等于某个可见 typedef 名」的
+            // 字段被当成没有声明符的声明 ⇒ 成员丢名，布局也跟着错：实测最小用例
+            // `typedef void (*rl_t)(void*); struct dev { int head; struct mutex rl_t;
+            // int after; ... };` 里 gcc 给 size=20/rl=4/after=8，dcc 给 size=32/rl=0
+            // (与 head 重叠!)。真树现场：`include/sound/hdaudio.h:93` 的
+            // `struct mutex regmap_lock;`（成员名与 `include/linux/regmap.h:257` 的
+            // `typedef void (*regmap_lock)(void *)` 同名）⇒ `sound/hda/core/regmap.c` 里
+            // 每一处 `guard(mutex)(&codec->regmap_lock)` 报 W1009（共 10 条）。
+            let anon_aggregate = match &ty {
+                Type::Struct(tag, _, _, _) | Type::Union(tag, _, _, _) => tag.is_empty(),
+                _ => false,
+            };
             let nm = if self.cur.kind == TokKind::Ident
                 && self.cur.text != "__attribute__"
-                && !(matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
-                    && (Self::is_type_specifier_ident(
+                && !(anon_aggregate
+                    && Self::is_type_specifier_ident(
                         &self.cur.text,
                         &self.typedefs,
                         self.opts.is_c23,
-                    ) || self.cur.text == "__attribute__"))
+                    ))
             {
                 let n = self.cur.text.clone();
                 self.advance();
@@ -9545,6 +9768,43 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 属性里的数值实参：可以是字面量，也可以是**常量表达式**。必须是常量表达式：
+    /// `include/acpi/acoutput.h` 的 `ACPI_PRINTF_LIKE(c)` 展开成
+    /// `__attribute__((format(printf, 6, (6) + 1)))`，旧写法只认裸数字，于是第三个参数
+    /// 读到 `6` 就停（`+ 1` 被后面的扫尾循环丢掉）⇒「第一个变参」的下标退化成格式串自己，
+    /// 每一条转换说明符都比错一格：实测 `drivers/acpi/acpica/dswstate.o` 19 条 W0003
+    /// （`%X` 拿到 `const char *`），而同一行里 `%p`/`%s` 因为类型巧合没报错。
+    /// 全树这类误报共 ~350 条（ACPI 自带的 `acpi_debug_print`/`acpi_error`/`acpi_os_printf` 等）。
+    fn attr_uint_arg(&mut self) -> Option<u32> {
+        // 收集本槽的 token 文本直到 `,` 或 `)`（深度 0），拼成表达式后折叠。
+        // 不用 `parse_expr_bp`：它在属性上下文里只吃到了第一个操作数（实测
+        // `format(printf, 6, 6+1)` 折成 6 而非 7，而括号版 `(6)+1` 倒是能读），
+        // 而拼文本再折叠对两种写法都给同一个答案（复用内联汇编位移那套判据，
+        // 不另建第二个算术子集）。
+        let mut text = String::new();
+        let mut depth = 0usize;
+        while !matches!(self.cur.kind, TokKind::Eof) {
+            match self.cur.kind {
+                TokKind::Comma | TokKind::RParen if depth == 0 => break,
+                TokKind::LParen => {
+                    depth += 1;
+                    text.push('(');
+                },
+                TokKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    text.push(')');
+                },
+                _ => text.push_str(&self.cur.text),
+            }
+            self.advance();
+        }
+        if text.trim().is_empty() {
+            return None;
+        }
+        let v = crate::codegen::x86_64::Codegen::eval_pure_numeric_arith(&text)?;
+        u32::try_from(v).ok()
+    }
+
     fn is_type_start(&self) -> bool {
         matches!(
             self.cur.kind,
@@ -10352,14 +10612,22 @@ impl<'a> Parser<'a> {
                     // 如果只是 __attribute__((fallthrough)); 则作为语句处理
                     if self.is_attribute_stmt() {
                         // 探测是否是 fallthrough 属性, 用于 C23 诊断.
+                        //
+                        // 名字必须按 GCC 的「保留标识符」写法归一化：内核的伪关键字
+                        // `fallthrough;` 经 `include/linux/compiler_attributes.h:214` 展开成
+                        // `__attribute__((__fallthrough__))`（**双侧下划线**），而
+                        // `__has_attribute(__fallthrough__)` 在 dcc 下为真，所以内核只发这一种
+                        // 形态。原先只比裸名 `fallthrough` ⇒ 全部不认，实测 localmodconfig 全树
+                        // 44 185 条 W0501（主体是 `include/linux/signal.h` 的 `_SIG_SET_OP` 与
+                        // `include/linux/mm.h` 的位图宏，每个含它的 TU 刷一遍）。
                         let is_fallthrough_attr = self
                             .lex
                             .gnu_attr_name_at(
                                 self.cur.span.line as usize,
                                 self.cur.span.col as usize,
                             )
-                            .as_deref()
-                            == Some("fallthrough");
+                            .map(|n| n.trim_matches('_') == "fallthrough")
+                            .unwrap_or(false);
                         let attr_span = self.cur.span.clone();
                         if let Some(_s) = self.parse_stmt() {
                             if is_fallthrough_attr {
@@ -10538,7 +10806,7 @@ impl<'a> Parser<'a> {
                 let ty = lhs.ty();
                 // C89 6.3.16: check const-qualified assignment target
                 if let Some(name) = Self::assign_target_name(&lhs) {
-                    if let Some(q) = self.var_quals.get(&name) {
+                    if let Some(q) = self.var_qual_of(&name) {
                         if q.is_const() {
                             let msg = format!("assignment of read-only variable '{}'", name);
                             let hint = "variable was declared const";
@@ -10578,7 +10846,7 @@ impl<'a> Parser<'a> {
                     let target = Self::assign_target(&lhs);
                     // C89 6.3.16: check const-qualified compound assignment target
                     if let Some(name) = Self::assign_target_name(&target) {
-                        if let Some(q) = self.var_quals.get(&name) {
+                        if let Some(q) = self.var_qual_of(&name) {
                             if q.is_const() {
                                 let msg = format!("assignment of read-only variable '{}'", name);
                                 let hint = "variable was declared const";
@@ -10680,7 +10948,21 @@ impl<'a> Parser<'a> {
                 let else_ = self.parse_expr_bp(2)?;
                 let then_ty = then_.ty();
                 let else_ty = else_.ty();
-                let cond_ty = if matches!(then_ty, Type::Ptr(_)) {
+                // C11 6.5.15p6：一侧是指针、另一侧是**空指针常量**时，结果类型取那个
+                // 指针的类型。这一步必须做：内核的 `__is_constexpr(x)` 就是
+                //     sizeof(int) == sizeof(*(8 ? ((void *)((long)(x) * 0l)) : (int *)8)))
+                // （`include/linux/compiler.h:322`）—— `x` 是常量时 `(long)(x)*0l` 是值为 0
+                // 的整型常量表达式，`(void *)` 它就成了空指针常量，类型应取 `(int *)`，
+                // `sizeof(*(…))` 才等于 `sizeof(int)`。不实现这一条时类型落在 `void *`，
+                // `sizeof(void)` 按 GNU 规则是 1 ⇒ `__is_constexpr` **永远为 0**：
+                // 连带后果是内核那一族 `__builtin_choose_expr(__is_constexpr(…))` 全部选
+                // 错边（实测 localmodconfig 全树 2 769 条 `W0010: !__is_constexpr(…) is true`，
+                // 以及 `__BF_FIELD_CHECK`/`const_true` 的静态检查整片失效）。
+                let cond_ty = if Self::is_null_pointer_const(&then_) && matches!(else_ty, Type::Ptr(_)) {
+                    else_ty
+                } else if Self::is_null_pointer_const(&else_) && matches!(then_ty, Type::Ptr(_)) {
+                    then_ty
+                } else if matches!(then_ty, Type::Ptr(_)) {
                     then_ty
                 } else if matches!(else_ty, Type::Ptr(_)) {
                     else_ty
@@ -10696,13 +10978,53 @@ impl<'a> Parser<'a> {
                     // C11 6.5.15: ternary result type follows usual arithmetic conversions
                     Self::usual_arith_type(&then_ty, &else_ty)
                 };
-                lhs = if let Expr::Int { v, .. } = &cond {
-                    // Constant-fold ternary: 0 ? a : b → b, non-0 ? a : b → a
-                    if *v == 0 {
-                        else_
-                    } else {
-                        then_
+                // 【死臂里定义了标号就不能折】`1 ? 1 : ({ a : 1; })` 折掉的是 else 臂，
+                // 而 `a` 的定义就在那个语句表达式里，外面的 `&&a` 仍指向它 ⇒ 发射期
+                // `E1103: references internal label '.Ll_f_a' which has no entry in this
+                // TU's symtab`（gcc-torture 的 `compile/pr17913.c`）。折叠就发生在**解析期**，
+                // 比所有 —O 档的优化器都早（`-O0` 也同样中招），所以拦网必须在这里；
+                // 此内联尚未发生，「有标号」就是源标签，不必再辨内联器自造。
+                let dropped_has_label = match &cond {
+                    Expr::Int { v, .. } => {
+                        // 条件非 0 取 then，被丢的是 else；条件为 0 反之。
+                        let dropped = if *v == 0 { &then_ } else { &else_ };
+                        !crate::ast_dispatch::label_defs_of_expr(dropped).is_empty()
+                    },
+                    _ => false,
+                };
+                lhs = if dropped_has_label {
+                    Expr::Cond {
+                        cond: Box::new(cond),
+                        then_: Box::new(then_),
+                        else_: Box::new(else_),
+                        span: self.cur.span.clone(),
+                        ty: cond_ty,
                     }
+                } else if let Expr::Int { v, .. } = &cond {
+                    // Constant-fold ternary: 0 ? a : b → b, non-0 ? a : b → a
+                    let mut picked = if *v == 0 { else_ } else { then_ };
+                    // 但折叠不能把上面算出的**条件类型**丢掉：gcc 是先按 6.5.15p6 定类型、
+                    // 再取被选中的那支的值。内核 `__is_constexpr(x)` 的三元的条件就是字面量
+                    // `8`，只留臂类型时折出来是 `(void *)`，`sizeof(void)` 按 GNU 规则是 1 ⇒
+                    // `sizeof(int) == 1` 永远为假 ⇒ `__is_constexpr` 恒 0（实测 5 个常量位全 0，
+                    // gcc 给 1）。只对「指针 ⇄ 空指针常量」这一组补类型标注：值仍是 0，
+                    // 不涉表示形式转换；整型/浮点的混型折叠不动（那需要真正的值转换）。
+                    if let Type::Ptr(_) = &cond_ty {
+                        let picked_ty = picked.ty();
+                        let arm_is_void_ptr =
+                            matches!(&picked_ty, Type::Ptr(p) if matches!(p.base, Type::Void));
+                        if picked_ty != cond_ty
+                            && (arm_is_void_ptr || Self::is_null_pointer_const(&picked))
+                        {
+                            let cast_span = self.cur.span.clone();
+                            picked = Expr::Cast {
+                                e: Box::new(picked),
+                                span: cast_span,
+                                ty: cond_ty.clone(),
+                            };
+                        }
+                    }
+                    picked
                 } else {
                     Expr::Cond {
                         cond: Box::new(cond),
@@ -12451,6 +12773,24 @@ impl<'a> Parser<'a> {
                                     | "__builtin_cpu_supports"
                                     | "__builtin_cpu_is"
                                     | "__builtin_cpu_init"
+                                    // 内核语料里剩下的全部未知内建（实测 localmodconfig 全树
+                                    // 共 39 235 条 W1015，就是下面这两个名字）：它们与上面
+                                    // 三件同理，**没有声明可写**，而实现本来就在后端按名字
+                                    // 拦截（`codegen::x86_64::special::builtins` 的
+                                    // `__builtin_unreachable | __builtin_trap` 臂），
+                                    // 并且永远只作语句使用、值从不参与计算，所以下面那句
+                                    // 「assuming int」不会改变任何一个产物字节 —— 本条改动
+                                    // 是纯诊断，不是类型决定。
+                                    // `isdigit`/`strcmp` 是宏展开后的整数谓词（返回 int），
+                                    // `extract_return_addr`/`alloca_uninitialized` 返回指针，
+                                    // 与各自的无 `__builtin_` 前同事同一口径。
+                                    | "__builtin_unreachable"
+                                    | "__builtin_prefetch"
+                                    | "__builtin_trap"
+                                    | "__builtin_isdigit"
+                                    | "__builtin_strcmp"
+                                    | "__builtin_extract_return_addr"
+                                    | "__builtin_alloca_uninitialized"
                             )
                                 // 把「带后缀的 float 内建」判据从 or-pattern 里拆出来：
                                 // Rust 的 guard 作用于**整个** or-pattern 臂，`_ if g` 会
@@ -13442,9 +13782,9 @@ impl<'a> Parser<'a> {
             | Expr::PreDec { e, .. } => {
                 Self::collect_upvars_expr(e, local_vars, parent_locals, out);
             },
-            // sizeof/alignof/offsetof 的四条：`e.ty()` 对它们返回 Int，所以
-            // 操作数类型必须单独走（`sizeof(vla_typedef)` 与 `offsetof(vla_t, ..)`
-            // 都要求运行时维度）。
+            // sizeof/alignof/offsetof 的四条：它们的子信息藏在**操作数类型**里而不是子表达式里
+            // （`Expr::ty()` 只能给出结果类型 `size_t`），所以必须单独走一遍：
+            // `sizeof(vla_typedef)` 与 `offsetof(vla_t, ..)` 都要求运行时维度。
             Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
                 Self::collect_upvars_expr(e, local_vars, parent_locals, out);
             },
@@ -13582,7 +13922,26 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// _Generic 类型兼容性检查 (C11 6.2.7): 指针按 pointee 匹配，void* 与任意对象指针兼容
+    /// C11 的类型兼容判定（6.2.7 + 6.7.3）：`_Generic` 选臂、重复声明合并、
+    /// `__builtin_types_compatible_p` 三处共用同一个判据。
+    ///
+    /// 以前这里有三条与 gcc 实测相反的宽松规则，每一条都不是「少一个优化」而是
+    /// **错值**（判据表：`.work_tmp/tcp_probe.c` / `tcp_probe2.c`，gcc -O2 与 dcc 逐函数对立即数）：
+    ///   * `void *` 与「任意对象指针」算兼容 —— 实测 `__builtin_types_compatible_p(void*, struct page*)`
+    ///     gcc=0、旧 dcc=1；`char*` vs `void*`、`void*` vs `int*` 同型错。内核拿它做
+    ///     `container_of`/`kunmap`/`min-max` 的类型检查，判成「兼容」就会**走错臂**：
+    ///     实测 `mm/shmem.o` 的 `__compiletime_assert_408/410` 两条陷阱引用就是这么留下的
+    ///     （站点条件 `if (!(!(__builtin_types_compatible_p(typeof(kaddr), typeof(struct page *))))`，
+    ///     正确答案 0 ⇒ `if (0)` ⇒ 死臂）；
+    ///   * 同宽度的**有符号/无符号**整型算兼容（`Int|UInt`、`Short|UShort`、`Long|ULong`、
+    ///     `LongLong|ULongLong` 各归一组）—— 实测 `int` vs `unsigned` gcc=0、旧 dcc=1；
+    ///     `char`/`signed char`/`unsigned char` 在 C 里是**三个不同类型**（gcc 三者互不兼容），
+    ///     旧实现把它们并成一组；
+    ///   * 数组只比元素基类型、不比元素的限定符 —— 实测 `int[4]` vs `const int[4]` gcc=0、
+    ///     旧 dcc=1。
+    ///
+    /// 保持不动的两条（实测与 gcc 一致，别再改）：pointee 的限定符**要紧**
+    /// （`const int*` vs `int*` 两边都是 0）；`unsigned long` vs `unsigned long int` 两边都是 1。
     fn types_compatible(a: &Type, b: &Type) -> bool {
         let a = match a {
             Type::Atomic(inner) => &inner.base,
@@ -13593,22 +13952,22 @@ impl<'a> Parser<'a> {
             other => other,
         };
         match (a, b) {
+            // 整型一律**同变体才算兼容**：符号性是类型的一部分，`int` 与 `unsigned`
+            // 不兼容；`char`、`signed char`、`unsigned char` 也是三个不同类型。
             (Type::Bool, Type::Bool) => true,
-            (Type::Char | Type::SChar | Type::UChar, Type::Char | Type::SChar | Type::UChar) => {
-                true
-            },
-            (Type::Short | Type::UShort, Type::Short | Type::UShort) => true,
-            (Type::Int | Type::UInt, Type::Int | Type::UInt) => true,
-            (Type::Long | Type::ULong, Type::Long | Type::ULong) => true,
-            (Type::LongLong | Type::ULongLong, Type::LongLong | Type::ULongLong) => true,
+            (Type::Char, Type::Char)
+            | (Type::SChar, Type::SChar)
+            | (Type::UChar, Type::UChar) => true,
+            (Type::Short, Type::Short) | (Type::UShort, Type::UShort) => true,
+            (Type::Int, Type::Int) | (Type::UInt, Type::UInt) => true,
+            (Type::Long, Type::Long) | (Type::ULong, Type::ULong) => true,
+            (Type::LongLong, Type::LongLong) | (Type::ULongLong, Type::ULongLong) => true,
             (Type::Float, Type::Float) => true,
             (Type::Double, Type::Double) => true,
             (Type::LongDouble, Type::LongDouble) => true,
             (Type::Ptr(pa), Type::Ptr(pb)) => {
-                if matches!(&pa.base, Type::Void) || matches!(&pb.base, Type::Void) {
-                    return true;
-                }
-                // Pointee qualifiers matter (not top-level)
+                // 没有「`void *` 与任意对象指针兼容」这种捷径：C11 6.2.7 里 `void *` 只与
+                // `void *` 兼容（上面实测 gcc=0）。pointee 的限定符要紧（非顶层）。
                 if pa.quals != pb.quals {
                     return false;
                 }
@@ -13628,6 +13987,11 @@ impl<'a> Parser<'a> {
                 }
             },
             (Type::Array(ea, sa), Type::Array(eb, sb)) => {
+                // 元素的限定符也算（实测 `int[4]` vs `const int[4]` gcc=0）：限定符在数组
+                // 这里不是「顶层」，它管的是元素类型。
+                if ea.quals != eb.quals {
+                    return false;
+                }
                 if !Self::types_compatible(&ea.base, &eb.base) {
                     return false;
                 }

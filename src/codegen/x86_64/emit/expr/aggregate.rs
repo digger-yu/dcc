@@ -122,6 +122,22 @@ impl Codegen {
         Self::is_aggregate_shape(ty) && (ty.size() > 8 || ty.has_vla())
     }
 
+    /// 这条聚合赋值是否走「先把目标地址物化到一个 sret 帧槽、再整块 `rep movsb`」那一形
+    /// （发射侧在 `dispatch.rs` 的 `AggDst::Indirect` 分支，每次多占一个 8 字节地址槽）。
+    ///
+    /// 为什么要把这条判据从发射侧抽出来：规划期的 sret 预算扫描 (`emit/func_setup.rs` 的
+    /// `sret_bytes_expr`) 必须与发射侧用**同一个谓词**，否则两边口径不一致就是 E1128。
+    /// 实测 `block/blk-mq.o` 的 `blk_mq_extract_queue_requests`：`*queue_rqs = matched_rqs;`
+    /// 就是这一形（目标地址运行时可得、不是 `Ident`），发射侧要 8B（步长 16）而规划算出
+    /// `sret_need=0` ⇒ 第一个槽就压穿 spill 带顶。发射侧还多一个 `gen_lvalue_addr` 能否成功的
+    /// 条件，那个在扫描期不可知（它会发指令），所以本谓词只描述形状；形状成立时**保守地当成要
+    /// 槽**（宁可多留 16B 也不能少留 —— 多留只花帧字节，少留是硬错）。
+    pub(crate) fn assign_needs_addr_slot(lv: &Expr, ty: &Type, rhs: &Expr) -> bool {
+        !matches!(lv, Expr::Ident { .. })
+            && (Self::value_is_whole_copy(ty)
+                || (Self::is_aggregate_shape(ty) && matches!(rhs, Expr::CompoundLit { .. })))
+    }
+
     /// 聚合 **rvalue 的交付形态**: `true` = 求值后 rax 里是**缓冲地址**
     /// (内存交付), `false` = rax(:rdx) 就是**数据** (寄存器交付)。
     ///
@@ -1420,6 +1436,15 @@ impl Codegen {
                                 self.emit_store(0, store_off + j as i64, 1);
                             }
                         }
+                        // **必须前移**：`continue` 跳过的是循环底部的 `init_idx += 1`。
+                        // 漏了这句，同一个初始化项会被无限重放 —— 每圈重发一遍字符串
+                        // 的逐字节 store，`(u64, Insn)` 缓冲一路翻倍到 4.8 GiB。
+                        // 实测 `fs/proc/kcore.c` 的
+                        // `struct elf_prpsinfo prpsinfo = { .pr_fname = "vmlinux" }`
+                        // 就是这样被 OOM 杀掉的（rc=137）。位置初始化（`InitItem::Expr`
+                        // 走上面的 `is_char_array` 臂）一直有前移，只有 `.field = "..."`
+                        // 这条指定初始化器路径漏了。
+                        init_idx += 1;
                         continue;
                     }
                     if let Some(bw) = bit_w {

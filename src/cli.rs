@@ -117,6 +117,13 @@ pub struct Config {
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
     pub patchable_function_entry: Option<(usize, usize)>,
+    /// `-fcf-protection=branch|full`：函数入口发 `endbr64`。
+    ///
+    /// 内核 `arch/x86/Makefile:102` 用 `cc-option` 探测它就往下传，产物里 gcc 会在
+    /// 每个函数入口写 `F3 0F 1E FA`（实测 `arch/x86/mm/fault.o` 有 2 处）。dcc 以前
+    /// 「接受但忽略」，于是 C 代码里 endbr64 计数为 0 —— objtool `--ibt` 只 WARN 不挡
+    /// 构建，所以这个缺口一直没露出来，但它在 IBT 硬件上是 `#CP`。
+    pub cf_protection: bool,
     pub debug_level: u8,   // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub dwarf_version: u8, // DWARF version: 4 or 5 (default 4)
     pub lto_enabled: bool,
@@ -128,7 +135,13 @@ pub struct Config {
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
-    pub m32: bool,               // -m32: 32 位目标, 传 --32 给 as
+    pub m32: bool,               // -m32: 32 位目标, 汇编输入传 --32 给 as；C 输入硬错 E0319
+    pub m16: bool,
+    /// `-m16`: 16 位实模式代码。**只有汇编输入有真实语义** —— GAS 没有 `-m16`，
+    /// 16 位由源文件里的 `.code16`/`.code16gcc` 承担，而 ELF 类必须是 32 位（`as --32`）。
+    /// C 输入一律硬错 `E0319`（dcc 没有 16 位 x86 后端）——以前 `-m16` 被当成
+    /// 「不认识的 -m 选项」只留一行警告就吐掉，于是 `arch/x86/realmode/rm/*.S` 被出成
+    /// **ELF64** 对象（与同批 gcc 产物连文件类别都不同），而最终链的是 `-m elf_i386`。
     pub parallel_codegen: bool,  // -O2+ 默认多线程并行 emit（DCC_NO_PARALLEL=1 关闭）
     pub jobs: Option<usize>,     // -j<N>: 多文件并行编译线程数 (None=auto)
     pub permissive: bool,        // -fpermissive：未知 typedef 降级为 int
@@ -228,6 +241,14 @@ pub struct Config {
     pub strict_aliasing: bool,
     /// -fno-strict-overflow: 关闭有符号溢出优化假设 (默认 true)
     pub strict_overflow: bool,
+    /// -fpic/-fPIC/-fpie/-fPIE: 位置无关代码模式。
+    ///
+    /// 唯一的消费者是稠密 switch 的跳表降级（`ssa::structure`）：表项是
+    /// `.quad 标号` 的**绝对** 64 位地址，在 PIC 产物里会发成 R_X86_64_64 ——
+    /// EFI stub 明确禁止绝对重定位（`libstub/Makefile` 的 STUBCPY 检查会在
+    /// vsprintf.o 上报错），而且 PIC 的本意就是「不绑定地址」。此模式下退回
+    /// 比较链分派（低效但正确）；非 PIC（内核主体 `-fno-PIE`）行为不变。
+    pub pic: bool,
     /// -fshort-wchar: wchar_t 2 字节模式
     pub short_wchar: bool,
     /// -fno-common: 公共符号处理
@@ -410,6 +431,25 @@ pub struct TargetTriple {
     pub vendor: String, // "unknown" or "pc" or "apple"
     pub os: Os,
     pub abi: Abi,
+    /// x86 的代码宽度覆盖：0 = 按 arch 的自然宽度（x86_64 ⇒ 64），32 = `-m32`/`-m16`。
+    ///
+    /// 为什么放在 triple 上而不是另起一个开关：`-m32` 改变的是**目标 ABI** 而不只是
+    /// 一条驱动旗标 —— 预定义宏、指针宽度、`__i386__`/`__x86_64__` 的选择全跟着它走。
+    /// 内核 realmode 的 `verify_cpu.S` 就用 `#ifndef __x86_64__` 圈住 32 位专用序列：
+    /// 若仍定义 `__x86_64__`，那 14 条指令会被整段裁掉（实测 `.text` 少 28 字节）。
+    /// C 输入的 32 位代码生成仍硬错 E0319（dcc 没有 32/16 位后端），这里只服务
+    /// 「汇编输入 + `as --32`」这条路。
+    pub x86_bits: u8,
+}
+
+impl TargetTriple {
+    /// 自然宽度（未指定 `-m32`/`-m16`）：0 表示让 `arch` 决定。
+    pub const NATIVE_BITS: u8 = 0;
+
+    /// 是否处于 32 位模式（只对 x86 有效）。
+    pub fn is_x86_32_mode(&self) -> bool {
+        matches!(self.arch, Arch::X86_64) && self.x86_bits == 32
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,6 +531,7 @@ impl TargetTriple {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: Self::NATIVE_BITS,
         };
         #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
         return Self {
@@ -498,6 +539,7 @@ impl TargetTriple {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: Self::NATIVE_BITS,
         };
         #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
         return Self {
@@ -505,6 +547,7 @@ impl TargetTriple {
             vendor: "pc".into(),
             os: Os::Windows,
             abi: Abi::Msvc,
+            x86_bits: Self::NATIVE_BITS,
         };
         // 兜底: 用 unreachable!() 抑制 dead_code 警告, 只在支持的目标上编译
         #[allow(unreachable_code)]
@@ -515,6 +558,7 @@ impl TargetTriple {
                 vendor: "unknown".into(),
                 os: Os::Linux,
                 abi: Abi::Gnu,
+                x86_bits: Self::NATIVE_BITS,
             }
         }
     }
@@ -581,6 +625,7 @@ impl TargetTriple {
             vendor,
             os,
             abi,
+            x86_bits: Self::NATIVE_BITS,
         })
     }
 
@@ -851,6 +896,7 @@ fn is_known_m_option(opt: &str) -> bool {
             | "-mred-zone"
             | "-m64"
             | "-m32"
+            | "-m16"
             | "-mno-sse"
             | "-mno-sse2"
             | "-mno-sse3"
@@ -933,6 +979,32 @@ fn is_known_m_option(opt: &str) -> bool {
             | "-mno-dwarf2-asm"
             | "-mdwarf2-asm"
             | "-mno-tune"
+            // 以下五条是内核在 `CONFIG_CC_VERSION_TEXT="dcc …"` + `CONFIG_CC_IS_CLANG=y`
+            // 下经 `cc-option` 探测成功后必传的 **clang 专属**机器旗标。写进已知表而不是
+            // 继续刷 warning 的理由（每条都是「对本后端无可观察语义」，不是「懒得实现」）：
+            //   * `-mskip-rax-setup` —— clang 的优化提示（叶子函数省掉 `%eax` 清零），
+            //     dcc 的帧/返回值发射本来就按自己的规则走，没有这个开关的对应物；
+            //   * `-mindirect-branch-cs-prefix` —— clang 给它自己生成的蹦床调用套一个 `2e`
+            //     前缀当标记。本端不需要这个标记：objtool 的 `arch_is_retpoline`
+            //     （`tools/objtool/arch/x86/decode.c:912`）按**符号名前缀** `__x86_indirect_`
+            //     认站点并据此造 `.retpoline_sites`，内核 `patch_retpoline()` 也是从调用位移
+            //     解出目标蹦床，两处都不看段前缀；
+            //   * `-mretpoline`（**内联** retpoline，内核只给 vDSO 传这一形，见
+            //     `arch/x86/Makefile:21` 的 RETPOLINE_VDSO_CFLAGS）—— 内联那 16 字节
+            //     `call/pause;lfence;lea;push;ret` 序列本端**未实现**；vDSO 是独立链接的
+            //     共享对象，拿不到 `arch/x86/lib/retpoline.S` 里的外部蹦床，所以既不能按
+            //     外联形发（会留未定义符号），也不能当已实现。这笔账记在
+            //     `docs/kernel_build_guide.md` §5.0m，vDSO 里若出现 C 层间接分支就是它未修的现场。
+            // 注意 `-mretpoline-external-thunk` **不在**这张表里了：它有真语义（见下面那条
+            // 解析臂），把它留在「无可观察语义」的名单里正是 §5.0m 记的那条错判。
+            //   * `-mno-sse4a` —— 关掉一个 dcc 本来就不发的指令族（AMD SSE4a）。
+            // 未知 `-m` 依旧报 `unknown -m option ignored`，这里只是把已经逐个判定过
+            // 安全的那批固定下来，不再每坐 2858 个 TU 刷一遗（实测 localmodconfig 全树
+            // 这六条共刷出 17 148 行）。
+            | "-mskip-rax-setup"
+            | "-mretpoline"
+            | "-mindirect-branch-cs-prefix"
+            | "-mno-sse4a"
     ) {
         return true;
     }
@@ -952,6 +1024,14 @@ fn is_known_m_option(opt: &str) -> bool {
         "-mstack-protector-guard=",
         "-mstack-protector-guard-reg=",
         "-mstack-protector-guard-offset=",
+        // `-mstack-protector-guard-symbol=__ref_stack_chk_guard`：指定 canary 符号名。
+        // dcc 不实现栈保护插桩（内核那一侧的 `-fstack-protector-strong` 同样被接受但
+        // 不产生代码），所以指定哪个符号对产物没有可观察差别；带值的旗标按前缀固定。
+        "-mstack-protector-guard-symbol=",
+        // `-mstack-alignment=N`：clang 的栈对齐粒度。dcc 的帧布局与对齐由自己的
+        // `Target`/帧预算规则决出（内核实际传 8/4，都是比默认对齐更宽的要求），
+        // 接受但不改变发射，与历史行为一致。
+        "-mstack-alignment=",
         "-mbranch-protection=",
         "-msign-return-address=",
         "-msve-vector-bits=",
@@ -1337,10 +1417,36 @@ fn is_known_f_option(opt: &str) -> bool {
         "-fno-prebuilt-implicit-modules",
         "-fmodule-map-file=",
         "-fno-module-map-file=",
+        // `-fzero-init-padding-bits=all`（clang）：要结构体填充位也被零初始化。dcc 的
+        // `-ftrivial-auto-var-init=zero` 同样只是接受不插桩（见上），且 padding 位的内容
+        // 在 C 里本就未定，不产生可观察差别。内核实际传的只有 `=all`，按前缀固定。
+        "-fzero-init-padding-bits=",
+        // `-fplan9-extensions`：Plan 9 的嵌套 struct/匿名字段写法，内核仅在
+        // `tools/` 一处用（且那一处并不依赖该旗标才能解析），接受不实现不报警。
+        "-fplan9-extensions",
     ];
     known_prefixes
         .iter()
         .any(|p| !p.is_empty() && opt.starts_with(p))
+}
+
+/// `-x` 的语言名映射。分开写 (`-x c`) 与紧贴写 (`-xc`) 共用这一份，
+/// 避免两个入口的接受集合漂移（以前紧贴写直接报 unknown flag）。
+fn input_lang_from_name(name: &str) -> Result<InputLang, CliError> {
+    Ok(match name {
+        "assembler" => InputLang::Assembler,
+        "assembler-with-cpp" => InputLang::AssemblerWithCpp,
+        "c" | "c-header" => InputLang::C,
+        "c++" | "cpp" | "cxx" | "c++-header" | "c++-system-header" | "c++-user-header" => {
+            InputLang::Cpp
+        },
+        other => {
+            return Err(CliError::new(&format!(
+                "unsupported -x language: {}",
+                other
+            )))
+        },
+    })
 }
 
 pub fn parse(args: &[String]) -> Result<Config, CliError> {
@@ -1390,6 +1496,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut function_return_thunk_extern = false;
     let mut indirect_branch_thunk_extern = false;
     let mut patchable_function_entry = None;
+    let mut cf_protection = false;
     let mut debug_level: u8 = 0;
     let mut dwarf_version: u8 = 4;
     let mut lto_enabled = false;
@@ -1405,6 +1512,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
     let mut m32 = false;
+    let mut m16 = false;
     let mut jobs: Option<usize> = None; // -j<N>: 多文件并行编译线程数
     let mut relocatable_link = false; // 仅 -r 置位；-c 只产出 .o 不进入 link.rs
     let mut output_kind = LinkerOutputKind::Executable;
@@ -1457,6 +1565,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut stack_clash_protection = false;
     let mut strict_aliasing = true;
     let mut strict_overflow = true;
+    // -fpic/-fPIC/-fpie/-fPIE: 见 `Config::pic` 的注释（跳表降级的唯一消费者）
+    let mut pic = false;
     let mut short_wchar = false;
     let mut no_common = false;
     let mut incremental = false;
@@ -1560,7 +1670,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 output_kind = LinkerOutputKind::Shared;
                 built_link = true;
             }
-            "-fpic" | "-fPIC" => {}
+            // PIC: 只影响稠密 switch 跳表（表项是绝对地址）能不能用，见 `Config::pic`
+            "-fpic" | "-fPIC" => pic = true,
             "--pie" => {
                 output_kind = LinkerOutputKind::PIE;
                 built_link = true;
@@ -1936,6 +2047,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-g1" => debug_level = 1,
             "-g2" => debug_level = 2,
             "-g3" => debug_level = 3,
+            // `-ggdbN`：gcc 的语义是「调试级别 N，另加 gdb 扩展」，级别是有效信息，
+            // 扩展部分对本后端无意义。内核宿主工具那套（tools/build 与 objtool 的
+            // HOSTCFLAGS）写的是 `-ggdb3`，以前只列了 `-g`/`-g0..3`/`-gdwarf-[45]`，
+            // 于是 `-ggdb3` 直接报 unknown flag，宿主工具一步都编不动。
+            "-ggdb" => debug_level = 2,
+            "-ggdb0" => debug_level = 0,
+            "-ggdb1" => debug_level = 1,
+            "-ggdb2" => debug_level = 2,
+            "-ggdb3" => debug_level = 3,
             "-gdwarf-4" => {
                 debug_level = 2;
                 dwarf_version = 4;
@@ -2236,20 +2356,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 let lang = args
                     .get(i)
                     .ok_or_else(|| CliError::new("missing arg after -x"))?;
-                input_lang = match lang.as_str() {
-                    "assembler" => InputLang::Assembler,
-                    "assembler-with-cpp" => InputLang::AssemblerWithCpp,
-                    "c" | "c-header" => InputLang::C,
-                    "c++" | "cpp" | "cxx" | "c++-header" | "c++-system-header"
-                    | "c++-user-header" => InputLang::Cpp,
-                    other => {
-                        return Err(CliError::new(&format!(
-                            "unsupported -x language: {}",
-                            other
-                        )))
-                    }
-                };
-            }
+                input_lang = input_lang_from_name(lang)?;
+            },
+            // GCC 允许 `-x` 与语言名紧贴：`-xc` / `-xc++` / `-xassembler`。
+            // tools/objtool 的 xxhash 探针就是 `-xc -`（把 stdin 当 C 编译），旧实现
+            // 只认分开写，探针报「unknown flag: -xc」后被 `2>/dev/null` 吃掉，能力
+            // 被静默答成「不支持」（BUILD_KLP 因此丢掉）。
+            a if a.starts_with("-x") && a.len() > 2 => {
+                input_lang = input_lang_from_name(&a[2..])?;
+            },
             "--target" => {
                 i += 1;
                 target = TargetTriple::parse(
@@ -2468,8 +2583,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 }
             }
             // Linux 内核编译常用的 GCC flags - 忽略但接受
-            "-fno-pic"
-            | "-fno-delete-null-pointer-checks"
+            // `-fno-pic` 不在此列：它的语义是「不要用绝对地址表」，归 `pic` 管。
+            "-fno-pic" | "-fno-PIC" | "-fno-pie" | "-fno-PIE" => pic = false,
+            "-fno-delete-null-pointer-checks"
             | "-fno-merge-all-constants"
             | "-fno-omit-frame-pointer"
             | "-fno-reorder-blocks"
@@ -2611,6 +2727,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-mindirect-branch=thunk-extern" => {
                 indirect_branch_thunk_extern = true;
             }
+            // clang 的外联蹦床形（内核 `arch/x86/Makefile:20` 的 RETPOLINE_CFLAGS）：C 层面
+            // 每一条间接调用/跳转都必须发成 `call/jmp __x86_indirect_thunk_<reg>`，由内核的
+            // `patch_retpoline()` 在启动时按站点改回 `call *%reg`。
+            "-mretpoline-external-thunk" => {
+                indirect_branch_thunk_extern = true;
+            }
             "-mindirect-branch=keep" => {
                 indirect_branch_thunk_extern = false;
             }
@@ -2665,12 +2787,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-w" => {}
             // GCC -U 取消宏定义 - 接受但忽略（预处理阶段已处理）
             a if a.starts_with("-U") => {}
-            // -fcf-protection: 控制流保护 - 接受但忽略
-            "-fcf-protection"
-            | "-fcf-protection=none"
-            | "-fcf-protection=full"
-            | "-fcf-protection=branch"
-            | "-fcf-protection=return" => {}
+            // -fcf-protection: 控制流保护。`branch`/`full` 要在函数入口发 endbr64；
+            // `none`/`return` 不发（return 那档是 shadow stack，x86_64 上是别的指令）。
+            "-fcf-protection" | "-fcf-protection=full" | "-fcf-protection=branch" => {
+                cf_protection = true;
+            },
+            "-fcf-protection=none" | "-fcf-protection=return" => {
+                cf_protection = false;
+            }
             // -Wshadow=*: 接受但忽略
             a if a.starts_with("-Wshadow") => {}
             "-P" => {} // 抑制 #line 指令，DCC 预处理器本身就不输出它们
@@ -2679,6 +2803,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-W") => {}
             // -m* 机器选项
             "-m32" => m32 = true,
+            // -m16: 16 位实模式。语义在 `driver.rs` 落地：汇编输入走 `as --32`（GAS 无
+            // `-m16`，代码宽度由源里的 `.code16` 决定），C 输入硬错 E0319。
+            "-m16" => m16 = true,
             // -mpreferred-stack-boundary=N: 接受任意值, =2 (4 字节) 为
             // 内核默认, 其他值 DCC 不调整栈对齐, 发警告
             a if a.starts_with("-mpreferred-stack-boundary=") => {
@@ -2862,26 +2989,25 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-dump-ast" => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
-            // -print-file-name=<file>: GCC 用于查找库/插件/头文件路径
+            // -print-file-name=<file>: GCC 用于查找库/插件/头文件路径。
+            //
+            // `include` 不再拉 gcc 去问：那会让 dcc 的探针变成 gcc 的探针（gcc 被
+            // PATH 陷阱时静默答错），也与「全链不起 gcc」相抵。直接用与预处理阶段
+            // 同一份发现逻辑（`preproc::host_gcc_include_dirs`）。
             a if a.starts_with("-print-file-name=") => {
                 let filename = &a[17..];
-                // 对于 include, 返回 GCC 的 include 目录
                 if filename == "include" {
-                    if let Ok(out) = std::process::Command::new("gcc")
-                        .arg("-print-file-name=include")
-                        .output()
-                    {
-                        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        println!("{}", path);
-                    } else {
-                        println!("/usr/lib/gcc/x86_64-linux-gnu/include");
+                    match crate::preproc::host_gcc_include_dirs().first() {
+                        Some(p) => println!("{}", p.display()),
+                        // 与 gcc 同口径：找不到时原样回显 "include"
+                        None => println!("include"),
                     }
                 } else {
                     // 其他文件: 返回文件名本身 (表示找不到)
                     println!("{}", filename);
                 }
                 std::process::exit(0);
-            }
+            },
             // -print-search-dirs: 输出搜索目录
             "-print-search-dirs" => {
                 println!();
@@ -3033,6 +3159,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         return Err(CliError::new("-j must be >= 1"));
     }
 
+    // `-m16`/`-m32` 落成 triple 上的 x86 宽度：预定义宏、指针宽度全按 32 位口径，
+    // 与 gcc `-m32` 对齐（`__x86_64__` 一族必须消失，否则 `#ifndef __x86_64__`
+    // 圈住的 32 位专用汇编会被裁掉）。C 输入仍由 driver 硬错 E0319。
+    if (m32 || m16) && matches!(target.arch, Arch::X86_64) {
+        target.x86_bits = 32;
+    }
+
     // -E 模式允许没有输入文件 (从 stdin 读取)
     if !preprocess_only {
         if inputs.is_empty() && !link_mode {
@@ -3165,6 +3298,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             function_return_thunk_extern,
             indirect_branch_thunk_extern,
             patchable_function_entry,
+            cf_protection,
             debug_level,
             dwarf_version,
             lto_enabled,
@@ -3177,6 +3311,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             input_lang,
             as_options,
             m32,
+            m16,
             parallel_codegen,
             jobs,
             permissive,
@@ -3222,6 +3357,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             stack_clash_protection,
             strict_aliasing,
             strict_overflow,
+            pic,
             short_wchar,
             no_common,
             incremental,
@@ -3297,6 +3433,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             function_return_thunk_extern,
             indirect_branch_thunk_extern,
             patchable_function_entry,
+            cf_protection,
             debug_level,
             dwarf_version,
             lto_enabled,
@@ -3309,6 +3446,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             input_lang,
             as_options,
             m32,
+            m16,
             parallel_codegen,
             jobs,
             permissive,
@@ -3354,6 +3492,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             stack_clash_protection,
             strict_aliasing,
             strict_overflow,
+            pic,
             short_wchar,
             no_common,
             incremental,
@@ -3665,6 +3804,7 @@ mod tests {
         ];
         let cfg = parse(&args).expect("-c -fPIC should parse");
         assert!(cfg.relocatable);
+        assert!(cfg.pic, "-fPIC 必须记进 cfg.pic（switch 跳表闸门）");
         assert!(!cfg.built_link);
         assert!(!cfg.link_mode);
     }

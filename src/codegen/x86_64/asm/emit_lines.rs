@@ -847,6 +847,21 @@ impl Codegen {
             "wbinvd" => {
                 self.emit_insn_expect(&Insn::raw(&[0x0F, 0x09]));
             },
+            // SGX 的三条 leaf 入口指令（内核 `arch/x86/kernel/cpu/sgx/encls.h` 发
+            // `asm volatile("ENCLS" : "=a"(...) : "0"(leaf), ...)`）：叶子号在 %eax 里，
+            // 指令本身无操作数。字节串拿 GAS 与 gcc 的产物对拍得出：
+            //   encls 0F 01 CF / enclu 0F 01 D7 / enclv 0F 01 C0。
+            // （先按记忆写成 0F 01 EE/EC/F0 时被对拍直接拒了——那是 RDPKRU 一族，
+            // objdump 把 `0f 01 ee` 标成 rdpkru 就是现场证据。指令编码表一律以工具链为准。）
+            "encls" => {
+                self.emit_insn_expect(&Insn::raw(&[0x0F, 0x01, 0xCF]));
+            },
+            "enclu" => {
+                self.emit_insn_expect(&Insn::raw(&[0x0F, 0x01, 0xD7]));
+            },
+            "enclv" => {
+                self.emit_insn_expect(&Insn::raw(&[0x0F, 0x01, 0xC0]));
+            },
             "invd" => {
                 self.emit_insn_expect(&Insn::raw(&[0x0F, 0x08]));
             },
@@ -1074,6 +1089,8 @@ impl Codegen {
             "movdqu" if ops.len() == 2 => {
                 self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0xF3, 0x6F, 0x7F)
             },
+            // SSE4.1 流式读：`66 0F 38 2A /r`（三字节 opcode，不走二字节表）。
+            "movntdqa" if ops.len() == 2 => self.emit_asm_movntdqa(&ops[0], &ops[1]),
             "movhlps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x12),
             "movlhps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x16),
             "movhps" if ops.len() == 2 => {
@@ -3648,7 +3665,12 @@ impl Codegen {
             self.asm_insn_log.push((__step5_start, rec));
         }
     }
-    fn emit_asm_line(&mut self, line: &str) {
+    /// 发射一行汇编（指令或已在本模块处理过的伪指令）。
+    ///
+    /// 可见性要跟同模块的 `open/close_exec_pushsection` 一致：数据 pushsection 里出现
+    /// 指令时，需要从 `elf/output.rs` 那边调过来（见
+    /// `Codegen::encode_insn_into_data_pushsection`）。
+    pub(in crate::codegen::x86_64) fn emit_asm_line(&mut self, line: &str) {
         let line = Self::unescape_asm_template(AsmLocalLabels::strip_asm_comment(line).trim());
         if line.is_empty() {
             return;
@@ -3737,6 +3759,13 @@ impl Codegen {
             }
             s
         };
+        // GAS 的助记符**大小写不敏感**，而下面的派发表按小写写键。实测内核
+        // `arch/x86/kernel/cpu/sgx/encls.h` 写的是 `asm volatile("ENCLS" ...)`，
+        // `arch/x86/mm/nx.h` 一类地方写 `"WBINVD"`，派发拿原文比就是「不认识该指令」。
+        // 只把**派发用的**名字折小写；上面 `gas_line_full` 仍然带用户原文，
+        // 因为 -S 的输出要能还原写法。
+        let mnemonic_lc = mnemonic.to_ascii_lowercase();
+        let mnemonic = mnemonic_lc.as_str();
         // 前缀之后无指令: 如单独一行的 "repe" (前缀已发射, 无指令需要编码)
         if mnemonic.is_empty() {
             return;
@@ -3799,7 +3828,10 @@ impl Codegen {
         let operands: Vec<&str> = if operands_str.is_empty() {
             vec![]
         } else {
-            operands_str.split(',').collect()
+            // 必须是括号 aware 的那份切分（`split_asm_args`）：`mov (%rcx,%rdx,4), %rax`
+            // 里操作数本身就带逗号，按裸 `split(',')` 切会把一条指令拆成四条。
+            // 与数据伪指令共用同一份实现，不再另写一份「谁是分隔符」的定义。
+            Self::split_asm_args(&operands_str)
         };
         let ops: Vec<AsmOperand> = operands
             .iter()
@@ -4049,10 +4081,19 @@ impl Codegen {
                         is_strings,
                         entsize,
                     );
+                    // `.previous` 要回的是「切换前所在的那个节」，不是即将进入的新节。
+                    // 以前这里把**新节**同时压进两条栈，`.previous` 再把它弹出来又原样压回去
+                    // ⇒ `pushsection_stack` 永远留着那个早已退出的节，之后每条 asm 里的数字标号
+                    // 都按那个数据节的坐标登记（实测 `mm/mm_init.o`：`EXPORT_SYMBOL` 的
+                    // `.section ".export_symbol","a"` + `.previous` 之后，5 个
+                    // `ANNOTATE_REACHABLE(1b)` 的标号全被记成 `.export_symbol` + 0x80，链接期
+                    // objtool 报 `bad .discard.annotate_insn entry: 0 of type 8`）。
+                    // 栈空代表「在代码节里」，用 `usize::MAX` 当哨兵存进 `section_stack`。
+                    let prev_sec = self.pushsection_stack.last().copied().unwrap_or(usize::MAX);
                     if is_exec {
                         self.open_exec_pushsection(sec_idx);
                     }
-                    self.section_stack.push(sec_idx);
+                    self.section_stack.push(prev_sec);
                     self.pushsection_stack.push(sec_idx);
                     self.section_active = true;
                     continue;
@@ -4061,7 +4102,7 @@ impl Codegen {
             // .previous: 回到 .section 切换前的节
             if trimmed.starts_with(".previous") {
                 if self.section_active {
-                    // 当前上下文由 .section 创建, 需关闭并从 section_stack 恢复
+                    // 退出 `.section` 带来的当前节（可执行区间要先把这段代码关账）
                     if let Some(&top_sec) = self.pushsection_stack.last() {
                         let top_is_exec =
                             self.extra_sections[top_sec].flags & shared_elf::SHF_EXECINSTR != 0;
@@ -4070,17 +4111,21 @@ impl Codegen {
                         }
                         self.pushsection_stack.pop();
                     }
-                    // 从 section_stack 恢复上一节
-                    if let Some(prev_sec) = self.section_stack.pop() {
-                        let prev_is_exec =
-                            self.extra_sections[prev_sec].flags & shared_elf::SHF_EXECINSTR != 0;
-                        if prev_is_exec {
-                            self.open_exec_pushsection(prev_sec);
-                        }
-                        self.pushsection_stack.push(prev_sec);
-                        self.section_active = true;
-                    } else {
-                        self.section_active = false;
+                    // 回到切换前那个节：`usize::MAX` 是「当时在代码节里」的哨兵，
+                    // 栈空 = 本条 `.previous` 没有配对的 `.section`（保持原有保守行为）。
+                    match self.section_stack.pop() {
+                        Some(prev) if prev != usize::MAX => {
+                            let prev_is_exec =
+                                self.extra_sections[prev].flags & shared_elf::SHF_EXECINSTR != 0;
+                            if prev_is_exec {
+                                self.open_exec_pushsection(prev);
+                            }
+                            self.pushsection_stack.push(prev);
+                            self.section_active = true;
+                        },
+                        _ => {
+                            self.section_active = false;
+                        },
                     }
                 }
                 continue;
@@ -4236,6 +4281,7 @@ impl Codegen {
                     }
                     let subbed = locals.substitute(trimmed, i);
                     self.current_asm_line = i + 1;
+                    self.current_asm_text = subbed.clone();
                     if Self::asm_has_unresolved_operand(&subbed) {
                         self.warn_unresolved_asm_operand(&subbed, i + 1);
                     } else if subbed.trim().starts_with('.') {
@@ -4321,6 +4367,7 @@ impl Codegen {
             }
             let subbed = locals.substitute(trimmed, i);
             self.current_asm_line = i + 1;
+            self.current_asm_text = subbed.clone();
             self.emit_asm_line(&subbed);
         }
         // Resolve deferred pushsection fixups (forward label references)

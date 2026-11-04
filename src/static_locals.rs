@@ -208,36 +208,44 @@ fn collect_from_block(
 ) {
     for item in items {
         match item {
-            BlockItem::Decl(Decl::Var(v)) if v.is_static => {
-                let mangled = format!(".Lsl{}.{}.{}", *counter, func_name, v.name.name);
-                let order = *counter;
-                *counter += 1;
-                let sz = v.ty.size().max(1);
-                let align = v.alignment.unwrap_or(v.ty.align()).max(1);
-                // needs_runtime_init 由后端注册阶段根据实际初始化结果回填,
-                // 分析 pass 保守设为 false (假设可以静态初始化).
-                let info = StaticLocalInfo {
-                    source_name: v.name.name.clone(),
-                    mangled_name: mangled.clone(),
-                    ty: v.ty.clone(),
-                    init: v.init.clone(),
-                    alignment: align,
-                    size: sz,
-                    owner_func: func_name.to_string(),
-                    span_line: v.name.span.line,
-                    span_col: v.name.span.col,
-                    order,
-                    needs_runtime_init: false,
-                };
-                map.by_function
-                    .entry(func_name.to_string())
-                    .or_default()
-                    .push(info.clone());
-                map.by_mangled.insert(mangled.clone(), info);
-                map.rename_map
-                    .entry(func_name.to_string())
-                    .or_default()
-                    .push((v.name.name.clone(), mangled));
+            BlockItem::Decl(Decl::Var(v)) => {
+                if v.is_static {
+                    let mangled = format!(".Lsl{}.{}.{}", *counter, func_name, v.name.name);
+                    let order = *counter;
+                    *counter += 1;
+                    let sz = v.ty.size().max(1);
+                    let align = v.alignment.unwrap_or(v.ty.align()).max(1);
+                    // needs_runtime_init 由后端注册阶段根据实际初始化结果回填,
+                    // 分析 pass 保守设为 false (假设可以静态初始化).
+                    let info = StaticLocalInfo {
+                        source_name: v.name.name.clone(),
+                        mangled_name: mangled.clone(),
+                        ty: v.ty.clone(),
+                        init: v.init.clone(),
+                        alignment: align,
+                        size: sz,
+                        owner_func: func_name.to_string(),
+                        span_line: v.name.span.line,
+                        span_col: v.name.span.col,
+                        order,
+                        needs_runtime_init: false,
+                    };
+                    map.by_function
+                        .entry(func_name.to_string())
+                        .or_default()
+                        .push(info.clone());
+                    map.by_mangled.insert(mangled.clone(), info);
+                    map.rename_map
+                        .entry(func_name.to_string())
+                        .or_default()
+                        .push((v.name.name.clone(), mangled));
+                }
+                // 初始化式里也可能藏语句表达式 (`static int x = ({ … });`),
+                // 静态与非静态都要下探 —— 后者里声明的 static 同样是本函数的
+                // static local。
+                if let Some(init) = &v.init {
+                    collect_from_expr(map, func_name, init, counter);
+                }
             },
             BlockItem::Decl(_) => {},
             BlockItem::Stmt(s) => collect_from_stmt(map, func_name, s, counter),
@@ -245,31 +253,88 @@ fn collect_from_block(
     }
 }
 
+/// 扫描表达式里出现的语句表达式, 把其中的块当作普通块继续收集。
+///
+/// 为什么必须走这一层: `PATTERNS()` 那类宏（内核 `scripts/mod/modpost.c`）把
+/// `static const char *const patterns[] = {__VA_ARGS__, NULL}` 放在 `({ … })` 里,
+/// 靠 `match()` 逐项比对到哨兵为止。分析 pass 若只走语句树, 这些 `static` 就
+/// 登记不上, 发射端把它们当自动变量处理（`Expr::StmtExpr` 分支的
+/// `is_static_local` 判断因此恒假）⇒ 数组内容串味、`-O2` 下越界读崩溃
+/// （实测: dcc 编出的 `scripts/mod/modpost` 在 `fnmatch()` 里读 `0xffffffffffffffff`）。
+fn collect_from_expr(map: &mut StaticLocalMap, func_name: &str, e: &Expr, counter: &mut u32) {
+    // 先收项列表再递归: 回调期间不能再可变借用 map。
+    let mut nested: Vec<&[BlockItem]> = Vec::new();
+    crate::opt::visit_expr_stmtexprs(e, &mut |items| nested.push(items));
+    for items in nested {
+        collect_from_block(map, func_name, items, counter);
+    }
+}
+
 /// 递归扫描语句, 收集 static local.
 fn collect_from_stmt(map: &mut StaticLocalMap, func_name: &str, s: &Stmt, counter: &mut u32) {
     match s {
+        Stmt::Return { val: Some(e), .. } => collect_from_expr(map, func_name, e, counter),
+        Stmt::Return { val: None, .. } => {},
+        Stmt::Expr { e, .. } => collect_from_expr(map, func_name, e, counter),
         Stmt::Block { b, .. } => collect_from_block(map, func_name, &b.items, counter),
-        Stmt::If { then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            collect_from_expr(map, func_name, cond, counter);
             collect_from_stmt(map, func_name, then_, counter);
             if let Some(e) = else_ {
                 collect_from_stmt(map, func_name, e, counter);
             }
         },
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+        Stmt::While { cond, body, .. } => {
+            collect_from_expr(map, func_name, cond, counter);
             collect_from_stmt(map, func_name, body, counter);
         },
-        Stmt::For { init, body, .. } => {
+        Stmt::Do { body, cond, .. } => {
+            collect_from_stmt(map, func_name, body, counter);
+            collect_from_expr(map, func_name, cond, counter);
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(init_stmt) = init {
                 collect_from_stmt(map, func_name, init_stmt, counter);
             }
+            if let Some(e) = cond {
+                collect_from_expr(map, func_name, e, counter);
+            }
+            if let Some(e) = step {
+                collect_from_expr(map, func_name, e, counter);
+            }
             collect_from_stmt(map, func_name, body, counter);
         },
-        Stmt::Switch { cases, .. } => {
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
+            collect_from_expr(map, func_name, expr, counter);
+            collect_from_block(map, func_name, prelude, counter);
             for case in cases {
                 collect_from_block(map, func_name, &case.body.items, counter);
             }
         },
         Stmt::Label { stmt, .. } => collect_from_stmt(map, func_name, stmt, counter),
+        Stmt::GotoIndirect { expr, .. } => collect_from_expr(map, func_name, expr, counter),
+        Stmt::AsmGoto { outputs, inputs, .. } => {
+            for e in outputs.iter().chain(inputs.iter()) {
+                collect_from_expr(map, func_name, e, counter);
+            }
+        },
+        Stmt::Invoke { call, .. } => collect_from_stmt(map, func_name, call, counter),
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
+            collect_from_expr(map, func_name, object, counter);
+            collect_from_expr(map, func_name, selector, counter);
+        },
         _ => {},
     }
 }

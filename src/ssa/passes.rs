@@ -2550,47 +2550,105 @@ pub fn cross_function_dce_with_roots(
     extra_roots: &[String],
 ) -> bool {
     let func_names: HashSet<String> = funcs.iter().map(|f| f.name.name.clone()).collect();
-    let mut callees: HashMap<String, Vec<String>> = HashMap::new();
-    let mut address_taken: HashSet<String> = HashSet::new();
+    // 每个函数的引用分开存（谁调了谁 / 谁的地址被取），而不是汇成一张全局表。
+    //
+    // **同名条目必须合并边表，不能 `insert` 覆盖**：一个 TU 里同一个名字可以合法地有两条
+    // `FuncDecl` —— 内核 `include/linux/bpf.h:3873` 有 `bool btf_id_set_contains(…);`（非
+    // static 声明，`body = None`、`is_extern` ⇒ 根），`include/linux/btf.h:514` 又有
+    // `static inline bool btf_id_set_contains(…)`（定义，体里把 `btf_id_cmp_func` 的**地址**
+    // 交给 `bsearch`）。gcc 接受这个方向（只有「static 接在非 static 之后」才报错）。
+    // 旧写法按名字 `insert`，后写的那条把前一条的边表整份盖掉 ⇒ 根名字下面挂着的是**空边表**，
+    // `btf_id_cmp_func` 被当不可达删掉，而它的定义体照样发射、`lea` 重定位照发 ——
+    // 链接期就是全树 231 处 `undefined reference to 'btf_id_cmp_func'`。合并成并集后，
+    // 「从可达集合出发的闭包」这条不变式才真正成立（不会再出现可达函数引用已删名字）。
+    let mut callee_edges: HashMap<String, Vec<String>> = HashMap::new();
+    let mut addr_edges: HashMap<String, HashSet<String>> = HashMap::new();
     for f in funcs.iter() {
         let (calls, addrs) = collect_func_refs(f, &func_names);
-        callees.insert(f.name.name.clone(), calls);
-        address_taken.extend(addrs);
+        callee_edges.entry(f.name.name.clone()).or_default().extend(calls);
+        addr_edges.entry(f.name.name.clone()).or_default().extend(addrs);
+    }
+
+    // 排障用：`DCC_DCE_TRACE=<函数名>` 打出「谁把这个 static 函数钉成了根」。
+    // 症状是「明明全内联了却还发射了函数体」，能直接区分「有残留调用点」与
+    // 「只是地址被取走」，否则只能靠猜。
+    if let Some(who) = std::env::var_os("DCC_DCE_TRACE") {
+        let who = who.to_string_lossy().into_owned();
+        for (caller, cs) in &callee_edges {
+            if cs.iter().any(|c| *c == who) {
+                eprintln!("DCE-REF| {caller} -> {who}");
+            }
+        }
+        for (caller, addrs) in &addr_edges {
+            if addrs.contains(&who) {
+                eprintln!("DCE-ADDR| {caller} 取了 {who} 的地址");
+            }
+        }
+        for f in funcs.iter() {
+            if is_dce_root(f, keep_extern) {
+                eprintln!("DCE-ROOT| {}", f.name.name);
+            }
+        }
+    }
+
+    // **迭代到不动点**：根集与可达边都只能来自「已经判定可达」的调用者。
+    //
+    // 旧做法只跑一轮，而且把两样东西当全局集合用：
+    //   * `address_taken`：只要**任意**函数（包括接下来要被删的死函数）里出现过同名
+    //     `Expr::Ident` 就被当作「地址被取」，然下方又把它当根 ⇒ 一个死函数里的名字
+    //     把其实没人用的助手永久钉活（连「只有自己调用自己」的递归簇也整体存活）；
+    //   * `callees` 的边不区分调用者是否可达，删完一轮不重算。
+    // 两者合起来的结果就是「拼接完全了但外联副本还在」：那些副本里的
+    // `switch (形参)` 永远折不动，带着「编译期尺寸检查」陷阱函数进入产物，
+    // 最终链接报 `undefined reference to '__cmpxchg_wrong_size'`。
+    // 现在改成：每一轮只用上轮可达集的边重算根与闭包，集不等就继续。
+    // 「有 static 定义」的名字集合：给下面的根判定用（见 `is_dce_root_hard` 的注释）。
+    let static_defs: HashSet<&str> = funcs
+        .iter()
+        .filter(|f| f.is_static && f.body.is_some())
+        .map(|f| f.name.name.as_str())
+        .collect();
+    let mut roots: HashSet<String> = HashSet::new();
+    for f in funcs.iter() {
+        if !is_dce_root(f, keep_extern) {
+            continue;
+        }
+        // 裸声明（`body.is_none()`）不给同名 static 定义续命：C 里这两种 decl 可以共存，
+        // 名字的链接归属归定义那一侧，发不发射只看有没有人真用它。
+        if f.body.is_none() && !is_dce_root_hard(f) && static_defs.contains(f.name.name.as_str())
+        {
+            continue;
+        }
+        roots.insert(f.name.name.clone());
+    }
+    for root in extra_roots {
+        if func_names.contains(root) {
+            roots.insert(root.clone());
+        }
     }
 
     let mut reachable: HashSet<String> = HashSet::new();
-    let mut stack: Vec<String> = Vec::new();
-    for f in funcs.iter() {
-        if (keep_extern && !f.is_static)
-            || f.name.name == "main"
-            || f.is_extern
-            || f.is_used_attr
-            || f.is_retain
-            || f.is_constructor
-            || f.is_destructor
-            || address_taken.contains(&f.name.name)
-        {
-            stack.push(f.name.name.clone());
-        }
-    }
-
-    for root in extra_roots {
-        if func_names.contains(root) {
-            stack.push(root.clone());
-        }
-    }
-
-    while let Some(name) = stack.pop() {
-        if !reachable.insert(name.clone()) {
-            continue;
-        }
-        if let Some(cs) = callees.get(&name) {
-            for c in cs {
-                if !reachable.contains(c) {
-                    stack.push(c.clone());
+    loop {
+        let mut live: HashSet<String> = roots.clone();
+        let mut stack: Vec<String> = roots.iter().cloned().collect();
+        while let Some(name) = stack.pop() {
+            let mut edges: Vec<String> = Vec::new();
+            if let Some(cs) = callee_edges.get(&name) {
+                edges.extend(cs.iter().cloned());
+            }
+            if let Some(as_) = addr_edges.get(&name) {
+                edges.extend(as_.iter().cloned());
+            }
+            for c in edges {
+                if live.insert(c.clone()) {
+                    stack.push(c);
                 }
             }
         }
+        if live == reachable {
+            break;
+        }
+        reachable = live;
     }
 
     let before = funcs.len();
@@ -2598,12 +2656,64 @@ pub fn cross_function_dce_with_roots(
         if !f.is_static {
             return true;
         }
-        if f.is_used_attr || f.is_retain || f.is_constructor || f.is_destructor {
+        if is_dce_root(f, keep_extern) || reachable.contains(&f.name.name) {
             return true;
         }
-        reachable.contains(&f.name.name)
+        false
     });
     funcs.len() != before
+}
+
+/// 「无论如何都得留着」的硬根。除了传统的非 static/main/extern/`__used`/`retain`/ctor/dtor，
+/// 还必须包含下面这些「C 层没人调用是常态」的形状——误删它们的代价远比少删一点大：
+///   * `section.is_some()`：`.init.text`/`.noinstr.text`/`.entry.text`/`.cpuidle.text`/`.head.text`
+///     一类的函数是被链接器脚本按**节**收的（initcall 表、IDT entry、`__noinstr` 隔离区），
+///     函数名在 C 层根本不会有人调用；
+///   * `alias_name.is_some()`：`__attribute__((alias/copy))` 的**持有者**自己。旧版只把 alias
+///     的目标当根（`opt.rs` 里做了），持有者却因「没人直接调用」被删 ⇒ `.set` 消失、
+///     弱桩不可见；
+///   * `ifunc_resolver.is_some()` / `!target_clones.is_empty()`：这两个字段本身就代表
+///     「产物里有对外可见的实体」（IFUNC 基名、CPUID 变体族）；
+///   * `is_naked`：体是纯 asm，符号常被 asm 文本/异常表指；
+///   * `is_nested`：嵌套函数由父函数的发射流程带出，不能按顶层名字算可达。
+pub fn is_dce_root(f: &FuncDecl, keep_extern: bool) -> bool {
+    (keep_extern && !f.is_static) || f.is_extern || is_dce_root_hard(f)
+}
+
+/// [`is_dce_root`] 里与「外部链接/声明」无关的那一半：这些形状即使无人调用也必须留。
+///
+/// 拆出来是因为 `extern` 那一半**不能无条件算根**：头文件里
+/// `void kvm_arch_vcpu_blocking(struct kvm_vcpu *);` 是裸声明，
+/// `arch/x86/include/asm/kvm_host.h` 又给了同名 `static inline` 定义。声明本身
+/// 从没被调用，gcc 就不发射任何体；dcc 若把声明当根，可达集里就有这个名字，
+/// 同名的 static inline 副本随之发射，副本里的
+/// `static_call_cond(kvm_x86_vcpu_blocking)` 于是把
+/// `__SCK__/__SCT__kvm_x86_vcpu_blocking` 拖进链接（`CONFIG_KVM=n` 时全树无定义）。
+/// 实测 `arch/x86/events/intel/core.o`：只因 `#include <linux/kvm_host.h>`，多出 4 条。
+pub fn is_dce_root_hard(f: &FuncDecl) -> bool {
+    f.name.name == "main"
+        || f.is_used_attr
+        || f.is_retain
+        || f.is_constructor
+        || f.is_destructor
+        // 【section 只护「非 inline」】显式 section 当根，是为了那些**表驱动的引用**：
+        // `__initcall(fn)` 展开成一个 `.initcall6.init` 段里的变量初始化器（那条由
+        // `collect_global_func_roots` 从 Var 初值收回），链接脚本里按名字找的入口也靠它。
+        //
+        // 但 `static inline` + section **不是**这张表的一员：内核里 `__init` 就是
+        // `__section(".init.text")`，于是头文件里每一个 `static inline __init` 助手都
+        // 被无条件当根——即使它的调用点全在被 `#ifdef` 关掉的代码里。后果比「多一份体」
+        // 严重：副本照样发射，副本里对外部符号的引用（`xbc_node_get_child` 这类只在
+        // `CONFIG_BOOT_CONFIG=y` 才存在的函数）就成了链接期 undefined reference。
+        // 实测 `init/main.o`：`CONFIG_BOOT_CONFIG` 未开，却因 `include/linux/bootconfig.h`
+        // 里那一串 `static inline __init xbc_*` 发了 5 条引用；gcc 侧 0 条（未引用即不发射）。
+        // `always_inline` 同判：它的「必须展开」是调用点的语义，不引用就没有调用点。
+        || (f.section.is_some() && !f.is_inline && !f.is_always_inline)
+        || f.alias_name.is_some()
+        || f.ifunc_resolver.is_some()
+        || !f.target_clones.is_empty()
+        || f.is_naked
+        || f.is_nested
 }
 
 pub fn collect_func_refs(
@@ -2654,6 +2764,23 @@ fn walk_items_refs(
                 if let Some(init) = &v.init {
                     walk_expr_refs(init, func_names, calls, address_taken);
                 }
+                // **VLA 的尺寸表达式**也是调用点，而且只在 codegen 里发码：内核
+                // `include/linux/overflow.h:479` 的 `__DEFINE_FLEX()` 就是
+                // `u8 bytes[struct_size_t(type, member, count)]`（= `size_add(sizeof,
+                // size_mul(count, sizeof))`）。那里 `count` 是常量，但尺寸表达式里的 `Call`
+                // 不进常量求值（bound 在 sema 阶段就算，早于内联/常量折叠）⇒ 类型被当成
+                // VLA、codegen 真的发出 `call size_mul`；而这份 walker 以前只看 `v.init`，
+                // 看不到 bound 里的调用 ⇒ `size_mul`/`size_add` 被 M16 跨函数 DCE 当不可达
+                // 删掉，链接报 `undefined reference to 'size_mul'`（实测 `fs/notify/fdinfo.o`；
+                // 五秒夹具：`unsigned char buf[mul_sz(3,4)];`）。
+                // VLA bound 的调用收集必须下探结构体字段（`__DEFINE_FLEX` 的匿名 union
+                // 场景），而内核类型图是 DAG 不是树：`struct list_head` 这类枢纽被成千上万个
+                // 结构体引用，`Ptr` 层又无条件下探 ⇒ 同一个 `Arc<Vec<Field>>` 会被按**路径数**
+                // 重复展开，规模是指数级。实测 `net/ipv4/tcp_input.o` 因此 25 分钟不出产物，
+                // perf/gdb 一直停在 `walk_type_refs` 的 Struct 分支上。一次展开内按字段表
+                // 地址去重：同一份字段表里的 VLA bound 只会被收一遍，收集本身是幂等的。
+                let mut ty_seen: HashSet<usize> = HashSet::new();
+                walk_type_refs(&v.ty, func_names, calls, address_taken, &mut ty_seen);
                 // `__attribute__((cleanup(f)))` 是一个**调用**，只是不写成 `Expr::Call`。
                 // 不记进调用图，DCE 就会把只被 cleanup 用的 static 函数删掉：实测
                 // `-O2` 链接报 `undefined reference to 'hit_cleanup'`，而 `-O0/-O1` 正常。
@@ -2669,6 +2796,55 @@ fn walk_items_refs(
                 | Decl::GlobalAsm { .. },
             ) => {},
         }
+    }
+}
+
+/// 类型里携带运行时表达式的唯一位置是 `Array(_, ArraySize::Var(e))`（VLA 尺寸）。
+/// 只下探那一条：`Struct`/`Union` 的字段表已经拍成 `Arc<Vec<Field>>`，字段里的 bound
+/// 在布局时就已经被用掉，codegen 不会再求值它；而 `Ptr`/`Complex`/`Atomic` 是包裹层，
+/// 必须递归到底才能找到 VLA。
+fn walk_type_refs(
+    ty: &crate::ast::Type,
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+    seen: &mut HashSet<usize>,
+) {
+    use crate::ast::{ArraySize, Type};
+    match ty {
+        Type::Array(inner, ArraySize::Var(e)) => {
+            walk_expr_refs(e, func_names, calls, address_taken);
+            walk_type_refs(&inner.base, func_names, calls, address_taken, seen);
+        },
+        Type::Array(inner, ArraySize::Const(_)) => {
+            walk_type_refs(&inner.base, func_names, calls, address_taken, seen)
+        },
+        Type::Ptr(inner)
+        | Type::Complex(inner)
+        | Type::Imaginary(inner)
+        | Type::Atomic(inner) => {
+            walk_type_refs(&inner.base, func_names, calls, address_taken, seen)
+        },
+        // **结构/联合的字段类型也要下探**：内核 `__DEFINE_FLEX()` 展开的是
+        // `union { u8 bytes[struct_size_t(...)]; type obj; } name_u;`，那个带 VLA bound 的
+        // 数组坐的是**匿名联合的字段**，不在 `VarDecl.ty` 的直线上。只走包裹层就漏掉它
+        // （实测 `fs/notify/fdinfo.o` 的 `size_mul`/`size_add` 仍然被删）。
+        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+            // 同一份字段表只展开一次（见调用点处 `ty_seen` 的理由）。
+            if !seen.insert(std::sync::Arc::as_ptr(fields) as usize) {
+                return;
+            }
+            for f in fields.iter() {
+                walk_type_refs(&f.ty, func_names, calls, address_taken, seen);
+            }
+        },
+        Type::Func(ret, params) => {
+            walk_type_refs(&ret.base, func_names, calls, address_taken, seen);
+            for p in params {
+                walk_type_refs(&p.base, func_names, calls, address_taken, seen);
+            }
+        },
+        _ => {},
     }
 }
 
@@ -3504,6 +3680,7 @@ pub fn gvn(func: &mut Function) -> bool {
                     continue;
                 }
                 let local_only = fp_sensitive
+                    || inst_reads_symbol_value(&bbm.insts[idx].kind)
                     || matches!(&key, ValKey::Load(_) | ValKey::Member(..) | ValKey::Index(..));
                 let table = if local_only { &mut local } else { &mut cur };
                 let hit = table.get(&key).cloned();
@@ -3710,6 +3887,43 @@ fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
             Some(ValKey::Index(operand_identity(arr), operand_identity(idx), type_tag_of(ty)?))
         },
         _ => None,
+    }
+}
+
+/// 这条**可编号**的指令操作数里，有没有「读文件作用域对象的值」。
+///
+/// SSA 构建把「文件作用域对象作右值」降成 `Operand::SymAddr(名, 对象类型)`
+/// （`ssa/build.rs` 的「全局变量 -> SymAddr 占位」），重建时再变回 `Expr::Ident`，
+/// 由后端发一次**内存读**。可 IR 里它长得和一个纯值一模一样 —— 这一层只看见
+/// `Bin{Add, SymAddr(g), Int(0)}`，于是值编号把它归入可跳块复用的纯运算，
+/// 跨过中间的写与调用：
+///
+/// ```c
+/// g_dst = 1234;
+/// a = g_dst;        /* Bin{Add, #sym g_dst, #i0} */
+/// g_dst = 0;        /* Store, 不进任何名字链 */
+/// f();              /* Call */
+/// b = g_dst;        /* 同一个键 ⇒ 被归一成 a 的值 */
+/// ```
+/// 实测 `-O2`/`-O3` 下 `b` 被归一到 `a`（打出 `b=1234`，gcc 是 `b=0`）；
+/// `DCC_SSA_OFF=gvn` 能避开。所以带符号读的键必须与 `Load`/`Member`/`Index`
+/// 同等对待：只在块内、且中途无写/调用/汇编时复用。
+///
+/// 数组与函数类型例外：那个类型作右值时退化/取址拿的是**常量地址**，不读内存。
+fn inst_reads_symbol_value(k: &InstKind) -> bool {
+    fn hit(o: &Operand) -> bool {
+        matches!(o, Operand::SymAddr(_, ty) if !matches!(ty, Type::Array(..) | Type::Func(..)))
+    }
+    match k {
+        InstKind::Bin { l, r, .. } => hit(l) || hit(r),
+        InstKind::Un { e, .. } | InstKind::Cast { e, .. } => hit(e),
+        InstKind::Select {
+            cond,
+            then_,
+            else_,
+            ..
+        } => hit(cond) || hit(then_) || hit(else_),
+        _ => false,
     }
 }
 
@@ -5206,6 +5420,81 @@ mod tests {
         gvn(&mut f);
         let after = f.blocks.get("entry").unwrap().insts.len();
         assert_eq!(before, after, "中间隔着一次写 ⇒ 两个读不得归一");
+    }
+
+    /// 文件作用域对象作右值在 IR 里是 `SymAddr(名, 对象类型)`（不是 `Load`），
+    /// 但重建后仍然是一次**内存读**。它不得被当成跳块可复用的纯值：
+    /// `a = g; g = 0; f(); b = g;` 两条读的键相同，跨过中间的写与调用归一就是错值
+    /// （实测 -O2/-O3 打出 `b == a`，gcc 是 `b == 0`）。
+    #[test]
+    fn gvn_does_not_reuse_global_read_across_a_store_and_a_call() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let a = sv("_a", 0, Type::Int);
+        let b = sv("_b", 0, Type::Int);
+        let read = || {
+            InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::SymAddr("g".into(), Type::Int),
+                r: Operand::Int(0),
+            }
+        };
+        let addr = sv("_addr", 0, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        let bb = f.blocks.get_mut("entry").unwrap();
+        bb.insts = vec![
+            Inst {
+                dest: Some(a.clone()),
+                kind: read(),
+                span: span.clone(),
+            },
+            Inst {
+                dest: Some(addr.clone()),
+                kind: InstKind::AddrOf { base: "g".into() },
+                span: span.clone(),
+            },
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr),
+                    src: Operand::Int(0),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: Some(sv("_t", 0, Type::Int)),
+                kind: InstKind::Call {
+                    callee: Operand::SymAddr(
+                        "f".into(),
+                        Type::Func(
+                            Box::new(QualType::new(Type::Void)),
+                            Vec::new(),
+                        ),
+                    ),
+                    args: Vec::new(),
+                    ret_ty: Type::Int,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: Some(b.clone()),
+                kind: read(),
+                span: span.clone(),
+            },
+        ];
+        bb.term = Terminator::Ret {
+            val: Some(Operand::Var(b.clone())),
+        };
+        gvn(&mut f);
+        let insts = &f.blocks.get("entry").unwrap().insts;
+        let def = insts.iter().find(|i| i.dest.as_ref().map(|d| d.name()) == Some(b.name()));
+        match &def.expect("第二条读不见了").kind {
+            InstKind::Bin { l, .. } => assert!(
+                matches!(l, Operand::SymAddr(n, _) if n == "g"),
+                "跨过写与调用把第二次读归一到第一次了（应重新从 g 读）"
+            ),
+            other => panic!("第二次读被改写成 {other:?}"),
+        }
     }
 
     #[test]

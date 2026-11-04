@@ -531,6 +531,20 @@ impl Codegen {
         // 不可靠，整体退回窥孔：事实建不起来，转发与去重就都无从谈起。
         // 这里取的是**规则位图**而不是旧的单调档位（批0c）：位图默认由
         // `DCC_BLOCKOPT` 的档位推得，所以上面这条归零与旧行为逐字一致。
+        // 冗余 `cld` 的唯一否决点（放在块内优化**之前**：它跟块内事实无关，也不该被
+        // 别的规则改判）。理由与实测基线见 `Codegen::asm_sets_direction` 的字段注释：
+        // 本单元没有能把 DF 弄脏的 asm 时，gcc 就不发这条 `cld`，我们也不发。
+        if let crate::codegen::x86_64::opcode::X86_64Opcode::NoArg {
+            op: crate::codegen::x86_64::opcode::NoArgOp::Cld,
+        } = insn.op
+        {
+            if !self.asm_sets_direction {
+                if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                    eprintln!("[cld] 省略：本单元没有 std 类内联汇编");
+                }
+                return true;
+            }
+        }
         let bo_rules = if self.volatile_slots_overflow {
             0
         } else {
@@ -810,6 +824,7 @@ impl Codegen {
                         rec.gas_text = Some(r);
                     }
                 }
+                self.note_rsp_ledger(&rec.op, rec.gas_text.as_deref());
                 self.insn_records.push((pc, rec));
                 self.peep_last = Some(PeepLast {
                     kind,
@@ -911,6 +926,15 @@ impl Codegen {
     }
 
     pub fn label(&mut self, name: &str) {
+        // 标号是控制流的汇合点：账没清零就从别处跳进来的话，这里看到的 0 并不代表
+        // 真实 rsp 落在帧线（线性累加只沿发射顺序成立）。所以「账非 0 时定义标号」
+        // 直接放弃记账，宁可用旧式尾声也不猜。
+        if matches!(self.rsp_below_frame_line, Some(d) if d != 0) {
+            if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                eprintln!("[epi-drop] 标号处账非 0: {name}");
+            }
+            self.rsp_below_frame_line = None;
+        }
         // 区的边界（方案 §3 S4 四个插入点里的「区划分」）：先 flush 再登记标号，
         // 那几条存出才属于上一个区。必须在 `labels.insert` 之前，否则存出会被算进新区。
         self.region_at_label(name);
@@ -2062,6 +2086,265 @@ impl Codegen {
     /// match，所以按最终编码识别 —— `48 83 EC ib` / `48 81 EC id`（sub）与
     /// `48 83 C4 ib` / `48 81 C4 id`（add），这四种字节序列只可能是对 rsp 的
     /// 立即数加减，不存在误判。`emit_insn` 用它把出参区一并记进 `stack_shift`。
+    /// 把「rsp 比帧线低多少」这本账往前推一步。判据只有一条：**能不能证明这条指令
+    /// 对 rsp 的影响**；证明不了就弃账（本函数此后一律走旧式尾声），绝不猜。
+    ///
+    /// 三层，从强到弱：
+    /// 1. **类型化 opcode**（`Stack{Push|Pop}` 与 `AluRm{Add|Sub, B64, dst=%rsp, src=Imm}`）
+    ///    —— 这是本后端自己发帧指令的唯一出口，与 `stack_shift` 用的是同一个判据。
+    /// 2. **gas 文本**（缺了已由 `op.render()` 兜底）—— AT&T 里「写 rsp」必然把 `%rsp`
+    ///    露在最后一个逗号之后，只把它当基址用（`mov %rax, -8(%rsp)`）的不算写。
+    /// 3. **既没类型化也没文本**（`/* raw */` 那批手写序列：金丝雀的 `mov %gs:0x28,%rax`、
+    ///    段前缀、`mfence`……）—— 默认中性。这一条不是猜：本端所有会写 rsp 的发射都走
+    ///    第 1 层那两个构造子，唯一的例外是**内联汇编**，而它在
+    ///    [`Codegen::mark_asm_stack_effects`] 里被就地弃账。
+    fn note_rsp_ledger(&mut self, op: &crate::codegen::x86_64::opcode::X86_64Opcode, text: Option<&str>) {
+        use crate::codegen::x86_64::opcode::{AluOp, StackOp, X86_64Opcode};
+        let Some(cur) = self.rsp_below_frame_line else {
+            return;
+        };
+        // 1) 类型化：本端发帧指令的两个出口。
+        let typed: Option<Option<i64>> = match op {
+            // 只认「64 位、目的是寄存器」这一形：那正是全后端 push/pop 的唯一构造
+            // （`Insn::stack_op_reg` 与各原始站点都这么造）。别处一旦出现 `pushl`/
+            // `push m`/`pop %rsp` 之类，这里编不进 → 落进「证不了」，宁可退回旧式尾声。
+            X86_64Opcode::Stack {
+                op: StackOp::Push,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: OpcodeOperand::Reg(_, crate::codegen::shared::asm_operand::Width::B64),
+            } => Some(Some(8)),
+            X86_64Opcode::Stack {
+                op: StackOp::Pop,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: OpcodeOperand::Reg(_, crate::codegen::shared::asm_operand::Width::B64),
+            } => Some(Some(-8)),
+            X86_64Opcode::AluRm { op, width, dst, src } => {
+                use crate::codegen::shared::asm_operand::Width;
+                let dst_is_rsp = matches!(dst, OpcodeOperand::Reg(4, _));
+                if !dst_is_rsp || !matches!(width, Width::B64) {
+                    None
+                } else if let OpcodeOperand::Imm(n) = src {
+                    match op {
+                        AluOp::Sub => Some(Some(*n)),  // 下移 N
+                        AluOp::Add => Some(Some(-*n)), // 上移 N
+                        // `and $-16, %rsp` 这类：改得动 rsp 但幅度不由我们解释
+                        _ => Some(None),
+                    }
+                } else {
+                    // `sub %r11, %rsp`（超大帧那条形）——幅度不可静态知，弃账。
+                    Some(None)
+                }
+            },
+            _ => None,
+        };
+        if let Some(delta) = typed {
+            self.apply_rsp_ledger(delta, text);
+            return;
+        }
+        // 3) 无文本 ⇒ 中性（理由见函数头）。
+        let Some(text) = text else {
+            return;
+        };
+        // 2) 文本层。
+        let t = text.trim();
+        let mnem = t.split([' ', '\t']).next().unwrap_or("");
+        let lower = mnem.to_ascii_lowercase();
+        // AT&T 的目的目在最后一个逗号之后；单目指令的唯一目就是目的。
+        let dest = match t.rfind(',') {
+            Some(p) => t[p + 1..].trim(),
+            None => t[mnem.len()..].trim(),
+        };
+        let rsp_dest = dest == "%rsp" || dest == "%esp";
+        let delta: Option<i64> = if matches!(lower.as_str(), "push" | "pushq" | "pushfq") {
+            Some(8)
+        } else if matches!(lower.as_str(), "pop" | "popq" | "popfq") {
+            // `pop %rsp` 是栈换轨（swizzle），不是「上移 8」——交给下一句的 rsp_dest 弃账。
+            if rsp_dest {
+                None
+            } else {
+                Some(-8)
+            }
+        } else if rsp_dest {
+            // 只有「`sub $N, %rsp` = 下移 N」与「`add $N, %rsp` = 上移 N」能定量；
+            // `mov %r13, %rsp`、`lea ...(%..), %rsp` 这些一律弃账。
+            // AT&T 的顺序是 `<mnem> <src>, <dst>`：立即数在助记符之后、**第一个**逗号之前。
+            let imm = |s: &str| -> Option<i64> {
+                let s = s[mnem.len()..].split(',').next()?.trim();
+                let s = s.strip_prefix('$')?;
+                let neg = s.starts_with('-');
+                let s = s.trim_start_matches('-');
+                let v = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    Some(h) => i64::from_str_radix(h, 16).ok()?,
+                    None => s.parse::<i64>().ok()?,
+                };
+                Some(if neg { -v } else { v })
+            };
+            match lower.as_str() {
+                "sub" => imm(t).map(|v| v.abs()),
+                "add" => imm(t).map(|v| -v.abs()),
+                _ => None,
+            }
+        } else if matches!(
+            lower.as_str(),
+            "leave" | "enter" | "int" | "iret" | "iretq" | "sysret" | "sysexit"
+        ) {
+            None
+        } else {
+            // 不写 rsp：`call`/`ret` 由被调侧配平，`jmp` 不动栈，内存访问只是把 rsp 当基址。
+            // 跳转另有一道守卫：账非 0 时发跳转（或定义标号）就弃账 —— 线性累加只沿发射
+            // 顺序成立，跨越窗口的控制流正是它唯一看不见的那一形。
+            if lower.starts_with('j') && cur != 0 {
+                if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                    eprintln!("[epi-drop] 跳转时账非 0: {:?}", text);
+                }
+                self.rsp_below_frame_line = None;
+                return;
+            }
+            Some(0)
+        };
+        self.apply_rsp_ledger(delta, Some(text));
+    }
+
+    /// 账的落地一步：`None`（证不了）就永久弃账，`Some(负数)`（弹得比压的多）同样弃账 ——
+    /// 那意味着有一处 `pop` 落在没有对应 `push` 的路径上，本端不该出现，出现就不猜。
+    fn apply_rsp_ledger(&mut self, delta: Option<i64>, text: Option<&str>) {
+        let Some(cur) = self.rsp_below_frame_line else {
+            return;
+        };
+        match delta {
+            Some(d) if cur + d >= 0 => self.rsp_below_frame_line = Some(cur + d),
+            Some(d) => {
+                if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                    eprintln!("[epi-drop] 账将为负: cur={cur} delta={d} text={text:?}");
+                }
+                self.rsp_below_frame_line = None;
+            },
+            None => {
+                if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                    eprintln!("[epi-drop] 无法归类: {text:?}");
+                }
+                self.rsp_below_frame_line = None;
+            },
+        }
+    }
+
+    /// 内联汇编：只要模板里出现「能动 rsp 的字样」就整函数弃账。
+    ///
+    /// 为什么在语句级而不是指令级弃账：汇编文本在我们这里是**原样转发**给 GAS 形状的
+    /// 发射器，`push %rax` 与 `add $8, %rsp` 都可能出现在任意一行，逐行解码等于再养一个
+    /// 解码器。判据宁紧不松：`pushfq; popfq` 这一族成对写法也会弃账（内核大量用它，
+    /// 代价只是那些函数继续走 `mov %r13,%rsp` 的旧式尾声），而漏判一次就是栈错位。
+    pub fn mark_asm_stack_effects(&mut self, lines: &[String]) {
+        if self.rsp_below_frame_line.is_none() {
+            return;
+        }
+        for line in lines {
+            let low = line.trim().to_ascii_lowercase();
+            // `.text`/`.pushsection`/`.align` 这一行是**汇编指令**还是**伪指令**：伪指令
+            // 不动栈，但它自己的名字里就带 `push`（`.pushsection`），按词匹配会全线误弃。
+            let directive = low.starts_with('.');
+            // `%rsp` 出现在**内存操作数的基址位**上（`(%rsp)`、`-8(%rsp)`、`4096(%rsp)`）
+            // 不构成「写 rsp」：那一形改的是栈上的内存，rsp 自己一动没动。内核的
+            // `ALTERNATIVE` 里 `lock addl $0, -1(%rsp)`（THP 毒化页那条）就是这个形状，
+            // 按子串一刀切会把整棵树里大量函数打进旧式尾声。
+            // 判据只看紧邻的前一字符：AT&T 的基址永远是 `(` 之后那一个 token。
+            if Self::mentions_rsp_not_as_base(&low) {
+                if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                    eprintln!("[epi-drop] 内联汇编提到栈指针: {line}");
+                }
+                self.rsp_below_frame_line = None;
+                return;
+            }
+            if directive {
+                continue;
+            }
+            // 按词切（`%`/`(`/空格/`,`/`;` 都是分隔符），避免 `popsection`、`printer`
+            // 这类子串把账打掉；`push*`/`pop*` 用前缀是必须的（`pushfq`/`popl`）。
+            for w in low
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+            {
+                let hit = matches!(
+                    w,
+                    "leave"
+                        | "enter"
+                        | "int"
+                        | "iret"
+                        | "iretq"
+                        | "sysret"
+                        | "sysexit"
+                        | "push"
+                        | "pop"
+                ) || w.starts_with("push")
+                    || w.starts_with("pop");
+                if hit {
+                    if std::env::var_os("DCC_EPI_TRACE").is_some() {
+                        eprintln!("[epi-drop] 内联汇编可能动栈: {line}");
+                    }
+                    self.rsp_below_frame_line = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `-mretpoline-external-thunk`（或 gcc 的 `-mindirect-branch=thunk-extern`）在位时，
+    /// 一条间接分支必须发成 `call/jmp __x86_indirect_thunk_<reg>`；关时返回 `None`，
+    /// 调用方发回原来的 `call *%reg`。
+    ///
+    /// 为什么非不可省：内核的 `patch_retpoline()`（`arch/x86/kernel/alternative.c:886`）是
+    /// **从调用位移解出目标蹦床**再还原成 `call *%reg` 的，而 objtool 的 `arch_is_retpoline`
+    /// （`tools/objtool/arch/x86/decode.c:912`）按符号名前缀 `__x86_indirect_` 认这些站点、
+    /// 据此造 `.retpoline_sites`。发裸间接调用就等于「收下了旗标却没做缓解」。
+    pub fn indirect_thunk_sym(&self, reg: u8) -> Option<String> {
+        if !self.target.indirect_branch_thunk_extern {
+            return None;
+        }
+        // 号→名唯一入口，与诊断/渲染同源；`rsp` 没有蹦床（内核 `BUG_ON(reg == 4)`）。
+        let name = crate::codegen::x86_64::abi::regnames::gp_name_of_num(reg)?;
+        Some(format!("__x86_indirect_thunk_{name}"))
+    }
+
+    /// 帧分配完成后把「rsp 比帧线低多少」的账归零（= 现在就在帧线上）。
+    ///
+    /// 过对齐帧与 frame-pointer 模式**不记账**：前者的帧线不是 `r13 - frame_size`
+    /// （序言把 %r13 也下调过，尾声要从锚点槽读回），后者在 `mov %rsp,%r13` 之后又多推了
+    /// 8 字节，那 8 不在 `frame_size` 里。这两种形状各自保留原有恢复式。
+    pub fn arm_rsp_ledger(&mut self) {
+        self.rsp_below_frame_line = if self.cur_func_do_align || self.target.frame_pointer {
+            None
+        } else {
+            Some(0)
+        };
+    }
+
+    /// `%rsp`/`%esp` 有没有被当成**寄存器**用（而不是只当内存操作数的基址）。
+    ///
+    /// 只扫一遍字节：命中 `rsp`/`esp` 时看它前面紧邻的字符 —— AT&T 里基址一定紧跟在
+    /// `(` 之后（`(%rsp)` / `-1(%rsp)` / `4096(%rsp)`），其余任何前导（空格、`,`）都表示
+    /// 它自己就是一个操作数，可能被写。
+    fn mentions_rsp_not_as_base(lowered: &str) -> bool {
+        let b = lowered.as_bytes();
+        let mut from = 0_usize;
+        loop {
+            // 找 `%rsp` / `%esp`（AT&T 里寄存器名带 `%`，`(%rsp)` 的基址那一形是
+            // `(` 紧跟 `%rsp` —— 少看那个 `%` 会把每个基址都当成寄存器使用）。
+            let r = lowered[from..].find("%rsp");
+            let e = lowered[from..].find("%esp");
+            let off = match (r, e) {
+                (Some(a), Some(c)) => a.min(c),
+                (Some(a), None) => a,
+                (None, Some(c)) => c,
+                (None, None) => return false,
+            };
+            let at = from + off;
+            if !(at > 0 && b[at - 1] == b'(') {
+                return true;
+            }
+            from = at + 4;
+        }
+    }
+
     fn rsp_imm_delta(bytes: &[u8]) -> Option<i64> {
         match *bytes {
             [0x48, 0x83, 0xEC, imm] => Some(-((imm as i8) as i64)),
@@ -2286,7 +2569,15 @@ impl Codegen {
         // 本检查把那个**静默错值**变成可见、可归因的失败（同一函数里已有窗口开着时不会误报）。
         // 延伸池默认关着 ⇒ `ext_home_saves` 为空 ⇒ 不进这条分支，今天的产物一字不变。
         // noreturn 调用点由 `call_label_noreturn` 走 `guard_ext_homes = false`（理由见彼处）。
-        if guard_ext_homes && !self.ext_home_saves.is_empty() && self.home_overrides.is_empty() {
+        // `asm_call_window > 0`：这一层 call 发自内联 asm 的体内，而那些号的家已由
+        // `asm/emit.rs` 的 push/pop 守护区间（或本条 asm 自己的操作数写回路）保住，
+        // 不属于「静默被毁」（实测内核 `call write_ibpb`、`call rep_stos_alternative`：
+        // 它们的 `ASM_CALL_CONSTRAINT` 里没有寄存器号，只靠 clobber 名单永远盖不住这一族）。
+        if guard_ext_homes
+            && self.asm_call_window == 0
+            && !self.ext_home_saves.is_empty()
+            && self.home_overrides.is_empty()
+        {
             self.report_internal_bug(
                 "E1136",
                 format!(
@@ -2730,11 +3021,25 @@ impl Codegen {
         off
     }
 
+    /// sret/物化槽的**步长**（唯一尺子）：任意请求都向上取整到 16 字节。
+    ///
+    /// 规划期的预算扫描与发射期的分配器必须用同一个式子：只算原始字节就少留（槽重叠、
+    /// 压穿 spill 带顶 ⇒ E1128），自己另推一份就又会漂移。实测 `block/blk-mq.o`：扫描
+    /// 按「请求 8B」登记 8，而分配器按 16B 步进 ⇒ 预算永远差一倍的量。
+    pub(crate) fn sret_slot_bytes(requested: i64) -> i64 {
+        (requested + 15) & !15
+    }
+
+    #[track_caller]
     pub fn alloc_sret_slot(&mut self, size: usize) -> i64 {
         // 统一按 16 字节对齐向下步进: 任何尺寸序列都互不重叠
         // (旧 bump 以"调用次数 * 当前 padded"定址, 8B→32B→8B 会撞槽)。
-        let padded = (size as i64 + 15) & !15;
+        let padded = Self::sret_slot_bytes(size as i64);
         let cur = self.sret_watermark;
+        // 诊断日志（不影响任何产物字节）：记下「哪个发射站点、请求多少字节、当时水位」。
+        let loc = std::panic::Location::caller();
+        self.sret_site_log
+            .push((cur, size, loc.file(), loc.line()));
         self.sret_watermark = cur + padded;
         let off = self.sret_region_base - cur - padded;
         // 同一条判据的反方向：sret/物化带的最低字节也不得越过帧底。这里的 `off`
@@ -2767,14 +3072,33 @@ impl Codegen {
         if room.allows_late_allocation(low_off) {
             return;
         }
+        // 发射站点日志先拼好：放在 `format!` 的参数位置会和 `self.report_internal_bug`
+        // 的可变借用相冲（方法接收者先被借用），整条诊断会因为一个借检错误而发不出来。
+        let sites = {
+            let n = self.sret_site_log.len();
+            let take = n.min(4);
+            self.sret_site_log[n - take..]
+                .iter()
+                .map(|(w, sz, f, l)| format!("(水位前={} 请求={}B {}:{})", w, sz, f, l))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         self.report_internal_bug(
             DIAG_FRAME_BUDGET,
             format!(
                 "frame budget exhausted in `{}` while allocating '{who}': lowest byte offset \
-                 {low_off} passes the frame bottom {} (frame_size {}B)",
+                 {low_off} passes the frame bottom {} (frame_size {}B); 带坐标: \
+                 sret_region_base={} sret_need={} spill_band_top={} spill_band_bytes={} \
+                 分配前水位={}；发射站点日志（水位←请求字节←file:line，取末尾 4 条）：{}",
                 self.current_func_name,
                 room.frame_base(),
-                room.frame_size
+                room.frame_size,
+                self.sret_region_base,
+                room.sret_need,
+                room.spill_band_top,
+                room.spill_band_bytes,
+                self.sret_watermark,
+                sites,
             ),
             "帧大小在函数体之前就已发射（sub rsp），生成期只能从已预留区里取家；需要更多 \
              空间就应在 abi/layout.rs 的解算阶段加大预留，而不是让变量区压穿帧底",
@@ -2782,6 +3106,7 @@ impl Codegen {
     }
 
     /// Allocate a local variable slot (generic name).
+    #[track_caller]
     pub fn alloc_local(&mut self, sz: usize) -> i64 {
         self.alloc_sret_slot(sz)
     }
@@ -4482,7 +4807,18 @@ impl Codegen {
         let mut slot = vec![0u8; 8];
         if let Some((off, sec)) = rel {
             if self.relocatable {
-                self.pending_data_rodata_rels.push((off, str_off, sec));
+                // `Some(usize::MAX)` = 槽本身就在 `.rodata` 里（compound literal 内部），
+                // 必须走 `.rela.rodata`；当成 `extra_sections` 下标用会越界 panic。
+                if matches!(sec, Some(v) if v == usize::MAX) {
+                    self.pending_rodata_rels.push((
+                        off,
+                        ".rodata".to_string(),
+                        crate::codegen::shared::elf::R_X86_64_64,
+                        str_off as i64,
+                    ));
+                } else {
+                    self.pending_data_rodata_rels.push((off, str_off, sec));
+                }
             } else if rodata_slots {
                 slot.copy_from_slice(&str_off.to_le_bytes());
                 self.rodata_string_slots.push(off);
@@ -4653,6 +4989,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }))
     }
 
@@ -4869,5 +5206,23 @@ mod tests {
             "死写回删对新短形失效了（两条都留着 = 回删变瞎）: {:02x?}",
             cg.code
         );
+    }
+    #[test]
+    fn rsp_mentioned_as_register_is_not_a_memory_base() {
+        // 基址位（`(%rsp)` / `-4(%rsp)` / `4096(%rsp)`）⇒ 不动栈指针，不弃账。
+        for neutral in ["lock addl $0,-4(%rsp)", "movq %rax,(%rsp)", "lea 4096(%rsp), %rcx"] {
+            assert!(
+                !Codegen::mentions_rsp_not_as_base(neutral),
+                "基址位被误判成写 rsp: {neutral}"
+            );
+        }
+        // 反向对照：rsp 自己当操作数（可能被写）必须抓到。
+        for writing in ["mov %rax, %rsp", "lea %rsp, %rcx", "add %rsp, %rax", "mov %esp, %eax"] {
+            assert!(
+                Codegen::mentions_rsp_not_as_base(writing),
+                "rsp 被当成寄存器却没抓到: {writing}"
+            );
+        }
+        assert!(!Codegen::mentions_rsp_not_as_base("nop; nop"));
     }
 }

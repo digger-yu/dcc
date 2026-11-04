@@ -2147,6 +2147,7 @@ fn march_x86_64_v3_enables_avx2() {
         vendor: "unknown".into(),
         os: dcc::cli::Os::Linux,
         abi: dcc::cli::Abi::Gnu,
+        x86_bits: dcc::cli::TargetTriple::NATIVE_BITS,
     });
     t.apply_march("x86-64-v3");
     assert!(t.cpu_features.avx);
@@ -2493,6 +2494,7 @@ fn march_native_detects_features() {
         vendor: "unknown".into(),
         os: dcc::cli::Os::Linux,
         abi: dcc::cli::Abi::Gnu,
+        x86_bits: dcc::cli::TargetTriple::NATIVE_BITS,
     });
     t.apply_march("native");
     // native should detect at least SSE

@@ -822,6 +822,42 @@ impl Codegen {
             },
         }
     }
+    /// `movntdqa xmm, m128` —— SSE4.1 的三字节 opcode（`66 0F 38 2A /r`）。
+    ///
+    /// `emit_asm_sse_mov_packed` 只发二字节 opcode（`0F xx`），所以这条不能
+    /// 复用它。`drivers/gpu/drm/i915/i915_memcpy.c` 的 `__memcpy_ntdqa()` 用
+    /// 它做 16 字节流式读，四路展开的形式也一并覆盖。只有 mem → xmm 一种
+    /// 形状（GAS 不接受寄存器源），其余形状照旧走拒绝路径。
+    pub(crate) fn emit_asm_movntdqa(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        match (src, dst) {
+            (
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+                AsmOperand::Reg(d, ds),
+            ) if *ds == 128 => {
+                let mut rex = 0u8;
+                if *d >= 8 {
+                    rex |= 0x04;
+                }
+                if *base >= 8 {
+                    rex |= 0x01;
+                }
+                if index.unwrap_or(0) >= 8 {
+                    rex |= 0x02;
+                }
+                self.emit_sse_header(0x66, rex);
+                self.emit_insn(&Insn::raw(&[0x38, 0x2A]));
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            },
+            _ => {
+                self.asm_reject("movntdqa needs mem -> xmm");
+            },
+        }
+    }
     pub(crate) fn emit_asm_tileloadd(&mut self, op0: &AsmOperand, op1: &AsmOperand) {
         let (tmm, disp, base, index, scale) = match (op0, op1) {
             (

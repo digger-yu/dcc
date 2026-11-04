@@ -18,6 +18,63 @@ pub struct Binding {
 }
 
 impl Codegen {
+    /// SysV AMD64 里被一次 `call` 毁掉的通用寄存器号：`rax rcx rdx rsi rdi r8 r9 r10 r11`。
+    ///
+    /// 只列 GP：xmm 的家不走这条守护通道（`asm_clobber_held_regs` 只看 GP），而且内核里
+    /// 带 `call` 的 asm 全在早期内存/中断路径上，不浮点。也不列 `rbx/rbp/r12-r15`：
+    /// 那是 callee-saved，被调方负责还原，跟着 push 只会白白多八条指令。
+    const SYSV_CALL_CLOBBERED_GP: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+
+    /// 本条 asm 的体内有没有 `call`（含 `call *reg`/`call *mem`/远调 `lcall`）。
+    ///
+    /// 为什么不能只看用户写的 clobber 名单：内核跳进另一个 C 函数的 `asm volatile`
+    /// （`call write_ibpb`、`call rep_stos_alternative`）只写 `ASM_CALL_CONSTRAINT`，
+    /// 那份名单里没有寄存器号，而按 ABI 这次调用毁掉的就是全部 caller-saved。
+    /// 认错了方向只会多保护（多几条 push/pop），不认错则会少保护（家被静默抹掉）。
+    fn asm_lines_have_call(lines: &[String]) -> bool {
+        lines.iter().any(|l| {
+            // 一行可能是 `1: call foo`、`call *%rax`、带前缀的 `rep call`（不合法但
+            // 不能漏），也可能是一段数据伪指令 `.long call_sites`。只取行首到第一个
+            // 空白/逗号/星号之前的那个 token，并先剔掉行首的数字局部标签与 `:`。
+            let mut text = l.trim();
+            loop {
+                let (head, rest) = match text.find(|c: char| c == ':' || c.is_whitespace()) {
+                    Some(i) => (&text[..i], &text[i + 1..]),
+                    None => break,
+                };
+                // `1b`/`1f`/`2:` 这种行首局部标签：剔掉后继续看下一个 token
+                if head.chars().all(|c| c.is_ascii_digit())
+                    || head.parse::<u32>().is_ok()
+                    || matches!(head, "1b" | "1f" | "2b" | "2f" | "3b" | "3f")
+                {
+                    text = rest.trim_start();
+                    continue;
+                }
+                break;
+            }
+            let mnem = text
+                .split(|c: char| c.is_whitespace() || c == '*' || c == ',')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            mnem == "call" || mnem == "callq" || mnem.starts_with("lcall")
+        })
+    }
+
+    /// 体内有 `call` 时，每个延伸池家是否都有着落：要么落在本次的守护区间里（push/pop
+    /// 原样还回来），要么本来就是本条 asm 的操作数号（那种路由写回路径接手，弹回旧值
+    /// 反而会把 asm 的输出抹掉 —— 与 [`asm_clobber_held_regs`] 里 `op_gp` 同一道门）。
+    fn asm_call_homes_covered(&self, guard: &[u8], bindings: &[AsmOpBinding]) -> bool {
+        let op_gp = bindings
+            .iter()
+            .filter(|b| b.xmm_width == 0 || matches!(b.xmm_width, 205..=208))
+            .map(|b| b.reg)
+            .collect::<Vec<u8>>();
+        self.ext_home_saves
+            .iter()
+            .all(|h| guard.contains(&h.reg) || op_gp.contains(&h.reg))
+    }
+
     /// P12 Phase 5.2a：本条 asm 会毁掉、而**此刻正被本函数持有值**的池寄存器。
     ///
     /// clobber 名单说的是「这些号的内容在本条 asm 之后不保证」。而现在可以住在那儿的
@@ -39,12 +96,27 @@ impl Codegen {
     ///
     /// naked 函数不算：那里没有帧也没有序言，栈是用户在管的，而且这条路径上
     /// `reset_reg_tracker()` 没跑、`allocated` 还是上一个函数的残值。
-    fn asm_clobber_held_regs(&self, clobbers: &[String], bindings: &[AsmOpBinding]) -> Vec<u8> {
-        if self.cur_func_is_naked || clobbers.is_empty() {
+    fn asm_clobber_held_regs(
+        &self,
+        clobbers: &[String],
+        bindings: &[AsmOpBinding],
+        call_clobbers: bool,
+    ) -> Vec<u8> {
+        if self.cur_func_is_naked || (clobbers.is_empty() && !call_clobbers) {
             return Vec::new();
         }
         // 解析只走现有那一份（与规划器拿到的 clobber 名单同一个口径），不新建解析器。
-        let (clobber_gp, _, _) = Self::parse_clobber_registers(clobbers);
+        let (mut clobber_gp, _, _) = Self::parse_clobber_registers(clobbers);
+        // 体内有 `call` 就是「按 ABI 毁掉全部 caller-saved GP」，与用户写没写 clobber 名单
+        // 无关：内核的 `ASM_CALL_CONSTRAINT` 只给 `+m/cc/memory`，被调方 (`write_ibpb`、
+        // `rep_stos_alternative`) 照样扫 rax/rcx/rdx/rsi/rdi/r8-r11。GCC 不假设这一点是
+        // 因为它的寄存器分配器知道 `call` 会毁谁；本端的延伸池把变量当家放在 caller-saved
+        // 号里，必须自己把这份名单并进来，否则家就在 asm 体内被静默抹掉。
+        if call_clobbers {
+            for r in Self::SYSV_CALL_CLOBBERED_GP {
+                clobber_gp.insert(r);
+            }
+        }
         if clobber_gp.is_empty() {
             return Vec::new();
         }
@@ -245,6 +317,13 @@ impl Codegen {
         let expanded_lines = expander.expand(&resolved_lines);
         // 最后拆数字局部标签（`N:` 与 body 同行时分成两条）
         let resolved_lines = AsmLocalLabels::expand_label_insn_lines(expanded_lines);
+        // 「体内 rsp 比帧线低多少」这本账在语句级弃账：模板是原样转发的，我们不在这里
+        // 逐行解码（见 `mark_asm_stack_effects`）。
+        self.mark_asm_stack_effects(&resolved_lines);
+        // 体内有 `call`？两条都看：`raw_lines` 接住宏展开后已在文本里的调用（内核的
+        // ALTERNATIVE 就是这一形），`resolved_lines` 接住 `.macro`/`.if` 展开后才出现的。
+        let has_call =
+            Self::asm_lines_have_call(&raw_lines) || Self::asm_lines_have_call(&resolved_lines);
         // volatile asm: 完整屏障，防止优化器重排
         // 若代码尾部已是 mfence (前一 volatile asm 的后屏障), 跳过冗余前屏障
         if volatile {
@@ -261,13 +340,24 @@ impl Codegen {
         // Phase 5.2a：守护区间从这一行开始，弹回也算在内 —— 这几条指令就是「实现本条 asm
         // 的语义」所需的全部代码，行号归属应当跟着整块走。奇数个 push 会同时带走一次
         // 8 字节的对齐补偿（见 `asm_guard_enter`）。
-        let guard = self.asm_clobber_held_regs(clobbers, &bindings);
+        let guard = self.asm_clobber_held_regs(clobbers, &bindings, has_call);
         // `%rsp` 既守不了也不能当家用：先点名，再决定是否插守护（插了也守不住栈本身）。
         self.asm_reject_reserved_clobber(clobbers);
         let padded = self.asm_guard_enter(&guard);
+        // 体内有 `call` 且每个延伸池家都有着落（在守护区间里，或本来就是本条 asm 的
+        // 操作数号、由写回路径接手）时开一层 call 窗口：`call_label` 的 E1136 守卫防的
+        // 是「家静默被毁」，这两种情形都不静默，不该再报。反之家确实没人管，守卫继续
+        // 把它钉成硬错误。
+        let call_window = has_call && self.asm_call_homes_covered(&guard, &bindings);
+        if call_window {
+            self.asm_call_window += 1;
+        }
         let asm_pc_start = self.code.len() as u64;
         let asm_src_line = self.current_asm_src_line;
         self.emit_resolved_asm_lines(&resolved_lines, false);
+        if call_window {
+            self.asm_call_window -= 1;
+        }
         self.asm_guard_leave(&guard, padded);
         // 记录 asm 块 DWARF 行号条目
         if self.debug_level > 0 && asm_src_line > 0 {
@@ -356,11 +446,17 @@ impl Codegen {
         let expanded_lines = expander.expand(&resolved_lines);
         // 最后拆数字局部标签（`N:` 与 body 同行时分成两条）
         let resolved_lines = AsmLocalLabels::expand_label_insn_lines(expanded_lines);
+        // 「体内 rsp 比帧线低多少」这本账在语句级弃账：模板是原样转发的，我们不在这里
+        // 逐行解码（见 `mark_asm_stack_effects`）。
+        self.mark_asm_stack_effects(&resolved_lines);
         // 记录 asm goto 块起始 PC (用于 DWARF 行号表)
         // 这里**不**插守护：跳出去的那条路不经过恢复，那个 `pop` 可能永远不执行（%rsp 就此
         // 永久下推）。溅出槽已在函数入口被移出池，所以名单里剩下的只能是用户自己绑定的家，
         // 守不住就只能点名（E0317），不能静默给错值。判据与守护用的是同一份名单。
-        let unguardable = self.asm_clobber_held_regs(clobbers, &bindings);
+        // `call_clobbers` 这一参传 `false`：本条路径不插守护，把 ABI 的 caller-saved 名单
+        // 并进来只会多报 E0317；而带 `asm goto` 的函数进不了 SSA、根本没有延伸池家，
+        // `call_label` 的 E1136 守卫在那里也不会误拦。
+        let unguardable = self.asm_clobber_held_regs(clobbers, &bindings, false);
         self.asm_reject_reserved_clobber(clobbers);
         if !unguardable.is_empty() {
             self.asm_unguardable(&unguardable);

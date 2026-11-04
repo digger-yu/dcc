@@ -33,9 +33,35 @@ use std::collections::HashSet;
 /// 嵌套函数体也算进来（与 `ssa::regalloc` 的「有嵌套函数就整体不绑」同一口径）：
 /// 外层函数的表达式区间可能横跨内层函数体的发射点，少看一条 asm 就是少让一个号。
 pub fn escaping_asm_clobbers(body: &Block) -> HashSet<String> {
-    let mut out = HashSet::new();
+    collect_asm_facts(body).clobbers
+}
+
+/// 一次遍历收齐的**函数级** asm 事实。分两处收是因为两处都要「发射开始前就知道」：
+/// 号让谁、`cld` 省不省，都是晚一步就来不及的判据。
+#[derive(Default)]
+pub struct AsmFacts {
+    /// 见 [`escaping_asm_clobbers`]：能带出保存/恢复区间的 `asm goto` 所 clobber 的名字。
+    pub clobbers: HashSet<String>,
+    /// 本函数体里**任何**一条内联汇编的模板出现过 `std` 这个词。DF 一旦被它弄脏，
+    /// 之后每一条 `rep movs`/`rep stos` 前的 `cld` 都必须保留（省掉就是错值）；
+    /// 消费方是 `Codegen::emit_direction_clear`。
+    pub sets_direction: bool,
+}
+
+/// 收集 [`AsmFacts`]。刻意不拆成两次遍历：两张判据看的是同一棵 AST，分开走就会
+/// 有一侧漏掉某个新加的变体（这里的遍历是穷举匹配、没有宽松的 `_ => {}`）。
+pub fn collect_asm_facts(body: &Block) -> AsmFacts {
+    let mut out = AsmFacts::default();
     walk_block(body, &mut out);
     out
+}
+
+/// asm 模板里是否把方向标志置位。按词切（`%`/空格/`,`/`;`/`(` 都是分隔符），
+/// 免把 `stdin`、`.hidden` 这类子串当成 `std`。
+fn template_sets_direction(t: &str) -> bool {
+    t.to_ascii_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|w| w == "std")
 }
 
 /// 规范化一个 clobber 名字。与 `register asm` 的名字口径保持一致，
@@ -44,13 +70,13 @@ pub fn normalize_clobber_name(raw: &str) -> String {
     raw.trim().trim_start_matches('%').to_ascii_lowercase()
 }
 
-fn walk_block(b: &Block, out: &mut HashSet<String>) {
+fn walk_block(b: &Block, out: &mut AsmFacts) {
     walk_items(&b.items, out)
 }
 
 /// 项列表层面：`Stmt::Switch` 除了 `cases` 还有一份 `prelude`，它不是一个 `Block`，
 /// 所以这一层必须能单独走（漏了它就是静默少扫一棵子树）。
-fn walk_items(items: &[BlockItem], out: &mut HashSet<String>) {
+fn walk_items(items: &[BlockItem], out: &mut AsmFacts) {
     for item in items {
         match item {
             BlockItem::Stmt(st) => walk_stmt(st, out),
@@ -59,7 +85,7 @@ fn walk_items(items: &[BlockItem], out: &mut HashSet<String>) {
     }
 }
 
-fn walk_decl(d: &Decl, out: &mut HashSet<String>) {
+fn walk_decl(d: &Decl, out: &mut AsmFacts) {
     match d {
         Decl::Var(v) => {
             if let Some(e) = &v.init {
@@ -81,7 +107,7 @@ fn walk_decl(d: &Decl, out: &mut HashSet<String>) {
     }
 }
 
-fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
+fn walk_stmt(st: &Stmt, out: &mut AsmFacts) {
     match st {
         Stmt::Expr { e, .. } => walk_expr(e, out),
         Stmt::Return { val, .. } => {
@@ -136,16 +162,18 @@ fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
         Stmt::Label { stmt: inner, .. } => walk_stmt(inner, out),
         Stmt::GotoIndirect { expr, .. } => walk_expr(expr, out),
         Stmt::AsmGoto {
+            asm_str,
             clobbers,
             goto_labels,
             outputs,
             inputs,
             ..
         } => {
+            out.sets_direction |= template_sets_direction(asm_str);
             // 只有真的带着跳出目标才算「逃得出守护区间」。
             if !goto_labels.is_empty() {
                 for c in clobbers {
-                    out.insert(normalize_clobber_name(c));
+                    out.clobbers.insert(normalize_clobber_name(c));
                 }
             }
             for e in outputs.iter().chain(inputs.iter()) {
@@ -166,7 +194,7 @@ fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
     }
 }
 
-fn walk_case(c: &Case, out: &mut HashSet<String>) {
+fn walk_case(c: &Case, out: &mut AsmFacts) {
     if let Some(e) = &c.val {
         walk_expr(e, out);
     }
@@ -176,7 +204,7 @@ fn walk_case(c: &Case, out: &mut HashSet<String>) {
     walk_block(&c.body, out);
 }
 
-fn walk_expr(e: &Expr, out: &mut HashSet<String>) {
+fn walk_expr(e: &Expr, out: &mut AsmFacts) {
     match e {
         Expr::Int { .. }
         | Expr::Float { .. }
@@ -236,8 +264,9 @@ fn walk_expr(e: &Expr, out: &mut HashSet<String>) {
         // 普通的 `asm`（含 `Expr::AsmExpr` 形态的语句）永远能被 fall-through 守护覆盖：
         // 它没有跳出目标，所以只进发射点的名单，不进本函数级判据。操作数里仍可能有 asm。
         Expr::AsmExpr {
-            outputs, inputs, ..
+            asm_str, outputs, inputs, ..
         } => {
+            out.sets_direction |= template_sets_direction(asm_str);
             for x in outputs.iter().chain(inputs.iter()) {
                 walk_expr(x, out);
             }

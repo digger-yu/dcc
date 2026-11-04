@@ -68,6 +68,40 @@ pub struct DispatchFacts {
     pub any_nested_func: bool,
     /// (表源码名, `goto *表[…]` 站点数)，按首次出现顺序去重后计数。
     pub tables: Vec<(String, u32)>,
+    /// 本函数里**有 goto 指向**的标号名（含 asm goto 的跳出目标），按首次出现顺序去重。
+    ///
+    /// 为什么收它：`opt.rs::propagate_const_stores_forward` 要在块内向前代回常量，
+    /// 只有「没人跳进来」的标号才能被穿过去 —— goto 可以跳进 `x = 0;` 之后的区域，
+    /// 那条路径上 x 没被赋过那个常量。反过来，没人跳的标号（内联自造出口标号、
+    /// 死分支删完后剩下的孤儿标号）只是顺序执行里的一行，不该挡住任何代回。
+    /// 收在**同一个**遍历里，是为了不另起一张臂表（本仓已为「两张 walker 覆盖不一致」
+    /// 付过几次学费）。
+    pub goto_targets: Vec<String>,
+    /// 同一个事实的**不聚重**副本：每一条 `goto L` 都记一次（不去重、不排序）。
+    ///
+    /// 为什么需要两份：[`DispatchFacts::goto_targets`] 回答的是「这个标号有没有人跳」（
+    /// 位置轴判据，去重就够），而「goto 紧邻标号 ⇒ 常量表延续进去」这条规则还需要知道
+    /// **这个标号有几条进入边**：两条以上时，沿紧邻那条带来的事实对另一条不成立（现场：
+    /// bison 骨架的 `yyreduce:` 同时被 `yybackup` 分支与 `yydefault` 分支跳入，`yylen`
+    /// 在两条路上不同，代完就是把 parser 编坏了，症状却是 flex 报
+    /// `input in flex scanner failed`）。两个计数出自**同一个**遍历，不另起一张臂表。
+    pub goto_edges: Vec<String>,
+    /// 本函数里出现过 `goto *expr`（目标算不出来）。
+    ///
+    /// 为什么收它：`opt.rs::propagate_const_stores_forward` 现在只在「指向某标号的
+    /// goto 源点都在该标号之后」时才让常量表穿过标号（见那里「goto 目标」那条注释）。
+    /// 这条判据的前提是「所有落入点都点得出来名」，`goto *expr` 一下就把前提推翻了：
+    /// 它可以落在任何标号上，也就可能在常量存储之前。见到它就退回「标号一律清表」。
+    pub any_indirect_goto: bool,
+    /// 本函数里**定义**的标号名（`label:` 与 C++ 落地垫），按首次出现顺序去重。
+    ///
+    /// 为什么收它：`opt.rs::dce_block` 要判断「终止语句之后的那一段里有没有可能被
+    /// 外面 `goto` 跳进来的落点」。只看「有没有标号」会把内联器自己改名的标号
+    /// （`__inl<N>__lt_yes` 这类）也算进来，而那类名字只有同一次展开内部的
+    /// `asm goto` 会引用 —— 现场是 `arch/x86/kernel/fpu/signal.c` 的 `convert_to_fxsr`
+    /// 与 `lib/vsprintf.c` 的 `rust_fmt_argument`：早退之后整段内联尾巴里有
+    /// `asm goto` 的落点，于是截断一直不敢往下走。
+    pub labels: Vec<String>,
 }
 
 impl DispatchFacts {
@@ -90,13 +124,82 @@ impl DispatchFacts {
 
 /// 收集一个函数体的分派事实。嵌套函数体也算进来（它就在同一段 .text 里）。
 pub fn collect(body: &Block) -> DispatchFacts {
-    let mut out = DispatchFacts {
+    let mut out = new_facts();
+    walk_block(body, &mut out);
+    out
+}
+
+/// 单独一项（语句或声明）的 goto 事实：`(有 goto 指向的标号名, 是否含间接 goto)`。
+///
+/// 复用 [`walk_block_item`] 的同一张分派表 —— 本仓已为「两张 walker 覆盖不一致」
+/// 付过几次学费，这里不另起一份。
+pub fn goto_facts_of_item(item: &BlockItem) -> (Vec<String>, bool) {
+    let mut out = new_facts();
+    walk_block_item(item, &mut out);
+    (out.goto_targets, out.any_indirect_goto)
+}
+
+/// 单独一项（语句或声明）里**定义**的标号名。
+///
+/// 与 [`goto_facts_of_item`] 同一张分派表（[`walk_block_item`]），不另起一份。
+pub fn label_defs_of_item(item: &BlockItem) -> Vec<String> {
+    let mut out = new_facts();
+    walk_block_item(item, &mut out);
+    out.labels
+}
+
+/// 单独一个表达式里**定义**的标号名（`({ a: 1; })` 这类语句表达式里的定义）。
+///
+/// 为什么表达式也要问：语句级的「丢臂前先问标号」拦网只拦得住整条臂是语句的
+/// 形状，而 `1 ? 1 : ({ a : 1; })` 里被丢的是**表达式**（`tests/gcc-torture` 的
+/// `compile/pr17913.c`）—— 那个 `a` 定义在语句表达式里，`&&a` 还在外面指向它。
+pub fn label_defs_of_expr(e: &Expr) -> Vec<String> {
+    let mut out = new_facts();
+    walk_expr(e, &mut out);
+    out.labels
+}
+
+/// 单独一条语句里**定义**的标号名。
+pub fn label_defs_of_stmt(st: &Stmt) -> Vec<String> {
+    let mut out = new_facts();
+    walk_stmt(st, &mut out);
+    out.labels
+}
+
+/// 单独一条语句里的 goto 事实：`(有 goto 指向的标号名, 是否含间接 goto)`。
+///
+/// 与 [`goto_facts_of_item`] 同一个遍历，只是入口是单条语句 —— 死分支折叠要问
+/// 「这条被丢掉的臂里的标号，臂外还有没有人跳」（`opt.rs::branch_drop_loses_live_label`）。
+pub fn goto_facts_of_stmt(st: &Stmt) -> (Vec<String>, bool) {
+    let mut out = new_facts();
+    walk_stmt(st, &mut out);
+    (out.goto_targets, out.any_indirect_goto)
+}
+
+fn new_facts() -> DispatchFacts {
+    DispatchFacts {
         any_asm: false,
         any_nested_func: false,
         tables: Vec::new(),
-    };
-    walk_block(body, &mut out);
-    out
+        goto_targets: Vec::new(),
+        goto_edges: Vec::new(),
+        any_indirect_goto: false,
+        labels: Vec::new(),
+    }
+}
+
+fn note_label(out: &mut DispatchFacts, name: &str) {
+    if !out.labels.iter().any(|n| n == name) {
+        out.labels.push(name.to_string());
+    }
+}
+
+fn note_goto_target(out: &mut DispatchFacts, name: &str) {
+    // 边数：每条 goto 都算一条（不聚重），见 [`DispatchFacts::goto_edges`] 的理由。
+    out.goto_edges.push(name.to_string());
+    if !out.goto_targets.iter().any(|n| n == name) {
+        out.goto_targets.push(name.to_string());
+    }
 }
 
 fn note_table(out: &mut DispatchFacts, name: &str) {
@@ -193,34 +296,46 @@ fn walk_stmt(st: &Stmt, out: &mut DispatchFacts) {
             }
         },
         Stmt::Block { b, .. } => walk_block(b, out),
-        Stmt::Label { stmt: inner, .. } => walk_stmt(inner, out),
+        Stmt::Label { name, stmt: inner, .. } => {
+            note_label(out, &name.name);
+            walk_stmt(inner, out);
+        },
         Stmt::GotoIndirect { expr, .. } => {
+            out.any_indirect_goto = true;
             if let Some(site) = indirect_table_site(expr) {
                 note_table(out, site.table);
             }
             walk_expr(expr, out);
         },
         Stmt::AsmGoto {
-            outputs, inputs, ..
+            outputs,
+            inputs,
+            goto_labels,
+            ..
         } => {
             // 语句级 asm 一律算「本函数有 asm」，不管它有没有跳出目标：
             // 模板文本里写什么号是不可追溯的，而 %rbp 现在归本后端。
             out.any_asm = true;
+            for l in goto_labels {
+                note_goto_target(out, &l.name);
+            }
             for e in outputs.iter().chain(inputs.iter()) {
                 walk_expr(e, out);
             }
         },
         Stmt::Invoke { call, .. } => walk_stmt(call, out),
         Stmt::EhLandingPad {
-            object, selector, ..
+            label,
+            object,
+            selector,
+            ..
         } => {
+            note_label(out, &label.name);
             walk_expr(object, out);
             walk_expr(selector, out);
         },
-        Stmt::Goto { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. }
-        | Stmt::Fallthrough { .. } => {},
+        Stmt::Goto { target, .. } => note_goto_target(out, &target.name),
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Fallthrough { .. } => {},
     }
 }
 
@@ -328,6 +443,22 @@ mod tests {
         panic!("测试源里没有 f");
     }
 
+    fn goto_targets_of(src: &str) -> Vec<String> {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        for d in m.source().decls.iter() {
+            if let Decl::Func(f) = d {
+                if f.name.name == "f" {
+                    let b = f.body.as_ref().expect("测试源里 f 必须有体");
+                    let mut t = collect(b).goto_targets;
+                    t.sort();
+                    return t;
+                }
+            }
+        }
+        panic!("测试源里没有 f");
+    }
+
     /// `goto *tbl[i]`（tbl 是指针数组）要收到表名与站点数；同一张表多个站点要累加。
     #[test]
     fn indirect_goto_on_pointer_array_is_collected() {
@@ -397,6 +528,35 @@ mod tests {
         assert_eq!(tables2, vec![("t2".to_string(), 2u32)]);
     }
 
+    /// 同一个遍历里的两份 goto 事实：`goto_targets` 只回答「有没有人跳」（聚重），
+    /// `goto_edges` 回答「有几条进入边」（不聚重）。后者是常量存前代「紧邻标号递表」
+    /// 的前提：多条进入边时那条规则不成立（现场：bison 的 `yyreduce:`）。
+    #[test]
+    fn goto_edges_count_every_goto_while_targets_dedupe() {
+        let (prog, _d) = crate::parser::parse(
+            b"long f(long i){ long y = 1; if (i) { y = 5; goto L; } y = 9; goto L;\n\
+              L: return y; }",
+            "t.c",
+        );
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        let d = m
+            .source()
+            .decls
+            .iter()
+            .find_map(|x| match x {
+                Decl::Func(f) if f.name.name == "f" => Some(f.body.as_ref().expect("f 有体")),
+                _ => None,
+            })
+            .expect("测试源里没有 f");
+        let fa = collect(d);
+        assert_eq!(fa.goto_targets, vec!["L".to_string()], "聚重的那份只能有一条");
+        assert_eq!(
+            fa.goto_edges,
+            vec!["L".to_string(), "L".to_string()],
+            "不聚重的那份必须把两条 `goto L` 都记下来（少一条就等于把多进入边误当单进入边）"
+        );
+    }
+
     /// `primary_table` 取站点最多的那张；并列时取最先出现的（可复现，且不依赖运行期剖面）。
     #[test]
     fn primary_table_prefers_most_sites_then_first() {
@@ -406,6 +566,10 @@ mod tests {
                 any_asm: false,
                 any_nested_func: false,
                 tables,
+                goto_targets: vec![],
+                goto_edges: vec![],
+                any_indirect_goto: false,
+                labels: vec![],
             };
             let got = d.primary_table().map(|s| s.to_string());
             got
@@ -423,5 +587,29 @@ mod tests {
             Some("a")
         );
         assert_eq!(f("long f(long i){ return i; }").as_deref(), None);
+    }
+
+    /// `goto_targets` 是给 AST 层「块内向前常量代回」用的位置轴判据：只有**被 goto
+    /// 指向**的标号才是屏障（`x = C` 之后遇到它就停止代回，因为那条路绕过了赋值）。
+    /// 必须同时收到普通 `goto` 与 `asm goto` 的标签表 —— 后者漏一种，代回就会跨过
+    /// 一条可绕行的边。
+    #[test]
+    fn goto_targets_collects_both_kinds() {
+        assert_eq!(
+            goto_targets_of(
+                "long f(long c){ long x = 0;\n\
+                 if (c) goto mid;\n\
+                 asm goto(\"\" :::: far);\n\
+                 x = 1;\n\
+                 mid: return x;\n\
+                 far: return x + 1; }"
+            ),
+            vec!["far".to_string(), "mid".to_string()]
+        );
+        // 没人跳的孤儿标号不是屏障（实测 `mm/shmem.o` 的 `allocated:` 在死块删掉后
+        // 就成了这种）：漏了这条，第二跳不动点就不会收敛。
+        assert!(goto_targets_of("long f(long c){ long x = 0;\n\
+                                  x = 1;\n\
+                                  orphan: return x; }").is_empty());
     }
 }

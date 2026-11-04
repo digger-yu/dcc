@@ -30,6 +30,8 @@ include!("integration/c_attr_builtin.rs");
 
 include!("integration/c_pp_c23.rs");
 
+include!("integration/c_pp_cache.rs");
+
 include!("integration/c_abi_vararg.rs");
 
 include!("integration/c_link_debug.rs");

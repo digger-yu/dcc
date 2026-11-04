@@ -1809,6 +1809,11 @@ fn is_addr_target_ok(e: &Expr) -> bool {
         Expr::Ident { .. } | Expr::String { .. } => true,
         Expr::Index { arr, idx, .. } => is_addr_target_ok(arr) && const_eval::eval(idx).is_ok(),
         Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
+        // C11 6.5.3.2p3: `&*E` ≡ `E`。内核 `sysrq_key_table[]` 的元素是
+        // `&(*(const struct sysrq_key_op *)((void *)0))`（配置关闭时的占位），
+        // 合法性与 `E` 自身一致。const_eval 已能折叠时走不到这里，
+        // 保留此臂让 `&*<地址常量链>` 与 `<地址常量链>` 同判定。
+        Expr::Deref { e, .. } => is_static_initializer(e),
         Expr::CompoundLit { inits, .. } => inits.iter().all(|item| match item {
             InitItem::Expr(e) => is_static_initializer(e),
             InitItem::Designated { value, .. } => is_static_initializer(value),
@@ -1928,6 +1933,13 @@ fn is_addr_of_member_ok(e: &Expr) -> bool {
                 Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
                 // 嵌套索引
                 Expr::Index { .. } => is_static_initializer(arr),
+                // 复合字面量数组：`(&((struct X[]){...})[0].field)`。C11 6.5.2.5p5：
+                // 文件作用域的复合字面量对象有静态存储期，取它的地址是链接期可重定位
+                // 常量。内核 `I915_PMU_FORMAT_ATTR()`（drivers/gpu/drm/i915/i915_pmu.c）
+                // 展开成 `(&((struct i915_str_attribute[]){ { .attr = __ATTR(...),
+                // .str = ... } })[0].attr.attr)`，以前这里 `_ => false` 把整张表判成
+                // E1006。
+                Expr::CompoundLit { .. } => is_static_initializer(arr),
                 _ => false,
             };
             base_ok && const_eval::eval(idx).is_ok()

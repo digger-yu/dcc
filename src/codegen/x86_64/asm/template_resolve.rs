@@ -148,7 +148,7 @@ impl Codegen {
                 }
                 // 最后替换裸 %N
                 resolved = resolved.replace(&key, &Self::asm_format_subst_safe(val));
-            } else if let Some(val) = Self::eval_asm_operand(op) {
+            } else if let Some(val) = self.eval_asm_operand(op) {
                 // 修饰符形式: 纯数值 const 求值结果, %a/%P/%c 直接输出数字
                 for m in ['a', 'P', 'c'] {
                     let mkey = format!("%{}{}", m, idx);
@@ -205,14 +205,25 @@ impl Codegen {
         resolved = Self::substitute_asm_unique_number(&resolved, self.next_label as u64);
         Self::unescape_asm_template(&resolved)
     }
+    /// 按逗号切 GAS 的参数串，**跳过引号与括号/方括号内部**。
+    ///
+    /// 为什么必须看括号：`mov (%rcx,%rdx,4), %rax` 的操作数串是
+    /// `(%rcx,%rdx,4), %rax`，按裸逗号切会得到 4 段（`(%rcx`、`%rdx`、`4)`、` %rax`），
+    /// 于是整条指令落进「不认识该指令」的兜底分支 —— 实测全树
+    /// `arch/x86/kernel/cpu/resctrl/pseudo_lock.c` 就因此报 E0311。
+    /// 同一份判据给数据伪指令（`.long a - ., b - .`）也用，那里本来就是平衡括号，
+    /// 加这一层不改变它的行为。
     pub(crate) fn split_asm_args(s: &str) -> Vec<&str> {
         let mut args = Vec::new();
         let mut start = 0;
         let mut in_quote = false;
+        let mut depth = 0i32;
         for (i, c) in s.char_indices() {
             match c {
                 '"' => in_quote = !in_quote,
-                ',' if !in_quote => {
+                '(' | '[' if !in_quote => depth += 1,
+                ')' | ']' if !in_quote => depth -= 1,
+                ',' if !in_quote && depth <= 0 => {
                     args.push(&s[start..i]);
                     start = i + 1;
                 },

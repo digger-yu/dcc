@@ -24,6 +24,7 @@ pub mod diagnostics;
 pub mod driver;
 #[cfg(test)]
 mod env_hygiene_tests;
+pub mod fast_hash;
 pub mod fixdep;
 pub mod float128;
 pub mod float80;

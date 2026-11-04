@@ -64,6 +64,16 @@ pub struct SanitizerFlags {
     pub cov_trace_switch: bool,
     /// `-fsanitize-coverage=8bit-counters` counter init callbacks.
     pub cov_8bit_counters: bool,
+    /// `-fsanitize-coverage=trace-pc-guard`：每边一个 `unsigned int` guard 计数器。
+    ///
+    /// 与 `kcov`（`trace-pc`：每块一次 `__sanitizer_cov_trace_pc()`）必须是两回事：
+    /// gcc/clang 在 `trace-pc` 下**不发** guard 数组，而 dcc 的 guard 数组是往函数体里
+    /// 插一条 `static unsigned int __dcc_cov_guards_N[16]` 声明 —— 静态局部声明会让
+    /// `body_is_splicable` 判「体不可整体搬移」，于是所有 `__always_inline` 助手都不再
+    /// 展开。实测 allmodconfig 里 13/39 个 TU 因此编不过：`arch_static_branch()` 留在
+    /// 外联副本里，`"i"(key)` 拿不到常量 ⇒ `impossible constraint in 'asm'`。内核
+    /// `CONFIG_KCOV` 用的正是 `-fsanitize-coverage=trace-pc`。
+    pub cov_trace_pc_guard: bool,
     /// `-fsanitize-coverage=pc-table` PC table init callbacks.
     pub cov_pc_table: bool,
     /// `-fsanitize=fuzzer` (san-coverage + compare + switch)
@@ -84,7 +94,32 @@ pub struct SanitizerFlags {
     pub cfi_unrelated_cast: bool,
     /// `-fsanitize=cfi-mfcall` (member function call type check)
     pub cfi_mfcall: bool,
+    /// GCC/Clang 认得、但 dcc **当前没有对应插桩**的 `-fsanitize=<check>` 子项。
+    ///
+    /// 为什么要单独记：这些名字是标准拼写，拒绝它们就等于让内核构建直接断掉
+    /// ——`scripts/Makefile.ubsan` 按 `CONFIG_UBSAN_BOOL`/`CONFIG_UBSAN_ENUM`/
+    /// `CONFIG_UBSAN_ARRAY_BOUNDS` 无条件递过来 `-fsanitize=bool` 等（这几项不像
+    /// `UBSAN_BOUNDS_STRICT` 那样有 `cc-option` 探测可退），报「不认识的 sanitizer」
+    /// 会把每个 TU 砸在命令行上。但它们也不能默默假装支持：那个位就是
+    /// 「收下了、没插桩」的账，`cli.rs` 把 `accepted_only_note()` 当警告发出去。
+    ///
+    /// 不能把它们映射到 `ubsan`：dcc 的 UBSan 只有一个开关（一开就是全家），
+    /// 而配置只要 bool/enum 这两类检查 —— 多插的 `type_mismatch`/`alignment` 检查会
+    /// 改掉内核运行期行为（而 `CONFIG_UBSAN_ALIGNMENT=n` 时 gcc 根本不发它们）。
+    pub ubsan_accepted_only: u32,
 }
+
+// `ubsan_accepted_only` 的位定义（一个检查一位）。
+// bounds 一族不在表里：它们直接保持「不支持」报错，让 Kconfig 的 `cc-option` 探测
+// 把 `CONFIG_UBSAN_BOUNDS` 关掉（见 `apply_sanitize_name` 的 ②）。
+pub const UBSAN_ONLY_BOOL: u32 = 1 << 0;
+pub const UBSAN_ONLY_ENUM: u32 = 1 << 1;
+
+/// 位 → 可读的检查名（按固定顺序，给警告用）。
+const UBSAN_ONLY_NAMES: &[(u32, &str)] = &[
+    (UBSAN_ONLY_BOOL, "bool"),
+    (UBSAN_ONLY_ENUM, "enum"),
+];
 
 impl SanitizerFlags {
     /// 从 `-fsanitize=*` / `-fsanitize-coverage` 等 CLI 字符串解析。
@@ -118,7 +153,12 @@ impl SanitizerFlags {
 
     fn apply_coverage_name(name: &str, f: &mut Self) -> Result<(), CliError> {
         match name {
-            "trace-pc" | "trace-pc-guard" | "coverage" => f.kcov = true,
+            "trace-pc" => f.kcov = true,
+            "trace-pc-guard" => {
+                f.kcov = true;
+                f.cov_trace_pc_guard = true;
+            },
+            "coverage" => f.kcov = true,
             "trace-cmp" => {
                 f.kcov = true;
                 f.cov_trace_cmp = true;
@@ -181,7 +221,32 @@ impl SanitizerFlags {
                 f.cov_trace_cmp = true;
                 f.cov_trace_switch = true;
             },
-            "coverage" | "trace-pc" | "trace-pc-guard" => f.kcov = true,
+            "coverage" | "trace-pc" => f.kcov = true,
+            "trace-pc-guard" => {
+                f.kcov = true;
+                f.cov_trace_pc_guard = true;
+            },
+            // GCC/Clang 的 UBSan 子项分三类处理：
+            // ① `bool`/`enum` 只记位 + 警告：内核 `lib/Kconfig.ubsan` 里这两项**没有**
+            //   `cc-option` 探测可退（`config UBSAN_BOOL default y`），报不支持就是每个 TU
+            //   碎在命令行上；但也不能直接映射到 `ubsan` —— dcc 的 UBSan 只有一个开关，一开
+            //   就是 type_mismatch/alignment 全家，那是配置没要的运行期行为改变。
+            // ② bounds 一族故意继续报错：`CC_HAS_UBSAN_ARRAY_BOUNDS`/
+            //   `CC_HAS_UBSAN_BOUNDS_STRICT` 就是 `def_bool $(cc-option,...)`，拒绝让探测
+            //   回答「不支持」，Kconfig 自己会把 `UBSAN_BOUNDS` 关掉（它的 `depends on` 就
+            //   是那两个 CC_HAS_*），旗标根本不会到达真编译 —— 这正是 Kconfig 设计好的退路，
+            //   比「假装支持但什么都不做」诚实。
+            // ③ dcc 现有插桩能对应上的那几类 → `ubsan`。
+            "bool" => f.ubsan_accepted_only |= UBSAN_ONLY_BOOL,
+            "enum" => f.ubsan_accepted_only |= UBSAN_ONLY_ENUM,
+            "shift" | "integer-divide-by-zero" | "division-by-zero" | "unreachable"
+            | "return" | "return-type" | "null" | "null-check" | "alignment"
+            | "misaligned-access" | "object-size" | "signed-integer-overflow"
+            | "unsigned-integer-overflow" | "float-cast-overflow" | "vla-bound"
+            | "pointer-overflow" | "builtin" | "vptr" | "function"
+            | "undefined" => {
+                f.ubsan = true;
+            },
             _ => return Err(CliError::new(&format!("unsupported sanitizer: {}", name))),
         }
         Ok(())
@@ -202,6 +267,21 @@ impl SanitizerFlags {
             || self.msan
             || self.dfsan
             || self.any_cfi()
+    }
+
+    /// 「收下了但没插桩」的 UBSan 子项 → 一行可读名单；没这类项时返回 `None`。
+    ///
+    /// `cli.rs` 把它当警告发：不能只到运行期才发现「配置要的边界检查其实没做」。
+    pub fn accepted_only_note(&self) -> Option<String> {
+        if self.ubsan_accepted_only == 0 {
+            return None;
+        }
+        let names: Vec<&str> = UBSAN_ONLY_NAMES
+            .iter()
+            .filter(|(bit, _)| self.ubsan_accepted_only & bit != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        Some(names.join(", "))
     }
 
     /// TU 级 init 是否需要在首个函数前插入。
@@ -231,8 +311,15 @@ impl SanitizerFlags {
     }
 
     /// 边覆盖 guard 计数器 (trace-pc-guard)。
+    ///
+    /// `kcov` 单独不再进来：理由见 `cov_trace_pc_guard` 字段注释（guard 数组的静态
+    /// 局部声明会把 `__always_inline` 的体内联全灭）。`fuzzer`/`8bit-counters`/`pc-table`
+    /// 确实需要每边计数器，保持原样。
     pub fn needs_edge_coverage(&self) -> bool {
-        self.kcov || self.cov_8bit_counters || self.cov_pc_table || self.fuzzer
+        self.cov_trace_pc_guard
+            || self.cov_8bit_counters
+            || self.cov_pc_table
+            || self.fuzzer
     }
 
     /// KCSAN 内存访问 watchpoint。
@@ -563,6 +650,8 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
             ubsan: func_flags.ubsan,
             kcsan: func_flags.kcsan,
             kcov: false,
+            cov_trace_pc_guard: false,
+            ubsan_accepted_only: 0,
             cov_trace_cmp: false,
             cov_trace_switch: false,
             cov_8bit_counters: func_flags.cov_8bit_counters,
@@ -4884,6 +4973,9 @@ mod tests {
             &mut prog,
             SanitizerFlags {
                 kcov: true,
+                // guard 计数器只在 `-fsanitize-coverage=trace-pc-guard` 下发（见
+                // `cov_trace_pc_guard` 字段注释）；本用例验的正是那条路径。
+                cov_trace_pc_guard: true,
                 ..Default::default()
             },
             Arch::X86_64,
@@ -4902,6 +4994,52 @@ mod tests {
             "KCOV should inject trace_pc at function entry, got: {:?}",
             names
         );
+    }
+
+    #[test]
+    fn kcov_trace_pc_does_not_inject_guards() {
+        // `-fsanitize-coverage=trace-pc`（内核 CONFIG_KCOV 用的就是它）只发每块 PC 回调，
+        // 不发 guard 计数器：guard 数组是函数体里的 `static` 声明，会把所有
+        // `__always_inline` 助手的体内联判成「不可整体搬移」（allmodconfig 的 jump-label
+        // 阻塞根因）。本用例把「trace-pc 不带 guard」钉住。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::If {
+                cond: Expr::Int { v: 1, span: Span::point("t.c", 1, 1), ty: Type::Int },
+                then_: Box::new(Stmt::Return { val: None, span: Span::point("t.c", 2, 1) }),
+                else_: Some(Box::new(Stmt::Return { val: None, span: Span::point("t.c", 3, 1) })),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags { kcov: true, ..Default::default() },
+            Arch::X86_64,
+        );
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__sanitizer_cov_trace_pc"),
+            "trace-pc 应在函数入口发 PC 回调，got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("__sanitizer_cov_trace_pc_guard")),
+            "trace-pc 不该发 guard 回调（那是 trace-pc-guard 的活），got: {names:?}"
+        );
+        // 体内也不能留 `static` 数组声明：那正是内联被否决的那一条。
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        for it in &f.body.as_ref().unwrap().items {
+            if let BlockItem::Decl(Decl::Var(v)) = it {
+                assert!(!v.is_static, "trace-pc 不该往函数体里塞静态声明：{}", v.name.name);
+            }
+        }
     }
 
     // ── Effective flags / no_sanitize ─────────────────────────────────
@@ -5715,6 +5853,9 @@ mod tests {
             &mut prog,
             SanitizerFlags {
                 kcov: true,
+                // guard 数组只在 trace-pc-guard 下存在（见 `cov_trace_pc_guard` 字段注释）；
+                // 本用例验的就是「内联体复用调用者的 guard 数组」那一条路。
+                cov_trace_pc_guard: true,
                 ..Default::default()
             },
             Arch::X86_64,

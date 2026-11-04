@@ -1076,7 +1076,14 @@ fn block_scope_extern_takes_address_emits_undefined_reference() {
         .find(|l| l.split_whitespace().last() == Some("gt"))
         .unwrap_or_else(|| panic!("块内 extern 取址应作为未定义引用出现: {syms}"));
     assert!(line.contains("UND"), "gt 只能是引用: {line}");
-    assert!(line.contains("OBJECT"), "gt 是对象不可能是函数: {line}");
+    // 这里判的不是「必须是 OBJECT」而是「不得是 FUNC，也不得带类型/尺寸」：GAS 对
+    // **任何**未定义引用都只给「名字 + bind」（实测 gcc 的 `arch/x86/kernel/nmi.o` 24 条 UND
+    // 全 `NOTYPE size 0`）。以前这句只断 `OBJECT`，恰好把dcc 当时的口径错当契约钉住了；
+    // 本用例真正要守的是下面那条「必须留下指 gt 的重定位」（链接器无从解析 = 链不上）。
+    assert!(
+        line.contains("NOTYPE") && !line.contains("FUNC") && !line.contains("OBJECT"),
+        "UND 项必须与 GAS 同口径（NOTYPE、不发对象/函数类型）: {line}"
+    );
     assert!(rel.contains("gt"), "必须留下指向 gt 的重定位: {rel}");
 }
 
@@ -1402,7 +1409,11 @@ fn elf64_symtab_matches_gabi_layout() {
         ),
         (
             "mixed",
-            "int callee(int);\nstatic int helper(int y) { return y * 3; }\n\
+            // `helper` 必须真的在产物里留一份 LOCAL FUNC —— 这是本条要压的布局事实，
+            // 所以显式 `noinline`：gcc -O2 对「只被一个调用点、成本 4 的静态小函数」
+            // 一律内联掉、连符号都不留（实测 `gcc -O2`：产物只剩 `caller`），dcc 从本轮
+            // 起与它同口径（§3.46 的嵌套位置内联），不加属性的话这项断言会变成"测空气"。
+            "int callee(int);\nstatic __attribute__((noinline)) int helper(int y) { return y * 3; }\n\
              static int gsrv;\nint caller(int x) { return helper(x) + callee(x) + gsrv; }\n",
             &["helper", "caller"][..],
         ),
@@ -2710,7 +2721,9 @@ fn elf32_symtab_matches_gabi_layout() {
         ),
         (
             "mixed",
-            "int callee(int);\nstatic int helper(int y) { return y * 3; }\nint caller(int x) { return helper(x) + callee(x); }\n",
+            // 同 ELF64 那条：`noinline` 让 helper 真的留在产物里（gcc -O2 会把这种
+            // 一调用点的小静态函数内联掉、不留符号，实测只剩 `caller`）。
+            "int callee(int);\nstatic __attribute__((noinline)) int helper(int y) { return y * 3; }\nint caller(int x) { return helper(x) + callee(x); }\n",
             &["helper", "caller"][..],
         ),
     ];
@@ -3652,11 +3665,35 @@ fn tls_model_attr_fixture_lays_out_tbss_and_emits_tlsdesc_on_a64() {
     );
     assert_eq!(tbss_flags & 0x1, 0x1, ".tbss 必须是可写段 (SHF_WRITE)");
     assert_eq!(tbss_size, 20, "5 个 int 线程变量应占 20 字节");
-    let (tdata_type, tdata_flags, _tdata_size) = *sections
+    let (tdata_type, tdata_flags, tdata_size) = *sections
         .get(".tdata")
         .expect("TLS 初始化数据节应存在");
     assert_eq!(tdata_type, 1, ".tdata 应为 SHT_PROGBITS");
-    assert_eq!(tdata_flags & 0x400, 0x400, ".tdata 必须带 SHF_TLS");
+    // **只有真有 TLS 初始化内容时才带 ALLOC/TLS**。本夹具的 5 个 `__thread int` 全部未初始化
+    // ⇒ 全进 `.tbss`，`.tdata` 是一个 **空节**。以前这里断言「空 `.tdata` 也必须带 SHF_ALLOC
+    // + SHF_TLS」，而那条契约在真链接里是致命的：ld 的孤儿处理会把一个 ALLOC 的 TLS 节排到
+    // LOAD 段末尾，直接报
+    // `ld: .tmp_vmlinux1: section '.tdata' can't be allocated in segment 1 LOAD: .data … .modinfo
+    //  .tdata .tbss`（实测 `report/linux71-dcc-fulltree-build-2026-10-28.md` §3.20，它是未定义
+    // 引用清完后仍然挡在最终链接前的独立一道）。GAS 在这种情况下根本不建该节；dcc 的 ET_REL
+    // 节号是固定表（自定义节从 7 起，不能靠「少发一条表项」对齐），所以保留表项、去掉标志。
+    if tdata_size == 0 {
+        assert_eq!(
+            tdata_flags & 0x2,
+            0,
+            "空 .tdata 不得带 SHF_ALLOC（否则 ld 把它当孤儿 ALLOC 节摄进 LOAD 段），实际 {:#x}",
+            tdata_flags
+        );
+        assert_eq!(
+            tdata_flags & 0x400,
+            0,
+            "空 .tdata 不得带 SHF_TLS，实际 {:#x}",
+            tdata_flags
+        );
+    } else {
+        assert_eq!(tdata_flags & 0x400, 0x400, ".tdata 有内容时必须带 SHF_TLS");
+        assert_eq!(tdata_flags & 0x2, 0x2, ".tdata 有内容时必须带 SHF_ALLOC");
+    }
 
     // STT_TLS == 6, STB_GLOBAL == 1
     let mut seen: Vec<(String, u64)> = Vec::new();
@@ -3811,9 +3848,11 @@ fn target_clones_link_mode_is_announced_on_both_paths() {
         "动态产物必须真的有 DT_NEEDED（不然就是假动态）:\n{dyn_out}"
     );
     let lower = stderr.to_lowercase();
+    // 链接方式必须说出来。dcc 默认用宿主 `ld` 直驱（crt + -lc + -dynamic-linker），
+    // 环境不满足才退回 host cc；两条都算「宿主链接」，本条只钉「不得静默」。
     assert!(
-        stderr.contains("via host cc"),
-        "链接方式必须被说出来（这里是宿主 cc），不允许静默:\n{stderr}"
+        stderr.contains("via host ld") || stderr.contains("via host cc"),
+        "链接方式必须被说出来（宿主 ld 或 cc），不允许静默:\n{stderr}"
     );
     assert!(
         !lower.contains("built-in linker") && !lower.contains("downgrade"),
@@ -3919,3 +3958,304 @@ fn target_clones_libc_links_via_host_cc_and_builtin_failure_is_attributed() {
     );
 }
 
+/// 未定义（UND）符号的类型必须是 `STT_NOTYPE` —— 与 GAS 完全一致。
+///
+/// 这条判据来自内核全量构建的链接期实测（`report/linux71-dcc-fulltree-build-2026-10-28.md`
+/// §3.10）：`arch/x86/lib/retpoline.S` 用 `SYM_CODE_START*` 把 `retbleed_return_thunk` 定义成
+/// NOTYPE，而那个地址**不是指令边界**（该文件自己的注释就写了
+/// `retbleed_return_thunk + 1 isn't an instruction boundary`）。引用侧一旦发成 `STT_FUNC`，
+/// `ld -r` 合并时会把 FUNC 带到那条定义上；objtool 的 `create_prefix_symbol()` 开头是
+/// `if (!is_func_sym(func) …) return 0;`，只对 FUNC 去 `find_insn()`，拿到 NULL 后 `return -1`
+/// ⇒ objtool 返 255 ⇒ **整个 `make vmlinux.o` 失败**（实跑就死在这一条，且 26524 行 objtool
+/// 输出里只有这一行是致命的）。
+///
+/// 判据写成「一条 UND FUNC 都不许有」，不点名 `__x86_return_thunk`/`strcmp`/`call_depth_return_thunk`
+/// 这类名字：GAS 对未定义引用**从不**标函数类型（实测 gcc 产的 `arch/x86/kernel/nmi.o`：24 条
+/// UND 全 NOTYPE，其中包括真函数调用 `strcmp`、`synchronize_rcu`），点名清单必然漏。
+#[test]
+#[cfg(unix)]
+fn undefined_symbol_refs_are_notype_like_gas() {
+    let src = r#"
+extern int declared_fn(int);        /* 真原型，定义在本 TU 之外 */
+static int local_helper(int x);
+void caller(void) { (void)declared_fn(1); (void)local_helper(2); }
+static int local_helper(int x) { return x + 1; }
+asm(".text\n\nmy_local_thunk:\n\tret\n");   /* asm 里定义的标号，没写 .type */
+int via_asm(void) { int r; asm volatile("call my_local_thunk" : "=a"(r)); return r; }
+"#;
+    let (out, obj) = run_object_test_flags("und-notype", src, &["-O2"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}", String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read .o");
+    let _ = fs::remove_file(&obj);
+    let syms = elf64_syms(&bytes);
+
+    let und_func: Vec<String> = syms
+        .iter()
+        .filter(|s| s.shndx == 0 && s.stype == 2)
+        .map(|s| s.name.clone())
+        .collect();
+    assert!(
+        und_func.is_empty(),
+        "未定义引用必须发 STT_NOTYPE（GAS 同口径），实测 UND FUNC 有 {} 条: {:?}\n\
+         它们会在 `ld -r` 后把 FUNC 带到 SYM_CODE 定义上，objtool 因此报\
+         `can't find starting instruction` 并让 vmlinux.o 以 255 失败",
+        und_func.len(), und_func
+    );
+
+    // 反向护栏：不是「干脆全发 NOTYPE」—— 本 TU 真定义的全局函数仍要是 FUNC
+    assert!(
+        syms.iter().any(|s| s.name == "caller" && s.shndx != 0 && s.stype == 2),
+        "本 TU 定义的全局函数 `caller` 必须是 FUNC 定义项（不是 UND、也不是 NOTYPE）"
+    );
+    // 真外部函数以 NOTYPE 的 UND 项存在（gcc 对 strcmp 就是这么发的）
+    assert!(
+        syms.iter().any(|s| s.name == "declared_fn" && s.shndx == 0 && s.stype == 0),
+        "`declared_fn` 应以 STT_NOTYPE 的 UND 项存在"
+    );
+}
+
+/// 未定义引用的口径与 GAS 对齐：**任何** UND 项都不得带类型、不得带 size。
+///
+/// 为什么单独一条（而不是归到上面那条 UND FUNC 的用例里）：上一轮只修了「未定义**函数**
+/// 引用发 FUNC」那一半（它会让 objtool 以 255 挂），而未定义**数据**引用这一半当时没人管：
+/// gcc 参照树 60 个对象的 184 条 UND 全部是 NOTYPE，而 dcc 同规模样本有 432 条 `OBJECT`
+/// 且带声明尺寸。五秒四形探针（`extern int gdata;` / `extern char gbuf[16];` /
+/// `extern void (*gfn)(void);` / `extern struct S {int a;} gstruct;`）：gcc 四条全
+/// `NOTYPE size 0`，旧 dcc 四条全 `OBJECT size 4/16/8/4` —— 等于在符号表里凭空描述一个
+/// 本 TU 并不存在的对象。
+///
+/// 站点：`codegen/x86_64/elf/rel_symbols.rs` 里 var 符号的 `ty:` 臂以前只分「函数声明 / TLS /
+/// 对象」，没先看 `section == SHN_UNDEF`；ET_EXEC 那份副本（`elf/symbols.rs` 里对未定义函数
+/// 声明发 `STT_FUNC`）同步改成同一口径 —— 同一个事实只留一个出处。
+#[test]
+#[cfg(unix)]
+fn undefined_data_refs_are_notype_size_zero() {
+    let src = r#"
+extern int gdata;
+extern char gbuf[16];
+extern void (*gfn)(void);
+struct S { int a; };
+extern struct S gstruct;
+int f(void) { return gdata + gbuf[0] + gstruct.a + (gfn ? 1 : 0); }
+"#;
+    let (out, obj) = run_object_test_flags("und-data-notype", src, &["-O2"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read .o");
+    let _ = fs::remove_file(&obj);
+    let syms = elf64_syms(&bytes);
+
+    // 正判据：任何 UND 项都不得带类型、不得带 size（GAS 只给名字 + bind）。
+    let bad: Vec<(String, u8, u64)> = syms
+        .iter()
+        .filter(|s| s.shndx == 0 && !s.name.is_empty() && (s.stype != 0 || s.size != 0))
+        .map(|s| (s.name.clone(), s.stype, s.size))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "未定义引用必须与 GAS 同口径（STT_NOTYPE + size 0），实测偏离 {} 条: {:?}\n\
+         （gcc 同形四条全 `NOTYPE size 0`；OBJECT 带声明尺寸会让符号表里出现不存在的对象）",
+        bad.len(),
+        bad
+    );
+
+    // 四条外部数据声明必须在 UND 名单里（否则上面那条断言会因为「根本没发」而假绿）。
+    for n in ["gdata", "gbuf", "gfn", "gstruct"] {
+        assert!(
+            syms.iter().any(|s| s.name == n && s.shndx == 0),
+            "`{n}` 应以 UND 项存在（实测名单: {:?})",
+            syms.iter()
+                .filter(|s| s.shndx == 0 && !s.name.is_empty())
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // 反向护栏：本 TU 定义的函数仍必须是 FUNC 定义项，不能「干脆全发 NOTYPE」。
+    assert!(
+        syms
+            .iter()
+            .any(|s| s.name == "f" && s.shndx != 0 && s.stype == 2),
+        "本 TU 定义的全局函数 `f` 必须是 FUNC 定义项"
+    );
+}
+
+/// `static inline` 的链接性必须是 `STB_LOCAL`，与 gcc 同形。
+///
+/// 为什么这条在内核路径上最要紧（不只是一个“看起来不对”）：旧写法把
+/// `is_weak || is_inline` 判在 `is_static` 前面，于是内核头文件里成百的
+/// `static inline` 助手全部变成 `GLOBAL+WEAK`。实测首批 424 个对象的合并视图：
+/// dcc 有 785 条 WEAK而 gcc 同名单全是 LOCAL；其中 40 个弱名在不同 TU 里**体长不同**
+/// （`kmalloc_noprof` 折的是尺寸/类型、`native_save_fl` 折的是旁路/补丁选项），而本 TU
+/// 真发重定位调自己那份外联副本的有 **296 条** —— `ld` 对同名 WEAK 只留一份，那就是
+/// **静默换实现**，而不只是 `.text` 体积差。
+///
+/// 三形同表，后两形是防过修的反向护栏：非 static 的裸 `inline`（GNU89/C99 语义）与
+/// `__attribute__((weak))` **仍须 WEAK**，否则多 TU 包含同一头文件会撞多重定义。
+#[test]
+#[cfg(unix)]
+fn static_inline_functions_are_local_like_gcc() {
+    let src = r#"
+static inline int si(int x) { return x + 1; }
+int (*const sp)(int) = si;            /* 取址 ⇒ 必须留下一份外联体 */
+inline int gnu_inline_fn(int x) { return x + 2; }   /* 非 static inline ⇒ WEAK */
+__attribute__((weak)) void weak_fn(void) {}         /* 显式 weak ⇒ WEAK */
+int use(int y) { return si(y) + gnu_inline_fn(y); }
+"#;
+    let (out, obj) = run_object_test_flags("static-inline-local", src, &["-O2"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read .o");
+    let _ = fs::remove_file(&obj);
+    let syms = elf64_syms(&bytes);
+    let bind_of = |n: &str| -> Option<u8> {
+        syms.iter()
+            .find(|s| s.name == n && s.shndx != 0)
+            .map(|s| s.bind)
+    };
+    // 0=LOCAL, 1=GLOBAL, 2=WEAK
+    assert_eq!(
+        bind_of("si"),
+        Some(0),
+        "`static inline` 是内部链接，必须发 STB_LOCAL（gcc 同形）；实测 bind={:?}。
+         发成 GLOBAL+WEAK 会让 `ld` 在不同体的同名副本里只留一份",
+        bind_of("si")
+    );
+    assert_eq!(
+        bind_of("gnu_inline_fn"),
+        Some(2),
+        "非 static 的 `inline` 仍必须是 WEAK（GNU89/C99 语义，多 TU 包同一头文件才能合一）"
+    );
+    assert_eq!(
+        bind_of("weak_fn"),
+        Some(2),
+        "`__attribute__((weak))` 仍必须是 WEAK —— 本改动不得把它一并推平"
+    );
+    assert_eq!(
+        bind_of("use"),
+        Some(1),
+        "普通全局函数仍必须是 GLOBAL"
+    );
+}
+
+
+/// `.note.GNU-stack` 必须与 GAS 逐字段同形，且**追加**在 ET_REL 固定节表末尾。
+///
+/// 为什么这条要钉住：GCC 对每个 C 文件都在 `.s` 尾部发
+/// `.section .note.GNU-stack,"",@progbits`，GAS 因此在对象里建一条零标志的同名节；
+/// `ld` 看到**缺该节**的对象就按「implied executable stack」处理，除了刷警告还把
+/// `PT_GNU_STACK` 标成 `RWE`（实测旧二进制链出的可执行文件是 RWE，修后是 RW）。
+/// 此前 dcc 靠 `driver.rs` 硬塞 `-Wl,-z,noexecstack` 绕开警告，那是掩盖产物缺口。
+///
+/// 反向护栏有两层，都对应真实风险：
+///   1. 节号不得移位。x86_64 的 ET_REL 节表是**固定表**（`.text`=1 … `.tbss`=6，
+///      自定义节从 7 起），`codegen/x86_64/elf/resolve.rs`/`rel_symbols.rs` 里成片的
+///      `7 + sec_idx` 依赖它 —— 所以这条节只能追加在末尾，插在中间会静默改掉每个
+///      自定义节的重定位目标节号。
+///   2. 有自定义节时它仍必须在末尾，即「追加」不随节数变化而改变相对次序。
+#[test]
+#[cfg(unix)]
+fn gnu_stack_note_section_matches_gas() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src_path = dir.join(format!("dcc-gnutest-{pid}.c"));
+    let obj_path = dir.join(format!("dcc-gnutest-{pid}.o"));
+    fs::write(&src_path, "int f(void) { return 42; }\n").expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let data = fs::read(&obj_path).expect("read object");
+
+    // 与 gcc 产物实测同字段：SHT_PROGBITS(1)、flags 0（**不得**带 SHF_ALLOC）、size 0、align 1。
+    // `elf64_sections` 只给 (type, flags, size)；align 单独按节头取。
+    let (ty, flags, size) = *elf64_sections(&data)
+        .get(".note.GNU-stack")
+        .expect("ET_REL 必须带 .note.GNU-stack（缺节 ⇒ ld 报 implied executable stack 且 PT_GNU_STACK=RWE）");
+    assert_eq!(ty, 1, ".note.GNU-stack 应为 SHT_PROGBITS，实际 {ty}");
+    assert_eq!(flags, 0, ".note.GNU-stack 的标志应为 0，实际 {flags:#x}");
+    assert_eq!(size, 0, ".note.GNU-stack 不占内容，实际 {size}");
+
+    // 固定表未被移位：`.text` 仍是 1、`.rodata` 仍是 2、`.tbss` 仍是 6。
+    let names = elf64_section_names(&data);
+    assert_eq!(names.get(1).map(String::as_str), Some(".text"));
+    assert_eq!(names.get(2).map(String::as_str), Some(".rodata"));
+    assert_eq!(names.get(6).map(String::as_str), Some(".tbss"));
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some(".note.GNU-stack"),
+        ".note.GNU-stack 必须追加在节表末尾（插在中间会改掉所有自定义节的 `7 + sec_idx` 坐标）"
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+
+    // 带自定义节的夹具：`.pushsection .rodata.custom` 仍从 7 起，而 note 依然在末尾。
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/shf_merge_strings.c");
+    let obj2 = dir.join(format!("dcc-gnutest2-{pid}.o"));
+    let out2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj2)
+        .arg(&fixture)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out2.status.success(),
+        "编译自定义节夹具失败: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let data2 = fs::read(&obj2).expect("read object");
+    let names2 = elf64_section_names(&data2);
+    assert!(
+        names2.iter().skip(7).any(|n| n == ".rodata.custom"),
+        "自定义节必须仍坐在 7 起的窗口里（实测节表: {names2:?}）"
+    );
+    assert_eq!(
+        names2.last().map(String::as_str),
+        Some(".note.GNU-stack"),
+        "有自定义节时 note 仍须在末尾，实际 {names2:?}"
+    );
+    let _ = fs::remove_file(&obj2);
+
+    // `-S` 文本出口走的是另一条路（交给真 GAS 汇编），必须补同一条指令 ——
+    // 否则同一个后端的两条出口产出节表不一致的对象。
+    let asm_path = dir.join(format!("dcc-gnutest-{pid}.s"));
+    let src3 = dir.join(format!("dcc-gnutest3-{pid}.c"));
+    fs::write(&src3, "int f(void) { return 42; }\n").expect("write fixture");
+    let o3 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&src3)
+        .output()
+        .expect("run dcc");
+    assert!(
+        o3.status.success(),
+        "-S 失败: {}",
+        String::from_utf8_lossy(&o3.stderr)
+    );
+    let text = fs::read_to_string(&asm_path).expect("read asm");
+    let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+    assert_eq!(
+        last.trim_end(),
+        "\t.section .note.GNU-stack,\"\",@progbits",
+        "-S 尾部必须补 .note.GNU-stack 指令，实际最后一行: {last:?}"
+    );
+    let _ = fs::remove_file(&src3);
+    let _ = fs::remove_file(&asm_path);
+}

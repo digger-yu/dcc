@@ -1269,7 +1269,11 @@ impl Codegen {
         } else {
             self.load_rsp_qword(11, callee_scratch.unwrap());
             if self.target.indirect_branch_thunk_extern {
-                self.call_label("__x86_indirect_call_thunk_r11");
+                // 内核的蹦床符号是 `__x86_indirect_thunk_<reg>`（`arch/x86/lib/retpoline.S`
+                // 的 `THUNK reg`，按 `asm/GEN-for-each-reg.h` 排进
+                // `__x86_indirect_thunk_array`）。带 `_call_` 的那一族只在
+                // `CONFIG_MITIGATION_CALL_DEPTH_TRACKING=y` 时才存在，不能拿它当默认形。
+                self.call_label("__x86_indirect_thunk_r11");
             } else {
                 // call *%r11 (typed): FF /2 reg=r11 (reg=2, /2)
                 self.emit_insn(&Insn::new(
@@ -1343,6 +1347,7 @@ mod tests {
             vendor: "unknown".into(),
             os: crate::cli::Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }))
     }
 

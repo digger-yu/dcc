@@ -1041,6 +1041,60 @@ fn macro_backtrace_limit_configurable() {
     );
 }
 
+/// 顺序出现的「简单标识符别名」调用**不得**消耗宏递归深度。
+///
+/// 缺陷现场：`security/selinux/ss/policydb.c` 用 dcc 编出的 `.o` 里
+/// `.discard.annotate_insn` 的第 2 条重定位指向未定义符号 `__COUNTER__b`，objtool 报
+/// `bad .discard.annotate_insn entry: 1 of type 3`，整棵树的构建卡在
+/// `security/selinux/ss/policydb.o`。
+///
+/// 根因不在 `instrumentation_begin()`：`expand_with_disabled_inner` 对
+/// 「body 只有单个标识符」的宏（`#define cpu_to_le32 __cpu_to_le32` 这类转发别名）
+/// 走 tail_call 优化 —— 展开 `body+args` 后，把**同一层级的后续文本**丢给
+/// `expand_macros_map` 递归处理。递归本身没问题，但它用的是嵌套深度：块里每出现
+/// 一个这样的调用就 +1，而 `-fmacro-backtrace-limit` 默认 128。policydb.c 末尾有
+/// 上百个 `cpu_to_le32(...)`，深度爬过 128 后 `expand_with_disabled` 直接返回原文，
+/// 于是 `instrumentation_begin()` 的实参 `__COUNTER__` 没被展开，
+/// `__ASM_BREF` 的 `##` 把它拼成 `__COUNTER__b`。
+///
+/// 判据：同一函数里 200 次别名调用必须能编过，且不能出现深度上限告警
+/// （旧实现从第 ~129 个调用起把 `ALIAS` 原样留给解析器，直接报语法/隐式声明错误）。
+#[test]
+#[cfg(unix)]
+fn sequential_alias_calls_do_not_consume_macro_depth() {
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let src = dir.join(format!("dcc-alias-depth-{tag}.c"));
+    let obj = dir.join(format!("dcc-alias-depth-{tag}.o"));
+    let mut content = String::from(
+        "static int identity(int x) { return x; }\n\
+         #define ALIAS identity\n\
+         int probe(void)\n{\n\tint s = 0;\n",
+    );
+    for _ in 0..200 {
+        content.push_str("\ts += ALIAS(1);\n");
+    }
+    content.push_str("\treturn s;\n}\n");
+    fs::write(&src, &content).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O1", "-fno-PIE", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "200 个顺序别名调用应当编过（旧实现会因深度耗尽把 ALIAS 原样留下）: {stderr}"
+    );
+    assert!(
+        !stderr.contains("W0201") && !stderr.contains("depth limit"),
+        "顺序别名调用不是嵌套，不应触发宏深度上限: {stderr}"
+    );
+}
+
 // ====== vDSO integration tests ======
 
 /// C99 hexadecimal floating-point constants: 0x1.5p3 form
@@ -1366,6 +1420,65 @@ _Static_assert(offsetof(struct s, a) == 0, "a offset");
         output.status.success(),
         "offsetof macro should work. stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `offsetof(T, arr[i])`：C11 6.7.9p6 的 member-designator 允许带下标，内核拿它写
+/// 布局断言（`drivers/tty/serial/serial_core.c:3581` 的
+/// `offsetof(struct serial_rs485, padding[1])`）。旧实现把 `[...]` **截掉不看**，
+/// 于是下标一律算成首元素偏移（该处给 12 而不是 16），断言假失败：实测 W0010 2 条，
+/// gcc 同文件 0 条。顺带钉住「顶层联合体」与「匿名联合体/结构体提升成员」两条路径。
+#[test]
+fn offsetof_member_path_accepts_array_subscripts() {
+    let src = r#"
+struct s {
+	unsigned int flags;
+	unsigned int a;
+	unsigned int b;
+	union {
+		unsigned int padding[5];
+		struct {
+			unsigned char addr_recv;
+			unsigned char addr_dest;
+			unsigned char padding0[2];
+			unsigned int padding1[4];
+		};
+	};
+};
+_Static_assert(offsetof(struct s, padding[1]) == 16, "one subscript");
+_Static_assert(offsetof(struct s, padding[4]) + 4u == sizeof(struct s), "tail subscript");
+_Static_assert(offsetof(struct s, padding1) == 16, "promoted through anon union+struct");
+struct m { int v[3][4]; };
+_Static_assert(offsetof(struct m, v[2][1]) == 2 * 4 * 4 + 1 * 4, "two subscripts");
+union u { long l; char c[8]; };
+_Static_assert(offsetof(union u, c[3]) == 3, "top-level union + subscript");
+"#;
+    let output = run_syntax_test("offsetof-subscripts", src);
+    assert!(
+        output.status.success(),
+        "offsetof 下标形式应能折叠. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("W0010"),
+        "这些断言 gcc 全部成立，不该有 W0010:\n{stderr}"
+    );
+}
+
+/// 反向对照：下标算出的偏移与断言不符时必须照样报 W0010 —— 修 `[...]` 不能顺手
+/// 把布局断言钝掉。
+#[test]
+fn offsetof_subscript_mismatch_is_still_reported() {
+    let src = r#"
+struct s { unsigned int a; unsigned int padding[5]; };
+_Static_assert(offsetof(struct s, padding[2]) == 8, "deliberately wrong");
+"#;
+    let output = run_syntax_test("offsetof-subscript-mismatch", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0010") || stderr.contains("deliberately wrong"),
+        "真写错的布局断言必须仍被报出来:\n{stderr}"
     );
 }
 

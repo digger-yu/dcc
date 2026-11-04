@@ -110,8 +110,13 @@ impl GlobalFacts {
 /// 非常量的东西当成不变式"（根因 2/3）—— 正是本缺陷的成因形态。
 #[derive(Default)]
 struct NameScan {
-    /// 调用 / 间接写入可能触及的对象名（由 `LicmCtx` 注入；全函数扫描期为空）。
-    observable: HashSet<String>,
+    /// 出现过调用或间接写入 ⇒ 所有可观测对象（见 [`LicmCtx::is_observable`]）都算被写。
+    ///
+    /// 这里只记标志、**不把名字逐条塞进 `written`**：可观测集含程序级的全部全局名
+    /// （内核 TU 数千个），每遇到一次调用/间接写就复制一遍是平方级。实测
+    /// `net/ipv4/tcp_input.o` 因此 25 分钟不出产物（perf 热点 60%+ 在
+    /// `malloc`/`free`/`memmove`/`sip::Hasher::write`）。
+    clobbered_all: bool,
     /// 循环内被写的名字 → 写次数。写入来源：直接赋值、自增/自减、复合赋值、
     /// 成员与数组元素写（记到根对象名）、以及调用/间接写带来的全部可观测对象。
     written: HashMap<String, u32>,
@@ -139,14 +144,18 @@ struct NameScan {
 
 impl NameScan {
     /// 读侧判据：该名字在循环期间是否可能变化。
-    fn may_change(&self, name: &str) -> bool {
-        self.reject_all || self.written.contains_key(name) || self.control.contains(name)
+    fn may_change(&self, name: &str, ctx: &LicmCtx<'_>) -> bool {
+        self.reject_all
+            || self.written.contains_key(name)
+            || self.control.contains(name)
+            || (self.clobbered_all && ctx.is_observable(name))
     }
 
     /// 写侧判据：该名字是否**只**被候选语句自身这一次写覆盖（≤1 次即候选自己的声明）。
-    fn only_self_write(&self, name: &str) -> bool {
+    fn only_self_write(&self, name: &str, ctx: &LicmCtx<'_>) -> bool {
         !self.reject_all
             && !self.control.contains(name)
+            && !(self.clobbered_all && ctx.is_observable(name))
             && self.written.get(name).copied().unwrap_or(0) <= 1
     }
 }
@@ -171,56 +180,63 @@ enum LoopKind {
 }
 
 /// 函数级 LICM 上下文（由一次全函数名字扫描 + 程序级事实合成）。
-struct LicmCtx {
-    /// 一旦循环内出现调用或间接写入，就可能被改写的对象集合：
-    /// 全局变量 ∪ volatile/_Atomic ∪ static/_Thread_local 局部 ∪ 地址逃逸的局部。
-    observable: HashSet<String>,
-    /// volatile/_Atomic 对象名：读它们本身就是可观测副作用，与有没有调用无关
-    /// （要求：体内 volatile 读禁止外提）。
-    volatiles: HashSet<String>,
-    /// 参数名 ∪ 文件作用域名（变量与函数）：外提的声明与之同名即可能改变名字绑定。
-    shadow_names: HashSet<String>,
-    /// 各变量名在全函数的声明次数。
-    decl_counts: HashMap<String, u32>,
+struct LicmCtx<'a> {
+    /// 程序级事实：全局对象名 / 函数名 / volatile 全局。
+    facts: &'a GlobalFacts,
+    /// 本函数的全函数名字扫描（逃逸 / static 局部 / volatile 局部 / 声明次数 / poison）。
+    scan: &'a NameScan,
+    /// 参数名：与全局/函数名同名时改变名字绑定，poison 时也并入可观测集。
+    params: HashSet<String>,
 }
 
-impl LicmCtx {
-    fn of(f: &FuncDecl, facts: &GlobalFacts, scan: &NameScan) -> Self {
-        let mut observable: HashSet<String> = facts.globals.clone();
-        observable.extend(facts.volatile_globals.iter().cloned());
-        observable.extend(scan.escaped.iter().cloned());
-        observable.extend(scan.persistent.iter().cloned());
-        observable.extend(scan.volatiles.iter().cloned());
-        let mut volatiles: HashSet<String> = facts.volatile_globals.clone();
-        volatiles.extend(scan.volatiles.iter().cloned());
-        let mut shadow_names: HashSet<String> = facts.globals.clone();
-        shadow_names.extend(facts.func_names.iter().cloned());
-        for p in &f.params {
-            if let Some(n) = &p.name {
-                shadow_names.insert(n.name.clone());
-            }
-        }
-        if scan.poison {
-            // 有内联汇编时，asm 可能改写任何具名对象（甚至通过硬编码地址），AST 层面
-            // 拿不到信息 ⇒ fail-safe：本函数所有局部/参数都算可观测对象。
-            observable.extend(scan.decl_counts.keys().cloned());
-            for p in &f.params {
-                if let Some(n) = &p.name {
-                    observable.insert(n.name.clone());
-                }
-            }
-        }
+impl<'a> LicmCtx<'a> {
+    fn of(f: &FuncDecl, facts: &'a GlobalFacts, scan: &'a NameScan) -> Self {
+        let params = f
+            .params
+            .iter()
+            .filter_map(|p| p.name.as_ref().map(|n| n.name.clone()))
+            .collect();
         LicmCtx {
-            observable,
-            volatiles,
-            shadow_names,
-            decl_counts: scan.decl_counts.clone(),
+            facts,
+            scan,
+            params,
         }
+    }
+
+    /// 一旦循环内出现调用或间接写入，就可能被改写的对象：
+    /// 全局变量 ∪ volatile 全局 ∪ volatile 局部 ∪ static/_Thread_local 局部 ∪ 地址逃逸的局部
+    /// （含内联汇编时再加上本函数全部具名对象）。
+    fn is_observable(&self, name: &str) -> bool {
+        self.facts.globals.contains(name)
+            || self.facts.volatile_globals.contains(name)
+            || self.scan.escaped.contains(name)
+            || self.scan.persistent.contains(name)
+            || self.scan.volatiles.contains(name)
+            || (self.scan.poison
+                && (self.scan.decl_counts.contains_key(name) || self.params.contains(name)))
+    }
+
+    /// volatile / `_Atomic` 对象名：读它们本身就是可观测副作用，与有没有调用无关
+    /// （要求：体内 volatile 读禁止外提）。
+    fn is_volatile(&self, name: &str) -> bool {
+        self.facts.volatile_globals.contains(name) || self.scan.volatiles.contains(name)
+    }
+
+    /// 外提的声明与之同名会改变既有名字绑定（参数 ∪ 文件作用域对象名 ∪ 函数名）。
+    fn shadows(&self, name: &str) -> bool {
+        self.facts.globals.contains(name)
+            || self.facts.func_names.contains(name)
+            || self.params.contains(name)
+    }
+
+    /// 该名字在全函数里的声明次数。
+    fn decl_count(&self, name: &str) -> u32 {
+        self.scan.decl_counts.get(name).copied().unwrap_or(0)
     }
 
     /// 该标识符是否可被外提候选当作"稳定的纯读"。
     fn read_is_stable(&self, name: &str, scan: &NameScan) -> bool {
-        !scan.may_change(name) && !self.volatiles.contains(name)
+        !scan.may_change(name, self) && !self.is_volatile(name)
     }
 }
 
@@ -333,10 +349,7 @@ fn licm_loop(
     let Stmt::Block { b, .. } = body else {
         return Vec::new();
     };
-    let mut scan = NameScan {
-        observable: ctx.observable.clone(),
-        ..NameScan::default()
-    };
+    let mut scan = NameScan::default();
     if let Some(i) = init {
         scan_stmt(&mut scan, i, Site::Ctl);
     }
@@ -370,7 +383,7 @@ fn split_invariants(body: &mut Block, scan: &NameScan, ctx: &LicmCtx) -> Vec<Blo
     }
     // 护栏必须在**真正搬动之前**判定：此时 `body.items` 还是完整的原序，能直接对比
     // "外提前后是否还有写入命中 cond"，放弃时也不必重建顺序。
-    if degenerate_split(&body.items, &keep, scan) {
+    if degenerate_split(&body.items, &keep, scan, ctx) {
         return Vec::new();
     }
     let all = std::mem::take(&mut body.items);
@@ -389,7 +402,12 @@ fn split_invariants(body: &mut Block, scan: &NameScan, ctx: &LicmCtx) -> Vec<Blo
 
 /// 退化护栏（根因 3/5）：外提绝不能把"让循环有条件终止"的写入搬走。
 /// `all` 是外提前的完整体、`keep[i]` 表示第 i 项留在体内。
-fn degenerate_split(all: &[BlockItem], keep: &[bool], scan: &NameScan) -> bool {
+fn degenerate_split(
+    all: &[BlockItem],
+    keep: &[bool],
+    scan: &NameScan,
+    ctx: &LicmCtx<'_>,
+) -> bool {
     // 整个体被搬空 —— 原复现形态：`while (n > 0) {}` 忙等。
     if !keep.iter().any(|k| *k) {
         return true;
@@ -399,10 +417,7 @@ fn degenerate_split(all: &[BlockItem], keep: &[bool], scan: &NameScan) -> bool {
         return false;
     }
     let reaches_cond = |scope: Option<bool>| -> bool {
-        let mut local = NameScan {
-            observable: scan.observable.clone(),
-            ..NameScan::default()
-        };
+        let mut local = NameScan::default();
         for (i, it) in all.iter().enumerate() {
             // None = 外提前的完整体；Some(true) = 外提后仍留在体内的项。
             if scope.is_some_and(|k| keep[i] != k) {
@@ -410,7 +425,12 @@ fn degenerate_split(all: &[BlockItem], keep: &[bool], scan: &NameScan) -> bool {
             }
             scan_item(&mut local, it, Site::Body);
         }
-        local.written.keys().any(|n| scan.cond_reads.contains(n))
+        let hits_cond = |local: &NameScan| -> bool {
+            scan.cond_reads.iter().any(|n| {
+                local.written.contains_key(n) || (local.clobbered_all && ctx.is_observable(n))
+            })
+        };
+        hits_cond(&local)
     };
     // 体内原本存在能改变 cond 的写、外提后不再有 ⇒ 可能构造忙等 ⇒ 放弃外提。
     reaches_cond(None) && !reaches_cond(Some(true))
@@ -450,14 +470,14 @@ fn hoistable_item(item: &BlockItem, scan: &NameScan, ctx: &LicmCtx) -> bool {
     // 作用域安全（根因 4）：只有"全函数唯一一次声明、且不与参数/全局/函数名同名"
     // 的局部才能外提 —— 此时循环外不可能有合法代码引用它，把它移到循环前不改变
     // 任何既有名字绑定，也不需要改名（改名会新增栈槽，扰动"顺序单一真源"）。
-    if ctx.decl_counts.get(name).copied().unwrap_or(0) != 1 {
+    if ctx.decl_count(name) != 1 {
         return false;
     }
-    if ctx.shadow_names.contains(name) || ctx.volatiles.contains(name) {
+    if ctx.shadows(name) || ctx.is_volatile(name) {
         return false;
     }
     // 该名字在循环里还有别的写入 ⇒ 提前初始化会被覆盖，或迭代中被读到旧值。
-    if !scan.only_self_write(name) {
+    if !scan.only_self_write(name, ctx) {
         return false;
     }
     // 初值本身必须是不变式：涉及的每个名字都不在栅栏内，且不含调用/汇编/间接读。
@@ -785,8 +805,8 @@ fn scan_expr(s: &mut NameScan, e: &Expr, site: Site) {
                 scan_expr(s, a, site);
             }
             // 被调者可改写全局、volatile、被取址/衰减逃逸的对象以及 static 局部：
-            // 把这些名字逐个记为"被写"，候选语句只要提到其中之一就不可外提。
-            clobber_observable(s);
+            // 记下「所有可观测对象都算被写」这个事实，候选语句只要提到其中之一就不可外提。
+            s.clobbered_all = true;
         },
         Expr::AsmExpr { .. } => {
             // asm 的读写集合由字符串里的约束式约定，AST 拿不到信息 ⇒ 全部放弃。
@@ -855,9 +875,8 @@ fn scan_lvalue(s: &mut NameScan, l: &Expr, site: Site) {
     let lv = lvalue_of(l);
     if lv.indirect {
         // 间接写：`*p = x` / `p->f = x` / `p[i] = x`。被写的对象没有可记的名字，
-        // 只能把所有可观测对象（全局、volatile、被取址/衰减逃逸的局部、static 局部）
-        // 都记为被写。
-        clobber_observable(s);
+        // 只能把"所有可观测对象都被写"这个事实记下（同 `Expr::Call` 分支）。
+        s.clobbered_all = true;
     } else if let Some(name) = lv.root {
         mark_written(s, &name, site);
     } else {
@@ -917,13 +936,6 @@ fn lvalue_of(e: &Expr) -> Lvalue {
             indirect: false,
             is_arr: false,
         },
-    }
-}
-
-fn clobber_observable(s: &mut NameScan) {
-    let names: Vec<String> = s.observable.iter().cloned().collect();
-    for n in names {
-        *s.written.entry(n).or_insert(0) += 1;
     }
 }
 

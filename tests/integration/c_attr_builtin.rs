@@ -73,6 +73,66 @@ fn builtin_constant_p_full_run_returns_zero() {
     assert_eq!(rc, 0, "builtin_constant_p_full should return 0, got {rc}");
 }
 
+/// `__builtin_types_compatible_p` 的整张判定表必须逐条等于 gcc -O2 实测值。
+///
+/// 夹具里 30 个形状各自的期望值是拿本机 gcc 逐函数反汇编读出来的（不是猜的）：
+/// `main` 返回**第一条不匹配的形状编号**，所以退出码就是「哪一形错了」（0 = 全对）。
+///
+/// 为什么不能只当普通优化问题：内核拿这个内置做**类型分支**（`container_of`、
+/// `kunmap`、`min/max` 的符号性检查、`static_assert(__is_same_type(...))`），返回错值就是
+/// 走错臂。修前实测四条错：`void*` vs 对象指针（旧实现有条「void* 与任意对象指针兼容」
+/// 的捷径）、同宽度的有符号/无符号整型、`char`/`signed char`/`unsigned char` 并成一组、
+/// 数组元素限定符不比。现场后果：`mm/shmem.o` 的 `__compiletime_assert_408/410` 两条
+/// 陷阱引用（链接期 `undefined reference`）就是这么留下的。
+#[test]
+#[cfg(unix)]
+fn types_compatible_p_table_matches_gcc() {
+    let source = include_str!("../fixtures/c/types_compatible_table.c");
+    for flag in ["-O0", "-O2"] {
+        let (output, exe) = run_compile_and_run_flags("types-compatible-table", source, &[flag]);
+        assert!(
+            output.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(
+            rc,
+            0,
+            "{flag}: `__builtin_types_compatible_p` 的第 {} 号形状与 gcc -O2 实测不一致 \
+             （编号见夹具 main 里的 CK(idx, …)；内核拿它做类型分支，错一条就是走错臂）",
+            rc
+        );
+    }
+}
+
+/// 两条**已知仍与 gcc 不一致**的形状，单独放一个默认不跑的判据（不是把判据改宽以适应
+/// 现状，而是把缺口钉在可执行的命令上）：
+///   * 17 号 `char` vs `signed char`（C11 6.2.7 里三个 char 类型互不兼容）；
+///   * 31 号 `int (*)[4]` vs `const int (*)[4]`。
+/// 修好以后去掉 `--ignored` 之前的 `#[ignore]` 即变红→绿；两条的根因写在夹具注释里。
+#[test]
+#[ignore = "已知与 gcc 不一致的两形：char/signed char 的类型表示不一致 + 指针下数组元素限定符"]
+#[cfg(unix)]
+fn types_compatible_p_known_gaps() {
+    let source = include_str!("../fixtures/c/types_compatible_table.c");
+    let (output, exe) = run_compile_and_run_flags(
+        "types-compatible-gaps",
+        source,
+        &["-O2", "-DTCP_KNOWN_GAPS"],
+    );
+    assert!(
+        output.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        run_exe(&exe),
+        0,
+        "已知缺口还在（退出码就是第一条不匹配的形状编号）"
+    );
+}
+
 /// __builtin_clear_cache / __builtin___clear_cache: 编译通过即可 (x86 为 no-op)
 #[test]
 fn builtin_clear_cache_compiles() {
@@ -304,10 +364,12 @@ fn target_clones_links_dynamically_with_codegen_resolver() {
     );
     // 3) 且产物必须是动态的 —— 这正是当年「静默降级」缺的那一条。
     harness::assert_dynamically_linked(&exe, "clones（含 IFUNC）", &stderr);
-    // 4) 走的是宿主 cc，不是内置链接器：路径必须自己说出来（底线：不得静默）。
+    // 4) 走的是宿主链接器（ld 直驱或 cc 退路），不是内置链接器：路径必须自己说出来
+    //    （底线：不得静默）。dcc 现在默认用 `ld` 直驱（`link::host_ld`），环境不满足才
+    //    退回 cc，所以这里只钉「自报了宿主链接」，不钉具体是哪一个。
     assert!(
-        stderr.contains("via host cc"),
-        "含 IFUNC 的程序必须由 stderr 明说是经宿主 cc 链接（内置链接器那条改道分支不该再出现）:\n{stderr}"
+        stderr.contains("via host ld") || stderr.contains("via host cc"),
+        "含 IFUNC 的程序必须由 stderr 明说是经宿主链接器链接（内置链接器那条改道分支不该再出现）:\n{stderr}"
     );
 
     // 5) IFUNC 语义必须活到最终产物：`compute` 仍是 STT_GNU_IFUNC，且 `st_value`
@@ -2900,11 +2962,15 @@ fn attr_transparent_union_and_visibility_opts_match_gcc() {
     assert_eq!(rc, 0, "transparent_union 传参语义：take(np)==0 && take(&v)==1，且非 NULL 分支正确");
 }
 
-/// 分配器类属性（`malloc` / `alloc_size(1)` / `alloc_size(1,2)` /
-/// `assume_aligned(64)` / `warn_unused_result` / `sentinel` / `format_arg`）
-/// 作用在**只有声明、没有定义**的函数上：夹具的 `main` 只调用 `my_malloc`，
-/// 所以它根本不可链接（两侧都是）。断言落在“属性不得破坏外部链接”：八个声明
-/// 必须全部以同名未定义引用进入 `.symtab`，且 `main` 自己必须已定义。
+/// 分配器类属性（`malloc` / `alloc_size(1)` / `alloc_size(1,2)` / `assume_aligned(64)` /
+/// `warn_unused_result` / `sentinel` / `format_arg`）作用在**只有声明、没有定义**的函数上。
+/// 夹具里八个声明全被取地址（供重定位）但不执行，所以下面的判据是双向的：
+///
+///   * 被引用的八个必须仍以同名未定义引用进入 `.symtab`（属性不得破坏外部链接）；
+///   * 本 TU 从不引用的 `never_called_here` **不得**进入 `.symtab`——GAS 就是这个行为，
+///     实测同一夹具 `gcc -c` 只留被引用那几个。dcc 以前逐条声明登 UND，在用户
+///     侧不只是浪费符号表（`drivers/char/random.o` 5344 条 vs gcc 73 条），而是直接堆死
+///     最终链接：`ld: hidden symbol 'vdso_u_arch_data' isn't defined`（报告 §3.25/§3.26）。
 #[test]
 #[cfg(unix)]
 fn attr_malloc_family_decls_keep_external_linkage() {
@@ -2929,6 +2995,11 @@ fn attr_malloc_family_decls_keep_external_linkage() {
     ] {
         assert!(undef.iter().any(|s| s == want), "{want} 应作为未定义引用保留：{undef:?}");
     }
+    assert!(
+        !undef.iter().any(|s| s == "never_called_here"),
+        "本 TU 从未引用的声明不该发成 UND 条目（与 GAS 不一致；它在内核里会变成 \
+         `hidden symbol ... isn't defined` 硬错）：实测 {undef:?}"
+    );
     assert!(
         elf64_func_symbols(&bytes).iter().any(|(n, _, _)| n == "main"),
         "main 必须已定义"
@@ -2957,6 +3028,50 @@ fn format_attr_decl_keeps_call_site_and_linkage() {
         "main 必须已定义"
     );
     let _ = fs::remove_file(obj);
+}
+
+/// `__attribute__((format(printf, m, n)))` 的两个目是**整型常量表达式**，不是「只能是一个
+/// 裸数字」：ACPICA 的 `ACPI_PRINTF_LIKE(c)`（`include/acpi/acoutput.h:295`）展开成
+/// `format(printf, 6, (6) + 1)`，旧实现只认裸 Number，于是 first-arg 折成 6 —— 恰好就
+/// 是格式串自身的下标，每个转换符都比错一格（实测 `drivers/acpi/acpica/dswstate.c`
+/// 19 条 W0003、ACPI 全家约 350 条，gcc 同旗标 0 条）。
+#[test]
+fn format_attr_arguments_fold_constant_expressions() {
+    // 三种写法必须给同一个答案：裸数字、括号包住的和、宏参展开后的和。
+    for attr in [
+        "format(printf, 6, 7)",
+        "format(printf, 6, 6+1)",
+        "format(printf, 6, (6)+1)",
+        "__format__(__printf__, 6, 6 + 1)",
+    ] {
+        let src = format!(
+            "__attribute__(({attr})) void dbg(unsigned a, unsigned b, const char *c,\n\
+             const char *d, unsigned e, const char *f, ...);\n\
+             void u(void *o, const char *n, unsigned i) {{\n\
+             \tdbg(1, 2, \"a\", \"b\", 3, \"Obj=%p [%s] Idx=%X\\n\", o, n, i);\n}}\n"
+        );
+        let output = run_syntax_test("format-attr-arith-arg", &src);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("W0003"),
+            "属性目 `{attr}` 应折成 (6, 7)，不该报格式错:\n{stderr}"
+        );
+    }
+}
+
+/// 反向对照：上一条把属性目改成会折叠的求值路径后，真写错的格式串必须仍报 ——
+/// `%d` 吃 `char *` 时 gcc 报「expects argument of type ‘int’」。
+#[test]
+fn format_attr_arith_arg_still_catches_real_mismatch() {
+    let src = "__attribute__((format(printf, 6, 6+1))) void dbg(unsigned a, unsigned b,\n\
+        const char *c, const char *d, unsigned e, const char *f, ...);\n\
+        void bad(void *o, const char *n) { dbg(1, 2, \"a\", \"b\", 3, \"Idx=%d\\n\", o, n); }\n";
+    let output = run_syntax_test("format-attr-arith-bad", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0003") && stderr.contains("%d"),
+        "属性目能折叠后，真的类型不匹配不得被钝掉:\n{stderr}"
+    );
 }
 
 /// 低频内建函数全家桶（`setjmp`/`longjmp`、`speculation_safe_value`、

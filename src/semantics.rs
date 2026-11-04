@@ -943,6 +943,154 @@ pub fn expr_has_side_effects(e: &Expr) -> bool {
     }
 }
 
+/// 「值被丢弃」的语境下，这条表达式是否还有必须发出来的代码。
+///
+/// 为什么不能拿 [`expr_has_side_effects`] 顶替：那个谓词回答的是「重复求值是否有害」，
+/// 默认臂 `_ => false` 是**白名单式的不敏感** —— `StmtExpr`、`AsmExpr`、`VaArg` 都落到
+/// 默认臂被判成「无副作用」，而那三类里完全可能藏着 call。用它当「整条不发」的依据，
+/// 就是静默删代码。本谓词方向相反：**只有结构上确定碰不到世界的形状才返回 false**，
+/// 认不认识的一律 true（宁可多发，不可少发）。
+///
+/// 这条判据要解决的现场（内核全树未定义引用之一）：
+/// `include/linux/compiler-context-analysis.h:242` 的 `token_context_lock(RCU, ...)`
+/// 在关掉上下文分析时展开成 `extern const struct __ctx_lock_RCU *RCU;` —— 注释原话是
+/// 「not backed by a real data structure (linker error if accidentally referenced)」，
+/// 它**只当类型令牌用、永远没有定义**。而 `include/linux/rcupdate.h:456` 的
+/// `lockdep_assert_in_rcu_read_lock()` 展开成 `do { (void)(RCU); } while (0)`：
+/// gcc 对丢弃值的纯读一个字节都不发，dcc 以前发 `mov RCU(%rip),%rax`，于是产物里凭空
+/// 多一条 `R_X86_64_PC32 RCU` 重定位 + `UND RCU`，最终链接报
+/// `undefined reference to 'RCU'`（实测 `io_uring/tw.o`）。
+pub fn discarded_value_needs_code(e: &Expr) -> bool {
+    // volatile 限定类型的读本身就是可观察效果（C11 6.7.3p6），必须留着。
+    if crate::ast::type_has_volatile(&e.ty()) {
+        return true;
+    }
+    match e {
+        // 字面量：连求值都不算。
+        Expr::Int { .. }
+        | Expr::Char { .. }
+        | Expr::Float { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
+        | Expr::String { .. } => false,
+        // 对象/函数的地址与值：纯读，丢弃后不留痕迹。`RCU` 就是这一支。
+        Expr::Ident { .. } | Expr::LabelAddr { .. } => false,
+        // `sizeof(T)`/`_Alignof(T)`/`offsetof` 无下标形：不求值。
+        Expr::SizeofTy { .. } | Expr::AlignofTy { .. } => false,
+        // `sizeof(expr)`/`_Alignof(expr)`：C 里操作数**不被求值**，只有它的类型是 VLA 时
+        // 才真的去算维度（C11 6.7.6.3p9，副作用计入）。旧规则里这两形直接归「可删」，
+        // 这里保持同样的覆盖面，但多一道 `has_vla()` 的拦网（拿不准就留）。
+        Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => e.ty().has_vla(),
+        Expr::Offsetof { indices, .. } => {
+            indices.iter().any(|i| discarded_value_needs_code(i))
+        },
+        Expr::Cast { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Unary { e, .. }
+        | Expr::Deref { e, .. } => discarded_value_needs_code(e),
+        Expr::Member { expr, .. } => discarded_value_needs_code(expr),
+        Expr::Index { arr, idx, .. } => {
+            discarded_value_needs_code(arr) || discarded_value_needs_code(idx)
+        },
+        Expr::Binop { op, l, r, .. } => {
+            // 整数除/模会 #DE 陷入，算不出来「不发」改变了运行期可见的行为 ⇒ 留着。
+            matches!(op, ast::BinOp::Div | ast::BinOp::Mod)
+                || discarded_value_needs_code(l)
+                || discarded_value_needs_code(r)
+        },
+
+        Expr::Comma { l, r, .. } => discarded_value_needs_code(l) || discarded_value_needs_code(r),
+        // 赋值/自增自减/调用/汇编/语句表达式/可变参数读取/复合字面量：一律留。
+        // `VaArg` 每次求值都推进游标；`AsmExpr` 就算不 volatile 也不允许编译器删；
+        // `StmtExpr`/`CompoundLit`/`InitList` 里面能塞任何语句，拆开看不划算。
+        //
+        // 这一格曾试过两条放宽（本轮删掉，别再拿实测当理由）：「`&&`/`||`/`?:` 左侧能折成
+        // 常量时只问会被求值的那一侧」与「`StmtExpr` 的 `eval` 算得出整数就不留码」。
+        // 逐条单独摘除后重跑靶件与 18 个真对象：两者**都不承重** —— 因为条件已折成常量时，
+        // 留在树里的那句 `(void)cond` 会被后续的 `fold_expr` 再拆一层，`0 && 调用` 自己就
+        // 塌成 `0`；这一族的真承重格在 `const_eval::interp_block_item`（内联实体化的纯读
+        // 拷贝把整块 `({...})` 钉成非常量）。判据不是「听起来更对」，是拆了会红的用例。
+        _ => true,
+    }
+}
+
+/// 「整条不求值也安全」—— 拿到常量结果后要**顶替**原表达式的地方用的闸门
+/// （`emit/stmt.rs` 的 `If` 常量条件折叠）。
+///
+/// 为什么不能用 [`discarded_value_needs_code`] 直接顶：那个谓词问的是「丢弃值还需不需要
+/// 发码」，对 `Call` 一律保守地答「需要」（它认不认识都当有副作用）—— 而这里必须
+/// 放行**编译期折叠型内建调用**（`__builtin_strcmp("<", "<")`），否则
+/// `if (__builtin_strcmp(rel, "<") < 0)` 这类死臂再也折不掉（实测
+/// `vruntime_cmp` 夹具在 -O0 留下 `undefined reference to trap_vruntime_cmp`）。
+///
+/// 另一边必须拦住的现场：`const_eval::eval_full` 对 `Expr::Assign` 走「返回右值」的
+/// 宽松口径（见 const_eval.rs 那条分支），值语境里那不是常量 —— `if ((v = 7) != 0)`
+/// 会被算成常量真，store 与比较一起消失（实测 `v` 停在初值 -1，gcc 为 7）。
+///
+/// 所以本函数是「同构重写、只在 Call/StmtExpr 两支上分歧」：
+///   * `Call`：只放行「名字是 `__builtin_constant_p`」或「`const_eval` 能算出常量」的直接
+///     调用（能算出常量 ⇒ 它就是折叠表里的纯内建），且实参各自也要过同一道闸；
+///   * `StmtExpr`：一律不放行（体里能塞任何语句，拆开看不划算）。
+pub fn dropping_value_is_safe(e: &Expr) -> bool {
+    // volatile 限定类型的读本身就是可观察效果（C11 6.7.3p6）。
+    if crate::ast::type_has_volatile(&e.ty()) {
+        return false;
+    }
+    match e {
+        Expr::Int { .. }
+        | Expr::Char { .. }
+        | Expr::Float { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
+        | Expr::String { .. }
+        | Expr::Ident { .. }
+        | Expr::LabelAddr { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. } => true,
+        // `sizeof(expr)` 的操作数不被求值，只有 VLA 维度会真的去算。
+        Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => !e.ty().has_vla(),
+        Expr::Offsetof { indices, .. } => indices.iter().all(|i| dropping_value_is_safe(i)),
+        Expr::Cast { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Unary { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::Member { expr: e, .. } => dropping_value_is_safe(e),
+        Expr::Index { arr, idx, .. } => {
+            dropping_value_is_safe(arr) && dropping_value_is_safe(idx)
+        },
+        // 整数除/模会 #DE 陷入：求值本身就是可观察行为。
+        Expr::Binop { op, l, r, .. } => {
+            !matches!(op, ast::BinOp::Div | ast::BinOp::Mod)
+                && dropping_value_is_safe(l)
+                && dropping_value_is_safe(r)
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            dropping_value_is_safe(cond)
+                && dropping_value_is_safe(then_)
+                && dropping_value_is_safe(else_)
+        },
+        Expr::Comma { l, r, .. } => dropping_value_is_safe(l) && dropping_value_is_safe(r),
+        Expr::Call { callee, args, .. } => {
+            let Expr::Ident { name, .. } = &**callee else {
+                return false;
+            };
+            // `__builtin_constant_p` 的参数按定义**不求值**，恒放行。
+            if name.name == "__builtin_constant_p" {
+                return true;
+            }
+            crate::const_eval::eval(e).is_ok() && args.iter().all(dropping_value_is_safe)
+        },
+        // 赋值/自增自减/汇编/语句表达式/可变参数读取/复合字面量：一律不放行。
+        _ => false,
+    }
+}
+
 /// 两棵表达式子树是否**结构相同**（同一对象 + 同样的下标/字段链）。
 ///
 /// 用途：parser 把复合赋值 `LV op= R` 展开成 `Assign{l: LV, r: Binop{op, LV_拷贝, R}}`，

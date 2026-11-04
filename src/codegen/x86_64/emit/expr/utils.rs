@@ -1460,12 +1460,20 @@ impl Codegen {
     fn encode_complex_parts_i(re: i128, im: i128, inner: &Type) -> Vec<u8> {
         crate::codegen::x86_64::mem::global::encode_complex_parts_i(re, im, inner)
     }
-    pub(crate) fn eval_asm_operand(expr: &Expr) -> Option<String> {
+    pub(crate) fn eval_asm_operand(&self, expr: &Expr) -> Option<String> {
         match const_eval::eval_full(expr, false) {
             Ok(ConstValue::Int(v)) => return Some(v.to_string()),
             Ok(ConstValue::Float(f)) => return Some((f.as_f64() as i128).to_string()),
             Ok(ConstValue::Addr { name, offset }) => {
-                return Some(Self::format_asm_symbol_immediate(&name, offset));
+                // 符号必须先过 `resolve_global_key`：函数里的 `static` 在 symtab 里的键是
+                // mangled 的 `.LslN.<func>.<x>`，而 const_eval 只认源码名。内核 `DO_ONCE()`
+                // 就是这条路的用户：`asm goto(… : : [key] "i" (&key->key))` 往
+                // `__jump_table` 里发 `.quad ___once_key`，不 mangle 就指着一个**不存在**的
+                // 全局名 —— 实测 localmodconfig 全树 47 个对象报
+                // `undefined reference to '___once_key'`，而定义体
+                // `.Lsl1.secure_tcpv6_seq_and_ts_off.___once_key` 明明就在 `.data..do_once` 里。
+                let resolved = self.resolve_global_key(&name).to_string();
+                return Some(Self::format_asm_symbol_immediate(&resolved, offset));
             },
             Ok(ConstValue::Str { label, .. }) | Ok(ConstValue::Bytes { label, .. }) => {
                 return Some(label);
@@ -1477,6 +1485,32 @@ impl Codegen {
         }
         None
     }
+    /// 记录一条「64 位槽 → 符号」的数据重定位。
+    ///
+    /// `rel` 的第二个分量是目标位置：`None` = `.data`；`Some(i)` = 自定义节
+    /// `extra_sections[i]`；`Some(usize::MAX)` = **当前就在 `.rodata` 里**
+    /// （`materialize_compound_literal_rel` 传的哨兵）。
+    ///
+    /// 哨兵必须转成 `.rela.rodata` 条目（走 `pending_rodata_rels`）：旧写法把它原样
+    /// 塞进 `pending_data64_rels`，`resolve.rs` 再当 `extra_sections` 下标用，
+    /// `usize::MAX` 直接越界 panic（`drivers/iommu/amd/iommu.c` 实测
+    /// `index out of bounds: the len is 7 but the index is 18446744073709551615`，rc=134）。
+    /// `.rodata` 内部引用字符串时同一个哨兵也要走这条路，见 `emit_string_ptr_slot`。
+    fn push_data_symbol_rel(
+        &mut self,
+        rel: Option<(u64, Option<usize>)>,
+        sym: String,
+        rel_type: u32,
+        addend: i64,
+    ) {
+        let Some((off, sec)) = rel else { return };
+        if matches!(sec, Some(v) if v == usize::MAX) {
+            self.pending_rodata_rels.push((off, sym, rel_type, addend));
+        } else {
+            self.pending_data64_rels.push((off, sym, sec, rel_type, addend));
+        }
+    }
+
     pub(crate) fn eval_const_expr(
         &mut self,
         e: &Expr,
@@ -1604,6 +1638,51 @@ impl Codegen {
                 return vec![0u8; width.max(4)];
             }
         }
+        // `&((T){…})[i].f1.f2`：`&` 的目标不是复合字面量本体而是它的成员的成员。
+        //
+        // 只有「& 直接套 CompoundLit」一条路的话，这条链会落到下方的通用路径并被
+        // 写成 0（实测 `drivers/gpu/drm/i915/i915_pmu.o`：`i915_pmu_format_attrs[0]`
+        // 是 NULL，内核起来后 sysfs 的 format 属性全是空指针）。
+        if let Expr::AddrOf { e: inner, .. } = e {
+            if !matches!(inner.as_ref(), Expr::CompoundLit { .. } | Expr::InitList { .. }) {
+                if let Some((lit, addend)) = Self::compound_member_chain(inner) {
+                    if self.relocatable {
+                        if let Some((anon_name, _)) = self.materialize_compound_literal_rel(lit) {
+                            let sz = width.max(8);
+                            let off = rel.map(|(o, _)| o).unwrap_or(0);
+                            let sec = rel.and_then(|(_, s)| s);
+                            let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
+                            if matches!(sec, Some(v) if v == usize::MAX) {
+                                self.pending_rodata_rels
+                                    .push((off, anon_name, rel_type, addend));
+                            } else {
+                                self.pending_data64_rels.push((
+                                    off, anon_name, sec, rel_type, addend,
+                                ));
+                            }
+                            return vec![0u8; sz];
+                        }
+                    } else if let Some((anon_name, vaddr)) =
+                        self.materialize_compound_literal(lit, rodata_slots)
+                    {
+                        let lit_ty = lit.ty();
+                        self.globals_raw.insert(
+                            anon_name,
+                            GlobalVar {
+                                offset: vaddr - self.entry,
+                                size: lit_ty.size().max(1),
+                                ty: lit_ty,
+                                init: None,
+                                section: 1,
+                                is_tls: false,
+                                in_data_section: false,
+                            },
+                        );
+                        return (vaddr + addend as u64).to_le_bytes().to_vec();
+                    }
+                }
+            }
+        }
         // &(T){...} / &{...}: 嵌套 AddrOf+CompoundLit 路径
         // (gen_global_init_list 处理 struct 指针字段时走 eval_const_expr,
         // 而 eval_full 不支持 CompoundLit 取地址, 必须显式 materialize)
@@ -1707,8 +1786,12 @@ impl Codegen {
                     };
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
-                        self.pending_data64_rels
-                            .push((off, sym, sec, rel_type, offset as i64));
+                        self.push_data_symbol_rel(
+                            Some((off, sec)),
+                            sym,
+                            rel_type,
+                            offset as i64,
+                        );
                     }
                     vec![0u8; size]
                 },
@@ -1740,7 +1823,7 @@ impl Codegen {
                     };
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
-                        self.pending_data64_rels.push((off, sym, sec, rel_type, 0));
+                        self.push_data_symbol_rel(Some((off, sec)), sym, rel_type, 0);
                     }
                     vec![0u8; width.max(8)]
                 },
@@ -1768,8 +1851,12 @@ impl Codegen {
                             if let Some((off, sec)) = rel {
                                 let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                                 let addend = (i as i64) * elem_ty.size().max(1) as i64;
-                                self.pending_data64_rels
-                                    .push((off, sym, sec, rel_type, addend));
+                                self.push_data_symbol_rel(
+                                    Some((off, sec)),
+                                    sym,
+                                    rel_type,
+                                    addend,
+                                );
                             }
                             vec![0u8; width.max(8)]
                         } else if let (Expr::String { data, .. }, Ok(i)) =
@@ -1811,8 +1898,7 @@ impl Codegen {
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                         let prefixed = self.c_label_to_asm(&label.name);
-                        self.pending_data64_rels
-                            .push((off, prefixed, sec, rel_type, 0));
+                        self.push_data_symbol_rel(Some((off, sec)), prefixed, rel_type, 0);
                     }
                     vec![0u8; width.max(8)]
                 },
@@ -2217,6 +2303,51 @@ impl Codegen {
             _ => AbiClass::Integer,
         }
     }
+    /// 把 `((T){…})[i].f1.f2` 拆成（复合字面量基址, 常量字节偏移）。
+    ///
+    /// 只认 `Index`（下标为常量）/ `Member`（非 `->`）/ `Cast` 三种包裹层：它们的偏移
+    /// 都是编译期常量，且不改变对象本体。用途见 `eval_const_expr` 里 `&` 分支的说明。
+    fn compound_member_chain(e: &Expr) -> Option<(&Expr, i64)> {
+        match e {
+            Expr::CompoundLit { .. } | Expr::InitList { .. } => Some((e, 0)),
+            Expr::Cast { e: inner, .. } => Self::compound_member_chain(inner),
+            Expr::Index {
+                arr, idx, ty, ..
+            } => {
+                let (base, off) = Self::compound_member_chain(arr)?;
+                let i = const_eval::eval(idx).ok()?;
+                let elem_size = ty.size().max(1);
+                Some((base, off + elem_size as i64 * i as i64))
+            },
+            Expr::Member {
+                expr,
+                field,
+                is_arrow: false,
+                ..
+            } => {
+                let (base, off) = Self::compound_member_chain(expr)?;
+                // `field` 只带名字，偏移按基表达式的 struct/union 字段表查
+                let field_off = match expr.ty() {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => fields
+                        .iter()
+                        .find(|f| f.name == field.name)
+                        .map(|f| f.offset as i64)?,
+                    _ => return None,
+                };
+                Some((base, off + field_off))
+            },
+            _ => None,
+        }
+    }
+    /// 把初始化字节写回物化时预留的槽位 `base..base+len`，必要时先撑大容器；
+    /// 多余部分保持 0。字符串字面量等递归产物已追加在预留区之后，不受影响。
+    fn overwrite_reserved_at(buf: &mut Vec<u8>, base: usize, init_data: &[u8]) {
+        let end = base + init_data.len();
+        if buf.len() < end {
+            buf.resize(end, 0);
+        }
+        buf[base..end].copy_from_slice(init_data);
+    }
     pub(crate) fn materialize_compound_literal(
         &mut self,
         e: &Expr,
@@ -2238,11 +2369,15 @@ impl Codegen {
                 self.rodata.push(0);
             }
             let base = self.rodata.len() as u64;
+            // 先预留对象本体: gen_global_init_list 里的字符串字面量会直接追加到
+            // self.rodata (emit_string_ptr_slot), 不预留就会把字符串写在对象体内,
+            // 再 extend 初始化字节时两者互相踩踏 (i915_pmu_format_attrs 实测).
+            self.rodata.resize(self.rodata.len() + sz, 0);
             // 递归生成初始化数据 (嵌套 AddrOf→CompoundLit 走 eval_const_expr)
             let init_data = self
                 .gen_global_init_list(&ty, &inits, Some((base, None)), use_rodata)
                 .unwrap_or_else(|| vec![0u8; sz]);
-            self.rodata.extend_from_slice(&init_data);
+            Self::overwrite_reserved_at(&mut self.rodata, base as usize, &init_data);
             while !self.rodata.len().is_multiple_of(align) {
                 self.rodata.push(0);
             }
@@ -2252,10 +2387,11 @@ impl Codegen {
                 self.tdata_section.push(0);
             }
             let base = self.tdata_section.len() as u64;
+            self.tdata_section.resize(self.tdata_section.len() + sz, 0);
             let init_data = self
                 .gen_global_init_list(&ty, &inits, Some((base, None)), use_rodata)
                 .unwrap_or_else(|| vec![0u8; sz]);
-            self.tdata_section.extend_from_slice(&init_data);
+            Self::overwrite_reserved_at(&mut self.tdata_section, base as usize, &init_data);
             while !self.tdata_section.len().is_multiple_of(align) {
                 self.tdata_section.push(0);
             }
@@ -2299,12 +2435,15 @@ impl Codegen {
         while !self.rodata.len().is_multiple_of(align) {
             self.rodata.push(0);
         }
-        let base = self.rodata.len() as u64;
+        let base_usize = self.rodata.len();
+        let base = base_usize as u64;
+        // 预留对象本体, 防止 gen_global_init_list 追加的字符串落进对象内部
+        self.rodata.resize(base_usize + sz, 0);
         let rodata_marker: Option<usize> = Some(usize::MAX);
         let init_data = self
             .gen_global_init_list(&ty, &inits, Some((base, rodata_marker)), false)
             .unwrap_or_else(|| vec![0u8; sz]);
-        self.rodata.extend_from_slice(&init_data);
+        Self::overwrite_reserved_at(&mut self.rodata, base_usize, &init_data);
         while !self.rodata.len().is_multiple_of(align) {
             self.rodata.push(0);
         }

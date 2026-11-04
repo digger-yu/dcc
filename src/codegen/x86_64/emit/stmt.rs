@@ -193,6 +193,12 @@ impl Codegen {
         if self.global_seg_prefix(&sym).is_some() {
             return false;
         }
+        // 蹦床模式下也要让路：`jmp *sym(,%rcx,8)` 是**内存**间接跳转，内核的 retpoline
+        // 只覆盖寄存器形（gcc 的 `-mindirect-branch-register` 就是为它存在的），
+        // 所以这里不能把「读表项」并进跳转 —— 原路会先把目标读进寄存器再走蹦床。
+        if self.target.indirect_branch_thunk_extern {
+            return false;
+        }
         use crate::semantics::{
             compute_lvalue_address, determine_action, AddressBase, AddressContext, ByteOffset,
             MaterializeAction,
@@ -235,7 +241,12 @@ impl Codegen {
             // 兜底只有一条规矩：**必须仍然发出一条跳转**。只报错不跳会把这条分派落到
             // 下一条指令上，那比错值更难查。原路那两条本来就编得出（mov 那侧带 disp8）。
             self.emit_load_global_indexed(0, idx_reg, &sym, stride, site.elem);
-            self.emit_insn(&Insn::jmp_rm_reg(0)); // jmp *%rax
+            // 兜底那条形同样是「先把目标读进 %rax 再跳」，寄存器形可以走蹦床。
+            if let Some(thunk) = self.indirect_thunk_sym(0) {
+                self.jmp_external(&thunk);
+            } else {
+                self.emit_insn(&Insn::jmp_rm_reg(0)); // jmp *%rax
+            }
         }
         true
     }
@@ -995,7 +1006,16 @@ impl Codegen {
                     this.gen_stmt(s);
                     this.label(&skip);
                 };
-                if let Ok(cv) = const_eval::eval(cond) {
+                // 常量折叠必须**先过可丢性闸门**：`const_eval` 对 `Expr::Assign` 走「返回
+                // 右值」的宽松口径，若直接拿结果顶替条件，`if ((v = 7) != 0)` 会被算成常量真，
+                // store 与比较一起消失（实测 `v` 停在初值，gcc 为 7）。判据唯一出处：
+                // `semantics::dropping_value_is_safe`。
+                let folded_cond = if crate::semantics::dropping_value_is_safe(cond) {
+                    const_eval::eval(cond).ok()
+                } else {
+                    None
+                };
+                if let Some(cv) = folded_cond {
                     let has_labels_in_then = Self::stmt_contains_label(then_);
                     let has_labels_in_else = else_
                         .as_ref()
@@ -1204,6 +1224,16 @@ impl Codegen {
                         13,
                         10,
                     ));
+                    // 还得把 %rsp 拉回父帧底：父函数的尾声是 `add $帧长,%rsp;
+                    // pop %r13; ret`（objtool/ORC 要的形态），而此刻 %rsp 还停在
+                    // 子函数帧里。少了这一句，`add` 加完就跑到帧外，`pop` 拿到
+                    // 垃圾、`ret` 跳到垃圾（实测 gcc.c-torture 的 920428-2 /
+                    // 920501-7 / pr24135 / pr51447 全部段错误）。
+                    // 父函数若走的是 `mov %r13,%rsp` 或对齐帧尾，那两条路径自己
+                    // 会重建 %rsp，这里的 lea 不碍事。
+                    if let Some(frame) = self.nonlocal_parent_frame {
+                        self.emit_insn(&Insn::lea_reg_base_disp(4, 13, -(frame as i32)));
+                    }
                 }
                 // non-local goto: label 定义在父函数里, 必须用父函数名作为命名空间,
                 // 否则 c_label_to_asm 生成 `.Ll_<child>_<label>` 而父函数发射
@@ -1544,7 +1574,10 @@ impl Codegen {
                     },
                     &[],
                 );
-                if !self.emit_insn(&insn) {
+                // `goto *ptr` 也是 C 层面的间接分支，同一条蹦床判据。
+                if let Some(thunk) = self.indirect_thunk_sym(0) {
+                    self.jmp_external(&thunk);
+                } else if !self.emit_insn(&insn) {
                     self.emit_insn(&Insn::jmp_rm_reg(0)); // jmp rax
                 }
             },

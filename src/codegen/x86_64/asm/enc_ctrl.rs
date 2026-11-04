@@ -147,7 +147,11 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_reject("unsupported in port operand");
+                // 把拒掉的形状直接写进诊断：`in`/`out` 的端口只可能是立即数、`%dx`、内存间接
+                // 这三形（`arch/x86/include/asm/shared/io.h` 的 BUILDIO 就是前两形的组合），
+                // 光说「unsupported」无法定位到底是模板替换成了什么（实测 `i8259.o`、
+                // `x86_init.o` 只能猜）。操作数的 `Debug` 形态与编码层同口径，不外泄语法。
+                self.asm_reject(&format!("unsupported in port operand {:?}", port));
             },
         }
         let _ = val;
@@ -313,7 +317,8 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_reject("unsupported out port operand");
+                // 理由与 `emit_asm_in` 那一侧同：点名被拒的端口形状才能定位缺口。
+                self.asm_reject(&format!("unsupported out port operand {:?}", port));
             },
         }
         let _ = val;

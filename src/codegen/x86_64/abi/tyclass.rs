@@ -454,9 +454,18 @@ impl Codegen {
         Self::is_integer_type(src) && Self::is_integer_type(dst) && dst.size() < src.size()
     }
     pub(crate) fn is_signed_int(ty: &Type) -> bool {
+        // `Type::Char`（plain `char`）在 SysV x86-64 上**值表示有符号**（与 `signed char`
+        // 同表示、但是不同类型）：类型身份分开、符号性这里必须并进来，否则
+        // `char` 参与的窄类型有符号扩展全判成无符号。
         matches!(
             ty,
-            Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128
+            Type::Char
+                | Type::SChar
+                | Type::Short
+                | Type::Int
+                | Type::Long
+                | Type::LongLong
+                | Type::Int128
         )
     }
     pub(crate) fn is_sseup_128_aggregate(ty: &Type) -> bool {

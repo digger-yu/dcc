@@ -22,6 +22,13 @@ impl Codegen {
         // 因为 `(void)f()` 必须真的调用 f。**不用** `expr_has_side_effects`
         // 做这个判断：它把 `StmtExpr` 与内置函数当无副作用，而那两类里
         // 完全可能有 call。
+        //
+        // 以前这里换过 `semantics::discarded_value_needs_code`（结构性黑名单），**已退回**：
+        // 发射器只拿得到表达式，拿不到**声明**（`VarDecl::quals`），而「这条读是不是
+        // volatile」只能由声明定。实测后果：`(void)(vglob_token)` 这种丢弃值的 volatile 读
+        // 被误删（新用例在 -O0 红：对 `vglob_token` 的引用从 1 条变成 0 条）。所以这条规则
+        // 住在 AST 层（声明完备的那一层）：`opt.rs` 的 `prune_dead_stores` 另走
+        // `discarded_statement_is_dead`，详见报告 §3.30。
         if matches!(*ty, Type::Void) {
             if !matches!(e, Expr::Int { .. } | Expr::Char { .. } | Expr::Float { .. }) {
                 self.gen_expr(e, dst);

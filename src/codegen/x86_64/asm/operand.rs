@@ -37,6 +37,31 @@ pub enum AsmOperand {
     },
 }
 
+/// 把内存操作数的 `disp` 字段解成一个**纯数值**：十进制/十六进制字面量，或 GAS 允许的
+/// 四则式（`0*8`、`5*8`、`(4+1)*8`、`-8`）。解不出来返回 `None`，即这不是数值位移（是个符号）。
+///
+/// 为什么必须有这一条：`arch/x86/lib/csum-copy_64.S:41` 的 `movq %rbx, 0*8(%rsp)` 以前在
+/// `parse::<i32>()` 上失败，就整串被当成一个**名叫 `0*8` 的符号**（`SymDisp`），后果有两层：
+///   1. 寻址彻底错 —— `SymDisp` 只发 RIP-relative，base `%rsp` 被默默丢掉；
+///   2. 链接期 `undefined reference to '0*8'`（实测全树 7 处，站点在 `csum_partial` 附近，
+///      间隔 7 字节 = 一条 mov/lea 的长度，止于 `3*8`）。
+/// 立即数那一支（`$~0xfa1e0ff3`）早已用 `eval_pure_numeric_arith` 做同一件事，位移却不作；
+/// 本函数把两边拉平。带标识符的式子（`foo+1`）仍走 `SymDisp` 兼底，不能当数值折掉。
+pub(crate) fn fold_asm_disp_number(s: &str) -> Option<i32> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return i32::from_str_radix(hex, 16).ok();
+    }
+    if let Ok(v) = t.parse::<i32>() {
+        return Some(v);
+    }
+    crate::codegen::x86_64::codegen::Codegen::eval_pure_numeric_arith(t)
+        .and_then(|v| i32::try_from(v).ok())
+}
+
 /// Parse AT&T string operand into AsmOperand structure
 pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
     let s = s.trim();
@@ -302,16 +327,13 @@ fn parse_asm_mem(s: &str) -> AsmOperand {
 
     let mut disp: i32 = 0;
     if !disp_str.is_empty() {
-        if let Some(hex) = disp_str
-            .strip_prefix("0x")
-            .or_else(|| disp_str.strip_prefix("0X"))
-        {
-            disp = i32::from_str_radix(hex, 16).unwrap_or(0);
-        } else if disp_str.parse::<i32>().is_err() {
+        // 纯数值位移（包含 `0*8`、`(4+1)*8` 这类四则式）留在 `Mem{disp, base, …}` 形式里；
+        // 判据与 `$N` 那一条同源，见 [`fold_asm_disp_number`]。
+        if let Some(v) = fold_asm_disp_number(disp_str) {
+            disp = v;
+        } else {
             // Symbol name: convert to SymDisp with symbol name (RIP-relative default)
             return AsmOperand::SymDisp(disp_str.to_string(), 0);
-        } else {
-            disp = disp_str.parse::<i32>().unwrap_or(0);
         }
     }
 
@@ -387,4 +409,47 @@ fn wrap_indirect(inner: AsmOperand) -> AsmOperand {
 /// Strip assembly comment from string
 pub fn strip_asm_comment(s: &str) -> &str {
     s.split('#').next().unwrap_or(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `arch/x86/lib/csum-copy_64.S` 那一族 `N*8(%rsp)` 位移必须是 `Mem`，不能变成一个
+    /// 名叫 `0*8` 的「符号」。两层危害都钉住：数值对（`3*8` = 24）与 base 不得被丢。
+    ///
+    /// 本用例**故意不含**带括号的四则式（如 `(4+1)*8(%rsp)`）：`parse_asm_mem` 用「第一个
+    /// `(`」切分位移与寻址寄存器，括号初值会被误判成寄存器组的开头（实测会退成
+    /// `disp=0, base=默认 rbp`）。那是这条切分算法自身的限制，与本缺陷无关；内核与
+    /// GAS 实际写的是不带外层括号的 `5*8(%rsp)` 一形。
+    #[test]
+    fn arithmetic_displacement_folds_and_keeps_base_register() {
+        let rsp = parse_asm_reg("%rsp").map(|(r, _)| r).unwrap();
+        for (text, want) in [("0*8(%rsp)", 0i32), ("3*8(%rsp)", 24), ("5*8(%rsp)", 40)] {
+            match parse_asm_operand_str(text) {
+                AsmOperand::Mem { disp, base, .. } => {
+                    assert_eq!((disp, base), (want, rsp), "{text} 应折成 {want}(%rsp)");
+                },
+                other => panic!("{text} 解析成了 {other:?}，不是 Mem（base 被丢了就是寻址错误）"),
+            }
+        }
+        // 括号四则式目前只能折到纯数值那一步；不能把括号串当符号发出去。
+        assert_eq!(fold_asm_disp_number("(4+1)*8"), Some(40));
+    }
+
+    /// 真符号位移仍走 `SymDisp` 兼底：不能把 `foo+1` 当数值折成 `1`（那是静默错值）。
+    #[test]
+    fn symbolic_displacement_still_falls_back_to_symdisp() {
+        assert!(matches!(
+            parse_asm_operand_str("foo+1(%rip)"),
+            AsmOperand::SymDisp(s, _) if s == "foo+1"
+        ));
+        // 纯数值与四则式都能折；带标识符、溢出 i32、空串都不能折。
+        assert_eq!(fold_asm_disp_number("8"), Some(8));
+        assert_eq!(fold_asm_disp_number("0x10"), Some(16));
+        assert_eq!(fold_asm_disp_number("2*8"), Some(16));
+        assert_eq!(fold_asm_disp_number("foo*8"), None);
+        assert_eq!(fold_asm_disp_number(""), None);
+        assert_eq!(fold_asm_disp_number("99999999999999"), None);
+    }
 }

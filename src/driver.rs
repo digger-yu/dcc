@@ -269,6 +269,36 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return run_assembler_driver(&cfg, input);
     }
 
+    // `-m16` / `-m32` 的**代码生成路径**必须硬错，不能只发一行「不认识就丢了」的警告。
+    //
+    // 为什么上面那条汇编路能接、这里不能：GAS 根本没有 `-m16`，16 位的代码宽度是由
+    // 源文件里的 `.code16`/`.code16gcc` 指令承担的，`-m16`/`-m32` 在汇编输入上真正改变的只有
+    // **输出对象的 ELF 类**（要 `as --32` 出 ELF32，与 `ld -m elf_i386` 同一条链）。实测
+    // 内核 realmode 的 `header/trampoline_64/stack/reboot` 四个 `.S`：dcc 预处理 + `as --32`
+    // 与 gcc `-m16 -c` 的产物**逐字节相同**。
+    //
+    // 而 C 源要的是「把 C 语义编成 16/32 位 x86 指令 + ELF32 重定位」的后端（指令编码、
+    // 寄存器组与寻址窗口都要改），dcc 现在没有。旧行为是把 `-m16` 当未知 `-m` 选项吐掉、
+    // 把 `-m32` 当已知选项忽略 ⇒ 两者都静默产出 64 位代码（实测：`-m16` 编 realmode 的
+    // `header.S` 得到 ELF64 对象，而同批 gcc 产物是 ELF32；`arch/x86/entry/vdso/vdso32/*.c`
+    // 也是同一形）。只挡真会产码的路径：`-E`/`-fsyntax-only`/纯依赖生成不产码，跟着 gcc 一样接受。
+    if (cfg.m16 || cfg.m32) && !cfg.preprocess_only && !cfg.syntax_only && !cfg.dep_no_compile {
+        let file_name = input.display().to_string();
+        let mode = if cfg.m16 { "-m16" } else { "-m32" };
+        return Err(vec![Diagnostic::err(
+            "E0319",
+            format!(
+                "{mode} is not supported for C input {}: dcc has no {}-bit x86 code backend. \
+                 Assembly input (.s/.S) is handled via the host assembler (`as --32`); a C \
+                 source needs a real emitter plus ELF32 relocations. This is a dcc capability \
+                 gap, not an ignorable flag.",
+                file_name,
+                if cfg.m16 { "16" } else { "32" }
+            ),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]);
+    }
+
     // C++ 前端: -x c++ / .cpp / .cc / .cxx / .CPP / .CXX
     let is_cpp = matches!(cfg.input_lang, InputLang::Cpp)
         || input
@@ -721,6 +751,19 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers, cfg.target.arch);
+    // `-fsanitize=<check>` 中「GCC/Clang 标准拼写、dcc 尚无对应插桩」的那几项：收下是为了
+    // 让按 CONFIG 无条件递旗标的构建（内核 `scripts/Makefile.ubsan` 的 `bool`/`enum`/
+    // `array-bounds`）能继续走，但它们**没生效** —— 这笔账必须在日志里看得见，不能等到
+    // 运行期才发现「要的边界检查没做」。
+    if let Some(note) = cfg.sanitizers.accepted_only_note() {
+        diags.push(Diagnostic::warn(
+            "W1017",
+            format!(
+                "-fsanitize={note} 已被接受但未插桩：dcc 还没有这几类 UBSan check 的实现"
+            ),
+            crate::diagnostics::Span::point(&file_name, 1, 1),
+        ));
+    }
 
     // IPA-SRA: 跨过程标量替换 (仅 static 函数, 在 IR lower 之前)
     // -O2 及以上默认启用; -fipa-sra / -fno-ipa-sra 显式控制
@@ -991,6 +1034,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.strict_aliasing,
         cfg.debug_level > 0,
         cfg.strict_overflow,
+        cfg.pic,
     );
     if cfg.opt > 0 {
         ir::resync(&mut module)
@@ -1051,6 +1095,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;
     target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
     target.patchable_function_entry = cfg.patchable_function_entry;
+    target.cf_protection = cfg.cf_protection;
     target.ftrace_mode = cfg.ftrace_mode;
     target.instrument_functions = cfg.instrument_functions;
     target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
@@ -1549,9 +1594,25 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     })?;
 
     let mut cmd = Command::new("as");
-    // -m32 需要传 --32 给系统汇编器 (如 vdso32 构建)
-    if cfg.m32 {
+    // -m32 / -m16 都需要传 --32 给系统汇编器 (如 vdso32 构建、内核 realmode 的
+    // header/trampoline/stack/reboot)。GAS 没有 `-m16`：实模式的代码宽度由源文件里的
+    // `.code16`/`.code16gcc` 指令决定，`-m16` 在这条路上改变的只是**对象的 ELF 类**
+    // （必须是 ELF32，与后面 `ld -m elf_i386` 同一条链）。实测四个 realmode `.S`：
+    // dcc 预处理 + `as --32` 与 gcc `-m16 -c` 逐字节相同。
+    if cfg.m32 || cfg.m16 {
         cmd.arg("--32");
+    }
+    // gcc 把 `-g` 翻译成给 as 的 `--gdwarf-5`（GCC 13 起的默认）；不补这一条，
+    // 同一份 `.S` 会少 `.debug_info/.debug_line/...` 整族节（实测内核 realmode
+    // 的 reboot/bioscall/copy 三个对象因此比 gcc 产物小一半）。显式 `-gdwarf-4`
+    // 照抄；dcc 自己 C 后端的默认是 4，这里按 gcc 口径兜到底 5。
+    if cfg.debug_level > 0 {
+        let dw = if cfg.raw_args.iter().any(|a| a == "-gdwarf-4") {
+            4
+        } else {
+            cfg.dwarf_version.max(5)
+        };
+        cmd.arg(format!("--gdwarf-{dw}"));
     }
     for opt in &cfg.as_options {
         for part in opt.split(',') {
@@ -2293,7 +2354,11 @@ fn write_emit_output(
             // P7-3: 不允许"静默跳过" —— as 缺失/失败必须作为诊断上抛。
             // 后端若没声明 GasTextOutput, codegen 侧已 E0312; 走到这里说明
             // 能力声明与本机工具链不一致 (如交叉 as 被卸), 直接报错。
-            let path = assemble_gas_text(text, requested, cfg)?;
+            let path = assemble_gas_text(
+                &gas_text_with_gnu_stack_note(text, cfg),
+                requested,
+                cfg,
+            )?;
             eprintln!("dcc: wrote {}", path.display());
             return Ok(path);
         }
@@ -2305,7 +2370,12 @@ fn write_emit_output(
     } else {
         requested.to_path_buf()
     };
-    let bytes = emitted.as_bytes();
+    let bytes = match emitted {
+        crate::codegen::shared::asm_source::Emitted::Text(t) => {
+            gas_text_with_gnu_stack_note(t, cfg).into_bytes()
+        }
+        other => other.as_bytes(),
+    };
     if out.to_str() == Some("-") {
         std::io::stdout()
             .write_all(&bytes)
@@ -2317,17 +2387,46 @@ fn write_emit_output(
     f.write_all(&bytes)
         .map_err(|e| io_diag(&format!("cannot write {}", out.display()), &e.to_string()))?;
     // 权限位按实际形态定: 文本永远不拿执行位。
+    //
+    // 只对**普通文件**设 0755：输出可能被指定成 /dev/null（`$(HOSTCC) -xc - -o /dev/null`
+    // 这类能力探针），而 /dev/null 是字符设备 —— 早先无条件 `set_mode(0o755)` 把它的
+    // 权限从 666 改成了 755，那是在改宿主系统而不是描写产物（实测现场：/dev/null 一度
+    // 是 `crwxr-xr-x`）。
     if !emitted.is_text() && !emit_asm {
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut p = f.metadata().unwrap().permissions();
-            p.set_mode(0o755);
-            f.set_permissions(p).unwrap();
+        if let Ok(md) = f.metadata() {
+            if md.file_type().is_file() {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = md.permissions();
+                p.set_mode(0o755);
+                let _ = f.set_permissions(p);
+            }
         }
     }
     eprintln!("dcc: wrote {}", out.display());
     Ok(out)
+}
+
+/// GAS 文本出口补 `.note.GNU-stack` 的**唯一**位置。
+///
+/// GCC 在每个 C 文件的 `.s` 尾部固定写一条 `.section .note.GNU-stack,"",@progbits`，GAS
+/// 因此在对象里发一条零标志的同名节，`ld` 据此认定栈不可执行；缺该节的对象会被报
+/// `warning: missing .note.GNU-stack section implies executable stack`。`-c` 直出字节的
+/// 路径已在三个 ET_REL 写者（x86_64 / 通用 64 位 / 通用 32 位）里补齐，文本路径若不
+/// 一并补，同一个后端的两条出口就会产出节表不一致的对象（`-S` 与
+/// `--asm-fallback=gas` 都从这里走）。
+///
+/// COFF（Windows）没有这一节，原样返回；文本里已经有这条指令时不重复补。
+fn gas_text_with_gnu_stack_note(text: &str, cfg: &Config) -> String {
+    if cfg.target.os == crate::cli::Os::Windows || text.contains(".note.GNU-stack") {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\t.section .note.GNU-stack,\"\",@progbits\n");
+    out
 }
 
 /// 把降级得到的 GAS 文本交给目标对应 `<triple>-as` 汇编成 `.o`。
@@ -2487,6 +2586,7 @@ fn emit_native_program(
         cfg.strict_aliasing,
         cfg.debug_level > 0,
         cfg.strict_overflow,
+        cfg.pic,
     );
     if cfg.opt > 0 {
         ir::resync(&mut module).map_err(|d| {
@@ -2548,6 +2648,7 @@ fn emit_native_program(
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;
     target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
     target.patchable_function_entry = cfg.patchable_function_entry;
+    target.cf_protection = cfg.cf_protection;
     target.ftrace_mode = cfg.ftrace_mode;
     target.instrument_functions = cfg.instrument_functions;
     target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
@@ -2876,6 +2977,19 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         "main".into(),
     ];
     push_sanitizer_link_deps(cfg, &mut needed_libs, &mut allowed_undef);
+    // 静态 ET_EXEC 不接受任何「运行时由 libc 提供」的未定义名单。
+    //
+    // 上面这张硬编码表（`printf`/`malloc`/`memcpy`/…）与下面 P9 那段「从宿主 libc 扫出来的
+    // 名单」是同一个洞的两个入口：`link/mod.rs:428` 里 `emit_dynamic = matches!(output_kind,
+    // PIE | Shared)` ⇒ `Executable` 在内置链接器里**永远是静态 ET_EXEC**（无 PT_INTERP、无
+    // DT_NEEDED），这些名字运行时没人给，允许它们未定义就是「静默绑到地址 0」。实测一个
+    // `target_clones` + `printf` 的夹具用 `-fbuiltin-linker` 「链成功」而产物一发就 SIGSEGV
+    // (rc=139)。底线：链上 ⇒ 产出必须能跑，宁可硬错告知去掉该选项可得动态产物。
+    // 动态输出（PIE/Shared）仍用这张表；内置链接器的静态路径本来也只服务于显式选项，
+    // 内核链接走宿主 `ld`（包装器的 `link-step` 委托），不受本条影响。
+    if matches!(output_kind, link::OutputKind::Executable) {
+        allowed_undef.clear();
+    }
     let mut link_cfg = link::LinkConfig {
         output_kind,
         lto: cfg.linker_lto,
@@ -2955,7 +3069,16 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     }
     // P9: 自动检测系统 libc 并将其导出符号加入 allowed_undef,
     // 减少内置链接器对 host cc 的依赖。
-    if matches!(output_kind, link::OutputKind::Executable | link::OutputKind::PIE) {
+    //
+    // 2026-10-30：**`OutputKind::Executable` 必须从这条名单里剔除**。`mod.rs:428` 写着
+    // `emit_dynamic = matches!(output_kind, PIE | Shared)` ⇒ `Executable` 在内置链接器里
+    // **永远是静态 ET_EXEC**（没有 PT_INTERP、没有 DT_NEEDED），libc 符号运行时没人提供；
+    // 把它们全部「允许未定义」就是「静默绑到地址 0」。实测后果：一个 `target_clones` +
+    // `printf` 的夹具用 `-fbuiltin-linker` 「链成功」，产物一发就是 SIGSEGV(rc=139)。
+    // 这与 §3.26 在 `resolve.rs` 里收紧 `implicit_undef_ok` 是同一个错误的另一个入口：
+    // 那次只堵了内置的隐式名单，没堵这条「从宿主 libc 扫出来的名单」。
+    // 底线：链上 ⇒ 产出必须能跑；宁可硬错告知「去掉 -fbuiltin-linker 可得动态产物」。
+    if matches!(output_kind, link::OutputKind::PIE) {
         if let Ok(libc_info) = link::dso_cache::resolve_and_load(
             &mut link_cfg.dso_cache,
             "c",
@@ -3149,8 +3272,12 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let whole_archive_libs = cfg.whole_archive_libs.clone();
     let sysroot = cfg.sysroot.clone();
     let verbose = cfg.verbose;
+    // host ld 直驱所需的附加输入：单文件分支会把 cfg move 进 run()，必须提前取。
+    let search_paths = cfg.lib_search_paths.clone();
+    let dynamic_linker = parse_dynamic_linker(&cfg.raw_args);
+    let host_ld_ok = host_ld_target_supported(&cfg);
 
-    // 纯链接模式: 所有输入都是 .o/.a, 无需编译, 直接委托 host cc 链接
+    // 纯链接模式: 所有输入都是 .o/.a, 无需编译, 直接委托宿主链接器
     if all_inputs_are_objects(&cfg.inputs) {
         let input_strs: Vec<String> = cfg.inputs.iter().map(|p| p.display().to_string()).collect();
         if verbose {
@@ -3159,6 +3286,24 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 input_strs.join(", "),
                 final_output.display()
             );
+        }
+        if host_ld_ok {
+            if let Some(r) = try_host_ld_link(
+                &cfg.inputs,
+                &final_output,
+                &link_libs,
+                &whole_archive_libs,
+                sysroot.as_deref(),
+                verbose,
+                &cfg.host_link_args,
+                &search_paths,
+                dynamic_linker.as_deref(),
+                &host_sanitizer_flags(&cfg),
+            ) {
+                r?;
+                eprintln!("dcc: {} (via host ld)", final_output.display());
+                return Ok(());
+            }
         }
         let link_result = link_objects_with_host_cc(
             &cfg.inputs,
@@ -3238,6 +3383,27 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // `st_value` 指向真 resolver 体，`ld` 原生就能为它生成 PLT 条目 +
     // `R_X86_64_IRELATIVE`（实测与 gcc 产物逐形一致），那条改道分支因此不再需要。
     // 内置链接器仍只在 `-fbuiltin-linker` / 无宿主 cc 时启用，且继续明说链接方式。
+    //
+    // 链接驱动顺序：先把 .o 交给宿主 `ld` 直驱（crt + -lc + -dynamic-linker，见
+    // `link::host_ld`），环境不满足时才退回 host cc —— 两条路都会自报。
+    if host_ld_ok {
+        if let Some(r) = try_host_ld_link(
+            &[tmp_o.clone()],
+            &final_output,
+            &link_libs,
+            &whole_archive_libs,
+            sysroot.as_deref(),
+            verbose,
+            &host_link_args,
+            &search_paths,
+            dynamic_linker.as_deref(),
+            &sanitizer_flags,
+        ) {
+            r?;
+            eprintln!("dcc: {} (via host ld)", final_output.display());
+            return Ok(());
+        }
+    }
     let link_result = link_with_host_cc(
         &tmp_o,
         &final_output,
@@ -3442,18 +3608,6 @@ fn host_sanitizer_flags(cfg: &Config) -> Vec<String> {
     sanitizer_link_deps(cfg).0
 }
 
-/// 调 host `cc` 把单 .o 链成可执行。传递 --sysroot= 与 -l 列表。
-/// 失败时返回包含 cc 自身 stdout/stderr 的诊断 E0202。
-///
-/// 启动选项 (与 dcc 旧内部链接器输出对齐):
-///   - -no-pie : dcc 现有 codegen 采用 RIP-相对 / 静态地址访问 TLS / 全局;
-///     PIE 下需要重写为 -fpie. 在 -no-pie 下生成 ET_EXEC, 所有地址
-///     运行时固定, 与 dcc codegen 期望一致.
-///   - -z norelro : 避免 GNU_RELRO 覆盖 .tdata, 造成 TLS 写入段错误 (因为
-///     dcc 的 .tdata 位于 .data LOAD 段首, 与 RELRO 重叠).
-///   - -Wl,-z,noexecstack : dcc 当前不输出 .note.GNU-stack, 避免 ld 警告
-///     "missing .note.GNU-stack section implies executable stack".
-///
 /// 解析 host cc 驱动程序: 返回 (program, extra_args)。
 ///
 /// `$CC` 在 make 语境里常是「程序 + 参数」的整串 (如 `CC="dcc -std=gnu99"`、
@@ -3544,6 +3698,26 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         run(c)?;
         objs.push(tmp_o);
     }
+    if host_ld_target_supported(cfg) {
+        if let Some(r) = try_host_ld_link(
+            &objs,
+            &cfg.output,
+            &cfg.link_libs,
+            &cfg.whole_archive_libs,
+            cfg.sysroot.as_deref(),
+            cfg.verbose,
+            &cfg.host_link_args,
+            &cfg.lib_search_paths,
+            parse_dynamic_linker(&cfg.raw_args).as_deref(),
+            &host_sanitizer_flags(cfg),
+        ) {
+            r?;
+            if cfg.verbose {
+                eprintln!("dcc: {} (via host ld)", cfg.output.display());
+            }
+            return Ok(());
+        }
+    }
     link_objects_with_host_cc(
         &objs,
         &cfg.output,
@@ -3560,6 +3734,82 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     Ok(())
 }
 
+/// host `ld` 直驱只建模了「本机 x86_64 Linux / glibc」这一种目标。其它三元组
+/// （交叉目标、musl、非 ELF）交回 host cc，免得拿错 crt 链出构型不对的产物。
+fn host_ld_target_supported(cfg: &Config) -> bool {
+    cfg.target.arch == crate::cli::Arch::X86_64
+        && cfg.target.os == crate::cli::Os::Linux
+        && cfg.target.abi == crate::cli::Abi::Gnu
+}
+
+/// 用宿主 `ld` 直驱链接一次。
+///
+/// 返回 `None` = 这条路不适用（缺 ld/crt/解释器、sanitizer 运行库、`DCC_LINK_VIA=cc`），
+/// 调用方退回 host cc 并继续留痕；`Some(Err)` = 确实试过且失败 —— 原样上抛，
+/// 不改道也不掩盖。
+#[allow(clippy::too_many_arguments)]
+fn try_host_ld_link(
+    objects: &[PathBuf],
+    output: &Path,
+    link_libs: &[String],
+    whole_archive_libs: &[String],
+    sysroot: Option<&Path>,
+    verbose: bool,
+    host_link_args: &[String],
+    search_paths: &[PathBuf],
+    dynamic_linker: Option<&str>,
+    sanitizer_flags: &[String],
+) -> Option<Result<(), Vec<Diagnostic>>> {
+    // ASan/UBSan 运行时是 cc 驱动替我们补的（-lasan + crt 钩子）；直驱未建模，
+    // 不去猜库名，直接交回 cc。
+    if !sanitizer_flags.is_empty() {
+        if verbose {
+            eprintln!("dcc: host ld skipped: sanitizer runtime");
+        }
+        return None;
+    }
+    let req = link::host_ld::LinkRequest {
+        objects,
+        output,
+        link_libs,
+        whole_archive_libs,
+        search_paths,
+        host_link_args,
+        dynamic_linker,
+        sysroot,
+        verbose,
+    };
+    match link::host_ld::link(&req) {
+        Ok(link::host_ld::Outcome::Linked) => Some(Ok(())),
+        Ok(link::host_ld::Outcome::Unavailable(why)) => {
+            if verbose {
+                eprintln!("dcc: host ld skipped: {why}");
+            }
+            None
+        },
+        Err(msg) => Some(Err(vec![Diagnostic::err(
+            "E0202",
+            msg,
+            crate::diagnostics::Span::point(&output.display().to_string(), 0, 0),
+        )])),
+    }
+}
+
+/// 调 host `cc` 把单 .o 链成可执行（`ld` 直驱不可用时的退路）。传递 --sysroot= 与 -l 列表。
+/// 失败时返回包含 cc 自身 stdout/stderr 的诊断 E0202。
+///
+/// 启动选项 (与 dcc 旧内部链接器输出对齐):
+///   - -no-pie : dcc 现有 codegen 采用 RIP-相对 / 静态地址访问 TLS / 全局;
+///     PIE 下需要重写为 -fpie. 在 -no-pie 下生成 ET_EXEC, 所有地址
+///     运行时固定, 与 dcc codegen 期望一致.
+///   - -z norelro : 避免 GNU_RELRO 覆盖 .tdata, 造成 TLS 写入段错误 (因为
+///     dcc 的 .tdata 位于 .data LOAD 段首, 与 RELRO 重叠).
+///
+/// 历史上这里还硬塞过一条 `-Wl,-z,noexecstack`，用来绕开「dcc 不发
+/// `.note.GNU-stack`」——那是在掩盖产物缺口而不是描述需求：`ld` 对**缺该节**的对象会
+/// 报「implied executable stack」，而正确的做法是像 GAS/GCC 一样把节发出来（见
+/// `codegen::shared::elf` 三个 ET_REL 写者与 `gas_text_with_gnu_stack_note`）。节补齐后
+/// 绕行不再需要，也不再需要替用户压制一条他未请求的链接期安全默认。
 fn link_with_host_cc(
     obj_path: &Path,
     output: &Path,
@@ -3580,7 +3830,6 @@ fn link_with_host_cc(
     cmd.arg(obj_path).arg("-o").arg(output);
     cmd.arg("-no-pie");
     cmd.arg("-z").arg("norelro");
-    cmd.arg("-Wl,-z,noexecstack");
     // 未被内置链接器建模的 -Wl,... 选项原样交给 host cc。`-Wl,-E`
     // (--export-dynamic) 必须在：Lua 的 ltests 套件要靠主程序导出
     // lua_* 符号，动态模块 ./libs/*.so 才能解析。

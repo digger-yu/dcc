@@ -215,6 +215,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         });
         for arch in Arch::ALL {
             let registered = backend_for(arch, &target, true).is_some();
@@ -243,6 +244,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         });
         let boxed = backend_for(Arch::X86_64, &target, true).expect("x86_64 must be registered");
         let via_any = boxed.features();

@@ -280,6 +280,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 栈保护 guard 寄存器自定义 | `-mstack-protector-guard-reg=gs` 支持内核 per-CPU canary（`%gs:0x28`）；prologue canary 加载和 epilogue canary 校验均使用可配置段前缀（fs: 0x64 / gs: 0x65）；默认 `%fs:0x28` 用于用户态 |
 | `-fstack-clash-protection` | 全架构 (x86_64/aarch64/riscv64/mips/mips64/arm) 大块栈分配（> 4096 字节）时逐页探测 guard page；发射探测循环：先减剩余字节，再循环每页探测（x86_64: `sub rsp,4096` + `mov byte [rsp],0`；aarch64: `sub sp,sp,#4096` + `strb wzr,[sp]`；riscv64: 双 `addi sp,sp,-2048` + `sb zero,0(sp)`；mips: `subu $sp,$sp,$t1` + `sb $zero,0($sp)`；arm: `sub sp,sp,#4096` + `strb r0,[sp]`）触发缺页异常；小帧保持普通分配 |
 | Retpoline 完整验证 | `-mfunction-return=thunk-extern` 与内核侧 `__x86_return_thunk` 符号兼容；objtool ORC 帧信息正确生成；`-mindirect-branch=thunk-extern` 已实现（见 objtool / ORC 行） |
+| `-fcf-protection=branch/full` | 每个函数入口发 `endbr64`（F3 0F 1E FA），位置与 gcc 一致：`-fpatchable-function-entry=16,16` 的 16 字节 nop 前缀之后、函数符号处（实测对齐 `arch/x86/mm/fault.o`）。`none`/`return` 不发；未传该选项时不发，普通产物字节不受影响。内核 `arch/x86/Makefile` 在 `CONFIG_X86_KERNEL_IBT=y` 时经 `cc-option` 必传此项，缺了会让 C 代码在 IBT 硬件上间接调用直接 `#CP` |
 | `-fno-strict-aliasing` | 优化器不做类型双关假设（type-based alias analysis）；P4 别名分析为 Steensgaard 风格（类型不敏感），不区分不同指针类型的别名关系；常量折叠使用 wrapping 算术；当前优化器已保守处理，标志存储于 Target 供未来优化 pass 参考 |
 | `-fno-strict-overflow` | 优化器不假设有符号溢出为未定义行为；常量折叠使用 wrapping 算术（与 C 标准整数模语义一致）；循环优化不做基于无溢出的范围推断；标志存储于 Target 供未来优化 pass 参考 |
 | `-fshort-wchar` | `wchar_t` 为 2 字节（UTF-16LE）模式；预处理器定义 `__WCHAR_TYPE__` 为 `short unsigned int`、`__WCHAR_MAX__` 为 65535；parser 宽字符串/字符字面量编码为 UTF-16LE（含代理对处理）；null 终止符为 2 字节 |

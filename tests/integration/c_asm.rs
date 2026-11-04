@@ -4442,3 +4442,772 @@ void probe(void)
         "每条 RIP 相对 test 都要有一条 R_X86_64_PC32 → boot_cpu_data 重定位"
     );
 }
+
+/// `-m16` / `-m32` 的**汇编输入**：GAS 没有 `-m16`，实模式的代码宽度由源里的
+/// `.code16`/`.code16gcc` 决定，命令行的 `-m16` 只应落成两件事：
+///   1. 给 `as` 传 `--32`（输出 ELF32，与后面 `ld -m elf_i386` 同一条链）；
+///   2. 把预定义宏换成 i386 口径（`__x86_64__`/`__LP64__` 必须消失）。
+///
+/// 第 2 条是实测出来的：内核 `arch/x86/kernel/verify_cpu.S` 用
+/// `#ifndef __x86_64__` 圈住 32 位专用序列，若仍定义 `__x86_64__`，那 14 条指令
+/// 被整段裁掉（realmode `trampoline_64.o` 的 `.text` 少 28 字节）。
+#[test]
+fn m16_assembly_gets_elf32_and_i386_predefines() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m16-asm-{}.S", std::process::id()));
+    let obj_path = dir.join(format!("dcc-m16-asm-{}.o", std::process::id()));
+    let source = "\
+.code16
+#ifdef __x86_64__
+#error \"-m16 must not define __x86_64__\"
+#endif
+#ifdef __LP64__
+#error \"-m16 must be ILP32\"
+#endif
+#ifdef __i386__
+.globl m16_i386_branch
+m16_i386_branch:
+    nop
+#endif
+";
+    fs::write(&source_path, source).expect("write asm fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-m16", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&obj_path).expect("read object");
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(obj_path);
+    assert_eq!(&bytes[0..4], b"\x7fELF");
+    assert_eq!(bytes[4], 1, "-m16 的汇编输入必须产出 ELFCLASS32");
+    assert_eq!(
+        u16::from_le_bytes([bytes[18], bytes[19]]),
+        3,
+        "e_machine 应为 EM_386（不是 EM_X86_64）"
+    );
+    assert!(
+        bytes.windows(15).any(|w| w == b"m16_i386_branch"),
+        "`#ifdef __i386__` 分支必须参与汇编（否则预定义仍是 x86_64 口径）"
+    );
+}
+
+/// C 输入的 `-m16` / `-m32`：dcc 没有 16/32 位代码生成后端，必须**硬错**而不是
+/// 把旗标吞掉后静默生出 64 位代码（旧行为实测就是这样：`-m16 -c header.S` 得到
+/// ELF64 对象，而同批 gcc 产物是 ELF32）。也不要留下半截产物。
+#[test]
+fn m16_c_input_hard_errors_instead_of_emitting_64bit() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m16-c-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-m16-c-{}.o", std::process::id()));
+    fs::write(&source_path, "int f(void) { return 0; }\n").expect("write C fixture");
+    for flag in ["-m16", "-m32"] {
+        let _ = fs::remove_file(&obj_path);
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args([flag, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&source_path)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{flag} 的 C 输入必须报错；stderr: {stderr}");
+        assert!(stderr.contains("E0319"), "{flag} 应报能力缺口 E0319；stderr: {stderr}");
+        assert!(!obj_path.exists(), "{flag} 报错后不得留下静默的 64 位对象");
+    }
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(obj_path);
+}
+
+/// `always_inline` 里的 jump-label 体（内核 `arch_static_branch()`）内联后，**不许**
+/// 在 `.text` 里留下指向外部 key 的重定位。
+///
+/// 现场：`include/linux/tracepoint-defs.h` 的 `tracepoint_enabled(tp)` 展开成
+/// `static_branch_unlikely(&(__tracepoint_tp).key)`，`arch_static_branch()` 里是一条
+/// `asm goto`，`"i"(key)` 只在 `.pushsection __jump_table` 的 `.quad %c0 + %c1 - .`
+/// 里用。dcc 内联后把实参存进形参临时量 `__inlN$_key`，`%c0` 靠 `subst_cand_reads_items`
+/// 代回成了符号名（jump_table 那条重定位是对的），但**初始化那条语句还留着**：
+/// `lea __tracepoint_tp+8(%rip), %rax; mov %rax, slot`，于是 `.text` 多出一条
+/// `R_X86_64_PC32 __tracepoint_tp`。vmlinux 里无害，vDSO 是 `ld -shared`，直接
+/// `relocation against '__tracepoint_write_msr' in read-only section '.text' can not be
+/// used when making a shared object`（实测 `arch/x86/entry/vdso/vdso64/vclock_gettime.o`）。
+/// 修法是 `prune_spliced_items` 里那条 `drop_dead_inline_temps()`。
+#[test]
+fn inlined_jump_label_asm_goto_keeps_key_reloc_in_jump_table_only() {
+    let source = r#"
+struct static_key { long enabled; };
+struct static_key_false { struct static_key key; };
+struct tracepoint { const char *name; struct static_key_false key; };
+extern struct tracepoint __tracepoint_write_msr;
+
+#define ARCH_STATIC_BRANCH_ASM(key, label)			\
+	"1: jmp " label " # objtool NOPs this \n\t"		\
+	".pushsection __jump_table,  \"aw\" \n\t"		\
+	".balign 8 \n\t"					\
+	".long 1b - . \n\t"					\
+	".long " label " - . \n\t"				\
+	".quad " key " - . \n\t"				\
+	".popsection \n\t"
+
+static __attribute__((always_inline)) inline int
+arch_static_branch(struct static_key * const key, const int branch)
+{
+	asm goto(ARCH_STATIC_BRANCH_ASM("%c0 + %c1", "%l[l_yes]")
+		: :  "i" (key), "i" (branch) : : l_yes);
+	return 0;
+l_yes:
+	return 1;
+}
+
+#define tracepoint_enabled(tp) arch_static_branch(&(__tracepoint_##tp).key, 0)
+
+int f(void)
+{
+	if (tracepoint_enabled(write_msr))
+		return 2;
+	return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-jumplabel-{pid}.c"));
+    let op = dir.join(format!("dcc-jumplabel-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "compile: {stderr}");
+    let re = Command::new("readelf")
+        .args(["-rW"])
+        .arg(&op)
+        .output()
+        .expect("readelf -rW");
+    let text = String::from_utf8_lossy(&re.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    // 按 readelf 的节标题切段，看 key 符号出现在哪些重定位节里。
+    let mut cur = String::new();
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Relocation section '")
+            || trimmed.starts_with("重定位节 '")
+        {
+            let after = trimmed.split('\'').nth(1).unwrap_or("").to_string();
+            cur = after;
+            continue;
+        }
+        if line.contains("__tracepoint_write_msr") {
+            hits.push((cur.clone(), line.trim().to_string()));
+        }
+    }
+    assert!(
+        !hits.is_empty(),
+        "jump label 体必须留下 __jump_table 里的 key 重定位（否则说明内联根本没发生）:\n{text}"
+    );
+    let stray: Vec<&(String, String)> = hits
+        .iter()
+        .filter(|(sec, _)| !sec.contains("__jump_table"))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "key 的重定位只允许在 __jump_table 里；以下落在其它节（.text 会毁掉 vDSO 的\
+         `ld -shared`）:\n{stray:#?}\n全文:\n{text}"
+    );
+}
+
+/// 指令助记符与 `static inline` 函数名同形（`special_insns.h` 的 `wrmsr`/`clflush`/
+/// `insb`…），asm 模板里写着同名指令。跨函数 DCE 若把 asm 文本里的助记符当成符号引用，
+/// 这些**没人调用**的函数就会被钉活；副本里对外部符号的引用（`wrmsr` 副本里的
+/// `tracepoint_enabled(write_msr)`）会变成真外部引用，vDSO（`ld -shared`）直接死。
+///
+/// 反面：助记符前面还有指令前缀（`rep insb`）与 `# ALT: …` 注释，只跳「行首第一个
+/// 标识符」不够。实测 `vclock_gettime.o` 由 80 份副本降到 54 份（前缀/注释仍漏），
+/// 补齐后降到 0 份。
+///
+/// 正面控制：`target` 只在 asm **操作数**位上被点名（`call target`），必须留下——
+/// 判据不能矫枉过正地把真符号一起跳掉。
+#[test]
+fn asm_mnemonic_named_static_inline_is_not_a_dce_root() {
+    let source = r#"
+static inline void insb(void) { __asm__ volatile("rep insb"); }
+static inline void outsw(void) { __asm__ volatile("rep outsw"); }
+static inline void clflush(void *p)
+{
+    __asm__ volatile("771:\n\tds clflush %0\n772:\n" :: "r"(p) : "memory");
+}
+static inline void wrmsr(void) { __asm__ volatile("1: wrmsr\n2:\n"); }
+static inline void commented(void) { __asm__ volatile("1: # ALT: oldinstr\n"); }
+
+static int target(void) { return 3; }
+static int use(void) { __asm__ volatile("call target"); return 0; }
+int main(void) { return use(); }
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-asmmnem-{pid}.c"));
+    let op = dir.join(format!("dcc-asmmnem-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "compile: {stderr}");
+    let nm = Command::new("nm")
+        .args(["--defined-only"])
+        .arg(&op)
+        .output()
+        .expect("nm");
+    let syms = String::from_utf8_lossy(&nm.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let defined: Vec<&str> = syms
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .collect();
+    for dead in ["insb", "outsw", "clflush", "wrmsr", "commented"] {
+        assert!(
+            !defined.contains(&dead),
+            "无人调用的 `{dead}` 被当成了 DCE 根（助记符/前缀/注释被当符号引用）:\n{syms}"
+        );
+    }
+    assert!(
+        defined.contains(&"target"),
+        "只在 asm 操作数位被点名的 `target` 被误删了:\n{syms}"
+    );
+}
+
+/// `asm("testb %2,%1" : "=@ccnz" : "m"(byte), "i"(mask))` 必须编成 `F6 /0 ib`。
+///
+/// 缺陷现场：内核 `arch/x86/include/asm/bitops.h` 的 `constant_test_bit_acquire()`
+/// 就是这条 asm（`=@ccnz` 输出 + `"m"` 字节内存输入）。dcc 对 `bits == 8` 仍发
+/// `F7`（TEST r/m32, imm32），却只写 1 字节立即数 —— x86 解码时把后续 3 字节指令
+/// 当 imm32 吞掉，紧跟的 `push %rax / setne / movzx / store / pop` 整体左移。
+/// `fs/nfs/write.o` 里 `nfs_writepages+0x18dd` 因此出现一条没有重定位的伪 `call`，
+/// objtool 报 `unannotated intra-function call`，vmlinux 链接前就被拒。
+///
+/// 判据（objdump 为 oracle）：必须出现 `testb`，且不得出现错编特有的
+/// `testl $0x950f5001`（imm32 吞掉 `50 0f 95` 后的指纹）。
+#[test]
+#[cfg(unix)]
+fn byte_test_asm_emits_f6_not_f7() {
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let src = dir.join(format!("dcc-testb-{tag}.c"));
+    let obj = dir.join(format!("dcc-testb-{tag}.o"));
+    fs::write(
+        &src,
+        "__attribute__((always_inline)) static inline int testb_acquire(long nr, \
+         const volatile unsigned long *addr)\n\
+         {\n\
+         \tint oldbit;\n\
+         \t__asm__ volatile(\"testb %2,%1\"\n\
+         \t\t\t : \"=@ccnz\" (oldbit)\n\
+         \t\t\t : \"m\" (((const unsigned char *)addr)[nr >> 3]),\n\
+         \t\t\t   \"i\" (1 << (nr & 7))\n\
+         \t\t\t : \"memory\");\n\
+         \treturn oldbit;\n\
+         }\n\
+         \n\
+         int probe_byte_test(const volatile unsigned long *addr)\n\
+         {\n\
+         \treturn testb_acquire(8, addr);\n\
+         }\n",
+    )
+    .expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fno-PIE", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dump = Command::new("objdump")
+        .args(["-d", "--disassemble=probe_byte_test"])
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump -d failed");
+    let text = String::from_utf8_lossy(&dump.stdout).to_string();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    assert!(text.contains("testb"), "8 位 test 必须用 F6 (testb) 形态: {text}");
+    assert!(
+        !text.contains("950f5001"),
+        "F7 (testl imm32) 把后续 push/setne 字节吞进立即数，整段错位: {text}"
+    );
+}
+
+/// `asm("cmpb $7, (%1)")` / `asm("cmpb %2, (%1)")`：8 位比较必须发
+/// `80 /7 ib` 与 `38 /r`。缺陷现场：`emit_asm_alu` 的 mem 形态一律 `0x03/0x01 + op*8`
+/// （32/64 位），且 `cmp mem, imm8` 走 `0x83 /7`，字节比较于是被当成 dword 比较
+/// （产物里 `cmpb` 直接消失）；若再次回归，这里会看到 `cmpq $0x7`。
+#[test]
+#[cfg(unix)]
+fn byte_cmp_asm_emits_80_and_38() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-asm-cmpb-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-asm-cmpb-{}.o", std::process::id()));
+    fs::write(
+        &src,
+        "int probe_cmpb_imm(const unsigned char *p)\n\
+         {\n                             \
+         \tint r;\n                \
+         \t__asm__ volatile(\"cmpb $7, (%1)\\n\\tsetne %b0\" : \"=q\"(r) : \"r\"(p) : \"cc\", \"memory\");\n\
+         \treturn r & 1;\n           \
+         }\n                         \
+         int probe_cmpb_reg(unsigned char v, const unsigned char *p)\n\
+         {\n                             \
+         \tint r;\n                \
+         \t__asm__ volatile(\"cmpb %2, (%1)\\n\\tsetne %b0\" : \"=q\"(r) : \"r\"(p), \"q\"(v) : \"cc\", \"memory\");\n\
+         \treturn r & 1;\n           \
+         }\n",
+    )
+    .expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fno-PIE", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dump = Command::new("objdump")
+        .args(["-d", "--disassemble=probe_cmpb_imm"])
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump -d failed");
+    let imm = String::from_utf8_lossy(&dump.stdout).to_string();
+    let dump = Command::new("objdump")
+        .args(["-d", "--disassemble=probe_cmpb_reg"])
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let reg = String::from_utf8_lossy(&dump.stdout).to_string();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    assert!(imm.contains("cmpb"), "`cmpb $imm8` 必须发 80 /7 ib（不是 83 /7、更不是 81 /7）: {imm}");
+    assert!(
+        !imm.contains("cmpq $"),
+        "`0x83 /7` 的 imm8 形式在 8 位下会把比较宽度当 qword: {imm}"
+    );
+    assert!(reg.contains("cmp"), "`cmpb r8, r/m8` 丢了: {reg}");
+}
+
+/// 尾声退栈必须用 **objtool 看得见** 的形状。判据来源：`tools/objtool/arch/x86/decode.c`
+/// 是白名单式解码器，只给 `push`/`pop`/`add·sub rsp,imm`/`leave` 这些形状发 stack op；
+/// `mov reg,%rsp` 不在表里 ⇒ 不产生任何 op ⇒ CFA 一直停在「帧已分配」，到 ret 时
+/// `has_modified_stack_frame()`（`check.c:2721`）报 `return with modified stack frame`。
+/// 实测 localmodconfig 全树 46 491 条而 gcc 0 条，且 objtool 就在这套 CFI 状态上生成
+/// `.orc_unwind/_ip` ⇒ 跟不了栈状态的路径上 ORC 条目是错的。
+/// gcc 在 `-fomit-frame-pointer` 下退栈就是 `add $帧长,%rsp`，这里钉住同一形状。
+#[test]
+#[cfg(unix)]
+fn epilogue_uses_trackable_rsp_restore_when_provable() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-epi-trackable-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-epi-trackable-{}.s", std::process::id()));
+    // 有帧、体内不碰栈指针的函数；`leaf` 无帧（验证「什么也不发」也正确）。
+    fs::write(
+        &src,
+        "int frame_no_asm(int a) { char buf[64]; buf[a & 63] = 1; return buf[0]; }\n\
+         int leaf(int a) { return a + 1; }\n",
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fomit-frame-pointer", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&src)
+        .output()
+        .expect("run dcc -S");
+    let text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = text
+        .split("frame_no_asm:")
+        .nth(1)
+        .map(|s| s.split('\n').take(64).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    assert!(
+        body.contains("add $") && body.contains(", %rsp"),
+        "可证平衡的尾声必须用 `add $帧长, %rsp` 退栈（objtool 才能跟踪）:\n{body}"
+    );
+    assert!(
+        !body.contains("mov %r13, %rsp"),
+        "可证平衡时不该再从帧基读回 rsp（那就是 46 491 条警告的来源）:\n{body}"
+    );
+}
+
+/// 反向对照：证不了「rsp 正落在帧线」时**必须**保留旧式 `mov %r13, %rsp`。
+/// 这里用一条体内 `push %%rax; pop %%rax` 的内联汇编把账打掉（语句级弃账，不去
+/// 逐行解码模板）。另一侧形状：过对齐帧与 `-fno-omit-frame-pointer` 也不记账。
+#[test]
+#[cfg(unix)]
+fn epilogue_keeps_frame_base_restore_when_stack_proof_is_lost() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-epi-fallback-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-epi-fallback-{}.s", std::process::id()));
+    fs::write(
+        &src,
+        "int frame_with_asm(int a) {\n\
+         \tchar buf[64];\n\
+         \t__asm__ volatile(\"push %%rax; pop %%rax\" ::: \"memory\");\n\
+         \tbuf[a & 63] = 1;\n\
+         \treturn buf[0];\n\
+         }\n",
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fomit-frame-pointer", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&src)
+        .output()
+        .expect("run dcc -S");
+    let text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("mov %r13, %rsp"),
+        "体内有动栈的内联汇编时必须退回从帧基读回（宁可少一条可跟踪的尾声，也不能猜）:\n{text}"
+    );
+}
+
+/// 改尾声形状是改产物字节的事 ⇒ 必须拿运行期验收：带帧、带调用、带早期返回的
+/// 一组函数跑出来与 gcc 同一源的结果一致。
+#[test]
+#[cfg(unix)]
+fn epilogue_rsp_restore_runs_correct_with_and_without_windows() {
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-epi-run-{}.exe", std::process::id()));
+    let src = dir.join(format!("dcc-epi-run-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "#include <stdio.h>\n\
+         extern int ext(int);\n\
+         int ext(int a) { return a * 2; }\n\
+         int deep(int a) { char b[128]; b[a & 127] = 7; if (a > 4) { return b[a & 127]; } return ext(a); }\n\
+         int main(void) { printf(\"%d %d %d\\n\", deep(1), deep(9), deep(3)); return 0; }\n",
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-O2")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "编译/链接失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    let _ = fs::remove_file(&src);
+    assert_eq!(rc, 0, "带帧 + 早期返回 + 跨调用存活的形状应正常跑完");
+}
+
+/// `-mretpoline-external-thunk` 是有真语义的旗标：C 层面的每一条间接分支都必须发成
+/// `call/jmp __x86_indirect_thunk_<reg>`。判据来自树内两处：内核的 `patch_retpoline()`
+/// （`arch/x86/kernel/alternative.c`）从调用位移解出目标蹦床再还原为 `call *%reg`，
+/// 而 objtool 的 `arch_is_retpoline`（`tools/objtool/arch/x86/decode.c:912`）按符号名前缀
+/// `__x86_indirect_` 认站点并据此造 `.retpoline_sites`。发裸间接调用就等于「收下旗标却没做缓解」。
+#[test]
+#[cfg(unix)]
+fn retpoline_external_thunk_routes_indirect_branches_to_kernel_thunks() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-retpoline-{}.c", std::process::id()));
+    // 函数指针调用 + `goto *ptr`（两条编译器自发的间接分支）。
+    fs::write(
+        &src,
+        "typedef int (*fn_t)(int);\n\
+         int apply(fn_t f, int x) { return f(x); }\n\
+         int jump(fn_t f, int x) { void *p = &&out; if (x) { p = &&mid; } goto *p; mid: x += 1; out: return x + f(x); }\n",
+    )
+    .expect("write fixture");
+    let obj2 = dir.join(format!("dcc-retpoline-{}.o", std::process::id()));
+    let build = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-O2")
+        .arg("-mretpoline-external-thunk")
+        .arg("-ffreestanding")
+        .arg("-c")
+        .arg("-o")
+        .arg(&obj2)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        build.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bytes = fs::read(&obj2).expect("read object");
+    let undef = elf64_undefined_symbols(&bytes);
+    assert!(
+        undef.iter().any(|s| s.starts_with("__x86_indirect_thunk_")),
+        "间接分支必须引用内核的蹦床符号：{undef:?}"
+    );
+    let dump = Command::new("objdump")
+        .args(["-d", "-M", "intel"])
+        .arg(&obj2)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dump.stdout).to_string();
+    assert!(
+        !text.contains("call   *") && !text.contains("jmp    *"),
+        "产物里不得留下裸间接分支（那就是 objtool 报 indirect call found 的来源）:\n{text}"
+    );
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj2);
+}
+
+/// 汇编文本里「有一行的整条指令就是它」（去掉前后空白与行内注释后逐字比）。
+/// 用子串判会假阳也假阴：临时文件名、`.file` 指令里都可能出现同样的字母。
+fn has_insn_line(asm_text: &str, mnemonic: &str) -> bool {
+    asm_text.lines().any(|l| {
+        let l = l.trim();
+        let l = l.split_once("/*").map(|(a, _)| a).unwrap_or(l);
+        l.trim() == mnemonic
+    })
+}
+
+/// `rep movs`/`rep stos` 前面那条 `cld` 只在**真的可能脏**时才发。判据全部来自实测：
+/// gcc 参照树 120 个 `.o` 里 266 条 `rep movs/stos`、**0** 条 `cld`，而我们改前同形状发
+/// 126 条（objtool 因此报 `redundant CLD`，全树 2 207 条）；x86-64 SysV 与内核入口都保证
+/// DF=0，所以那条 `cld` 是白多一条指令。唯一能把它弄脏的是**内联汇编里的 `std`** ——
+/// 那一形出现时必须照发（下一条用例就是这个反向对照）。
+#[test]
+#[cfg(unix)]
+fn aggregate_copy_omits_redundant_cld() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-dirclean-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-dirclean-{}.s", std::process::id()));
+    fs::write(
+        &src,
+        "struct hdr { char a[128]; };\n\
+         void plain(struct hdr *d, const struct hdr *s) { __builtin_memcpy(d, s, 128); }\n",
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O1", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&src)
+        .output()
+        .expect("run dcc -S");
+    let text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("rep movs"), "这份拷贝应仍走 `rep movs`:\n{text}");
+    // 按「整行就是这条指令」判，不能用子串：临时文件名里带不带 `cld` 都会把子串判据带歪。
+    assert!(
+        !has_insn_line(&text, "cld"),
+        "体内没有能弄脏 DF 的 asm 时不该再发 `cld`（gcc 同一形状发 0 条）:\n{text}"
+    );
+}
+
+/// 反向对照：函数体里出现 `std` 时，`rep movs` 前的 `cld` 必须**照发** —— 省掉它
+/// 就是把方向标志留着脏，拷贝会倒着走。
+#[test]
+fn std_in_inline_asm_keeps_the_direction_clear() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-dirtydir-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-dirtydir-{}.s", std::process::id()));
+    fs::write(
+        &src,
+        "struct hdr { char a[128]; };\n\
+         void dirty(struct hdr *d, const struct hdr *s) {\n\
+         \t__asm__ volatile(\"std\" ::: \"memory\");\n\
+         \t__builtin_memcpy(d, s, 128);\n\
+         }\n",
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O1", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&src)
+        .output()
+        .expect("run dcc -S");
+    let text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("rep movs"), "拷贝应仍走 `rep movs`:\n{text}");
+    assert!(
+        has_insn_line(&text, "cld"),
+        "体内有 `std` 时必须保留 `cld`（否则方向标志是脏的，拷贝会倒着走）:\n{text}"
+    );
+    // 而且必须紧贴在那条 `rep movs` 之前，不是别处的同名指令
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let adjacent = lines
+        .iter()
+        .position(|l| *l == "cld")
+        .map(|i| lines.get(i + 1).is_some_and(|n| n.starts_with("rep movs")))
+        .unwrap_or(false);
+    assert!(adjacent, "`cld` 没有贴着那条 `rep movs`:\n{text}");
+}
+
+/// 反向对照：不传该旗标时**不得**无端去引用蹦床符号（否则普通程序会多出一个
+/// 不存在的未定义引用），间接调用保持原来的 `call *%reg`。
+#[test]
+#[cfg(unix)]
+fn indirect_branch_without_retpoline_flag_stays_plain() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-noretpoline-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-noretpoline-{}.o", std::process::id()));
+    fs::write(&src, "typedef int (*fn_t)(int);\nint apply(fn_t f, int x) { return f(x); }\n")
+        .expect("write fixture");
+    let build = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-O2")
+        .arg("-ffreestanding")
+        .arg("-c")
+        .arg("-o")
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        build.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read object");
+    let undef = elf64_undefined_symbols(&bytes);
+    assert!(
+        !undef.iter().any(|s| s.starts_with("__x86_indirect_thunk_")),
+        "未开蹦床旗标时不得引用蹦床符号：{undef:?}"
+    );
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+}
+
+/// 「内联展开在**死臂**里留下的标号不该挡住恒假支塌缩」的产物级双向判据
+/// （夹具 `asm_goto_label_in_dead_branch.c`，§5.0o）。
+///
+/// 为什么单独一条：内核 `static_branch_unlikely()`/`DO_ONCE()` 的取支那一臂里坐的是带
+/// `asm goto` 的 `__always_inline`（`arch_static_branch_jump()`），展开后 `l_yes` 被改名成
+/// `__inl<N>__ll_yes`。死分支折叠的拦网「被丢的臂含标号就不折」原先只豁免
+/// `__inl<N>__end` 那一支文法，认不出这种改名落点 ⇒ 恒假臂里的
+/// `____wrong_branch_error()` 一路活到链接期（实测 10 个对象各留 1 条 undefined
+/// reference）。期望名单是拿 `gcc -O2`/`-O3` 实测的，不是推的：`trap_dead_*` 两条 0 引用，
+/// `trap_kept_asm`/`trap_jumpin` 两条都在。
+///
+/// 后半那两条才是防过修的那一半：`trap_jumpin` 坐在恒假臂里、但臂上有**源码写的标签**且
+/// 别处 `goto` 跳得进去 —— 把 `stmt_has_label` 整条删掉的改法能过 `trap_dead_*`，必挂这条。
+#[test]
+#[cfg(unix)]
+fn inlined_asm_goto_labels_in_dead_branch_do_not_block_const_if_folding() {
+    let src = include_str!("../fixtures/c/asm_goto_label_in_dead_branch.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("asmgoto-deadarm", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und: Vec<String> = elf64_syms_by_type(&bytes)
+            .iter()
+            .filter(|s| s.shndx == 0)
+            .map(|s| s.name.clone())
+            .collect();
+        let has = |n: &str| und.iter().any(|s| s == n);
+        for gone in ["trap_dead_asm", "trap_dead_end"] {
+            assert!(
+                !has(gone),
+                "{flag}: 恒假臂里的引用没被消掉，产物里仍有 `{gone}`（= 链接期 \
+                 `undefined reference to '{gone}'`）；完整未定义名单：{und:?}"
+            );
+        }
+        for kept in ["trap_kept_asm", "trap_jumpin"] {
+            assert!(
+                has(kept),
+                "{flag}: 本该留下的引用被一并抹掉了（`{kept}` 不在 {und:?}）——\
+                 判据不是「越少越好」，这一半才是防过修的那一半"
+            );
+        }
+    }
+}
+
+/// 「`asm goto` 的落点定义在 `if (0)` 死块里、引用在活代码里」：定义不得被死分支折叠删掉
+/// （夹具 `asm_goto_label_defined_in_dead_block.c`，build13 的 `signal_64.c` E1103）。
+///
+/// 现场：`include/linux/uaccess.h` 的 `unsafe_get_user()` 把 `local_label:` 故意坐在
+/// `if (0) { local_label: goto label; }` 里，而 `arch_unsafe_get_user()` 的 `asm goto`
+/// 落点就是它。坐在 `__always_inline` 里内联进 caller 时标号按 `__inl<N>__l` 前缀改名，
+/// 而拦网 `is_inliner_label` 把「带前缀」当「内联器自造、可删」⇒ `if (0)` 整块删除、
+/// 定义消失而落点还在 ⇒
+/// `E1103: … references internal label '.Ll_x64_setup_rt_frame___inl9261__llocal_label'`。
+/// 修法判据是「分支**外**还有没有人跳」：源标签一律拦，前缀标号只看臂外引用。
+///
+/// 两条判据：
+///   * 四档编译 + 运行必须与 gcc 一致 —— `g_fault = 1` 时 `asm goto` 真的跳进死块走
+///     `return -1`，「保留死块」是活语义的一部分，不只是别让编译器报错；
+///   * `-O2` 的 `read_or_default` 体内必须还有那条 `mov $-1` —— 直接盯住「死臂被删了」
+///     这个缺陷形态（只靠「能编译」无法区分「保留定义」与「把跳转也删了」）。
+///
+/// 反向对照是上面那条 `asm_goto_label_in_dead_branch.c`（jump_label 族的臂必须仍然能删）。
+#[test]
+#[cfg(unix)]
+fn asm_goto_label_defined_in_dead_block_survives_const_if_folding() {
+    let src = include_str!("../fixtures/c/asm_goto_label_defined_in_dead_block.c");
+    assert_all_levels_match_gcc(
+        "asmgoto-deadblock",
+        src,
+        "死块里的 asm goto 落点定义被删（E1103 现场）或跳转语义被改",
+    );
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("asmgoto-deadblock", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败（E1103 现场）: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = fs::remove_file(&obj);
+        let body = dcc_fn_body_at("asmgoto-deadblock", src, flag, "read_or_default");
+        assert!(
+            body.contains("$-1"),
+            "{flag}: `read_or_default` 里 `return -1;` 整条不见了 —— 死块被连标号一起删掉，\
+             `asm goto` 的落点悬空。体内:\n{body}"
+        );
+    }
+}

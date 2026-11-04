@@ -9,7 +9,7 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::abi::layout::LayoutMap;
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::Codegen;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// 用户写了不是寄存器的寄存器名（与 `report_internal_bug` 不同：这是**用户代码错误**，
 /// 不是后端不变量破坏）。
@@ -45,6 +45,13 @@ pub struct LateNeed {
     /// 每个表达式与声明的类型（连 VLA 维度里的子类型都进去），新增一个遍历器只会多一处
     /// 「静默少扫一棵子树」的机会。
     max_vec_bytes: usize,
+    /// 已展开过的 `Arc<Vec<Field>>` 字段表地址。
+    ///
+    /// 内核类型图是 DAG：`struct list_head` 这类枢纽被成千上万个结构体引用，`Ptr` 层
+    /// 又无条件下探 ⇒ 按路径数展开是**指数级**。实测 `net/ipv4/tcp_input.o` 在 codegen
+    /// 阶段长时间不出产物，gdb 栈一直停在 `late_need_type` 的 Struct 分支。同一份字段表
+    /// 只需扫一遍：本函数收集的是「最大向量字节数 + VLA 尺寸站点」，重复扫描不产生新信息。
+    ty_seen: HashSet<usize>,
 }
 
 impl LateNeed {
@@ -118,9 +125,16 @@ impl Codegen {
     /// `ssa::regalloc::tests::escaping_asm_functions_do_not_reach_the_allocator` 钉住；
     /// 它一变红，补判据的位置就只可能在本函数与 `plan_for` 这两处。两处各自写一遍
     /// 遍历就会漂移，而漂移的方向就是静默错值。
+    /// 发射开始**之前**的一次 AST 事实收集（两件事共用同一次遍历）：
+    ///   * 能跳出守护区间的 `asm goto` 所 clobber 的池号 ⇒ 禁作溅出槽；
+    ///   * 模板里出现过 `std` ⇒ 本单元保留 `rep movs/stos` 前的 `cld`（见
+    ///     [`crate::codegen::x86_64::Codegen::asm_sets_direction`]）。
     pub fn ban_escaping_asm_regs(&mut self, body: Option<&crate::ast::Block>) {
         let Some(b) = body else { return };
-        for name in crate::ast_asm::escaping_asm_clobbers(b) {
+        let facts = crate::ast_asm::collect_asm_facts(b);
+        // 单调或：见字段注释里「为什么不做每函数重置」。
+        self.asm_sets_direction |= facts.sets_direction;
+        for name in facts.clobbers {
             // 名字→号走本后端已有的那一份解析（`register asm` 与 clobber 同一口径）；
             // `ban` 对池外的号（caller-saved）直接返 false，所以 `"rcx"` 这种最常见的
             // clobber 不会改变本函数能用的溅出号。
@@ -753,7 +767,7 @@ impl Codegen {
                 ty, callee, args, ..
             } => {
                 let sret = if Self::needs_memory_return(ty) {
-                    (ty.size() as i64 + 15) & !15
+                    Self::sret_slot_bytes(ty.size() as i64)
                 } else {
                     0
                 };
@@ -772,7 +786,7 @@ impl Codegen {
                 // 同源，见 `va_arg_result_in_cx_band`)。
                 let own =
                     if Self::va_arg_result_in_memory(ty) && !Self::va_arg_result_in_cx_band(ty) {
-                        (ty.size() as i64 + 15) & !15
+                        Self::sret_slot_bytes(ty.size() as i64)
                     } else {
                         0
                     };
@@ -784,7 +798,23 @@ impl Codegen {
                 Self::complex_ld_sret_binop(e)
                     + Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r))
             },
-            Expr::Assign { l, r, .. } => Self::sret_bytes_expr(l) + Self::sret_bytes_expr(r),
+            Expr::Assign { l, r, .. } => {
+                // 聚合赋值走「目标地址先落一个 sret 槽」那一形时，本语句额外占一个
+                // 8 字节地址槽（发射侧 `dispatch.rs` 的 `AggDst::Indirect` 分支）。两侧必须用
+                // **同一个谓词** `assign_needs_addr_slot`：实测 `block/blk-mq.o` 的
+                // `blk_mq_extract_queue_requests`（`*queue_rqs = matched_rqs;`）因为这里只算
+                // `l + r` 两个子表达式（都不是 Call）而报 `sret_need=0`，发射侧第一个槽就压穿
+                // spill 带顶 ⇒ E1128。
+                let lv = crate::ast::peel_instrumented_lvalue(l);
+                let addr_slot = if Self::assign_needs_addr_slot(lv, &lv.ty(), r) {
+                    // 步长用分配器那把尺（`sret_slot_bytes`），不能登记原始 8 字节：
+                    // 分配器按 16B 步进，按 8 登记就是预算永远少一半。
+                    Self::sret_slot_bytes(8)
+                } else {
+                    0
+                };
+                addr_slot + Self::sret_bytes_expr(l) + Self::sret_bytes_expr(r)
+            },
             Expr::StmtExpr { block, ty, .. } => {
                 // 聚合 StmtExpr 分配一个类型槽; 内部块另算
                 let own = if ty.size() > 0 {
@@ -958,6 +988,9 @@ impl Codegen {
                 }
             },
             Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+                if !need.ty_seen.insert(std::sync::Arc::as_ptr(fields) as usize) {
+                    return;
+                }
                 for f in fields.iter() {
                     Self::late_need_type(&f.ty, need);
                 }
@@ -2080,14 +2113,15 @@ impl Codegen {
 
     /// 一个局部的帧槽读写是否「每一次都是可观察事件」。
     ///
+    /// 判据只有一个出处：`crate::ast::var_decl_access_is_observable`。AST 层的
+    /// `opt.rs::discarded_statement_is_dead`（「丢弃值的纯读能不能整条不发」）问的是同一
+    /// 件事，两边各写一份就是漂移的温床。
+    ///
     /// 段限定的局部在本后端不会有段前缀（`[r13+disp]` 是无段的普通帧槽），但它与
     /// volatile 在语义上同类：值可能被外部（per-cpu 基址、信号）改动，所以一并排除，
     /// 宁可少削一条。
     fn frame_access_is_volatile(v: &VarDecl) -> bool {
-        v.quals.is_volatile()
-            || v.quals.is_atomic()
-            || !matches!(v.addr_space, AddrSpace::None)
-            || matches!(v.ty, Type::Atomic(_))
+        crate::ast::var_decl_access_is_observable(v)
     }
 
     pub fn collect_direct_nested_funcs(items: &[BlockItem], out: &mut Vec<FuncDecl>) {
@@ -2336,6 +2370,8 @@ impl Codegen {
     }
 
     pub fn emit_func_epilogue(&mut self) {
+        // 取走「体内比帧线低多少」这本账：尾声自己发的恢复指令不该再往里记。
+        let ledger = self.rsp_below_frame_line.take();
         // 每一条 `return` 都是一次区出口：区内推迟的存出必须在恢复 callee-saved 号**之前**
         // 写回内存，否则那个值随号一同消失，而帧里留的是旧值（调用方或嵌套路径
         // 再从内存读它就是错值）。函数尾的那一次 flush 只管「顺落下来结束」的路径。
@@ -2412,11 +2448,46 @@ impl Codegen {
                     .with_gas("mov -8(%r13), %rbp".to_string()),
             );
         }
-        // mov rsp, r13: 恢复栈指针
-        // P11: 必须保留 0x49 0x8b 0xe5 形式 (mov r/m64,r64 中 rsp 是 r/m, 需
-        // REX.B=1 扩展 r13/r/m). mov_rm_reg 走 0x89 形式导致 REX 字节不同, 破坏
-        // G10 快照字节一致性. 这里保留 hand-written 形态以维持 byte-identical.
-        if self.cur_func_do_align {
+        // 恢复栈指针。两种形状，差别在 objtool 看不看得见：
+        //
+        // 【为什么不能一律 `mov %r13,%rsp`】objtool 的 x86 解码器（`tools/objtool/arch/x86/
+        // decode.c`）是**白名单式**的，只给已知形状发 stack op（push/pop/add·sub rsp,imm/
+        // leave）；`mov reg,%rsp` 不在表里 ⇒ 不产生任何 op ⇒ CFA 一直停在「帧已分配」那个
+        // 状态。到 ret 时 `has_modified_stack_frame()`（`check.c:2721`）拿 base/offset/
+        // stack_size 与函数入口比，不相等就报 `return with modified stack frame`。实测
+        // localmodconfig 全树 46 491 条，而 gcc 同旗标同参数 0 条；后果不是少一条提示，而是
+        // objtool 就在这套 CFI 状态上生成 `.orc_unwind/_ip` ⇒ 跟不了栈状态的路径上发出去的
+        // ORC 条目是错的（`arch_stack_walk` 在 lockdep / oops 转储 / kexec 上给出错回溯）。
+        // gcc 在 `-fomit-frame-pointer` 下从来不写 `mov base,%rsp`：它按 `add $帧长,%rsp` 退。
+        //
+        // 【能换成 add 的判据】`rsp_below_frame_line` 这本账（`codegen.rs` 的字段注释）从
+        // 序言分配完帧的那一刻起，只统计「能证明是写 rsp 的指令」：push/+8、pop/-8、
+        // `sub $N,%rsp`/+N、`add $N,%rsp`/-N，其余一律弃账。它为 0 就是「rsp 正落在帧线」。
+        // 另外两道守卫是「账非 0 时定义标号」与「账非 0 时发跳转」都当场弃账 —— 线性累加
+        // 只沿发射顺序成立，跨越窗口的控制流正是它唯一看不见的形状。
+        // 三条形状落回旧式：过对齐帧（序言把 %r13 也下调过，帧线不是 `r13 - frame_size`，
+        // 得从锚点槽读回）、frame-pointer 模式（序言在 `mov %rsp,%r13` 之后多推了 8 字节，
+        // 那 8 不在 `frame_size` 里）、naked（没有本序言的那条 `sub`）。
+        let rsp_at_frame_line = matches!(ledger, Some(0))
+            && !self.cur_func_do_align
+            && !self.target.frame_pointer
+            && !self.cur_func_is_naked;
+        if std::env::var_os("DCC_EPI_TRACE").is_some() {
+            eprintln!(
+                "[epi] {} frame={} ledger={:?} do_align={} fp={} naked={}",
+                if rsp_at_frame_line { "add-rsp" } else { "mov-r13" },
+                self.frame_layout.frame_size,
+                ledger,
+                self.cur_func_do_align,
+                self.target.frame_pointer,
+                self.cur_func_is_naked
+            );
+        }
+        if rsp_at_frame_line {
+            // `frame_size == 0` 时 `emit_add_rsp` 自己就不发，这时正好：rsp 已经在帧线上，
+            // 后面那条 `pop %r13` 读的就是入口时推进去的这一格。
+            self.emit_add_rsp(self.frame_layout.frame_size);
+        } else if self.cur_func_do_align {
             // 过对齐帧: %r13 已被序言下调, 不能直接 mov r13,rsp (那会漏掉对齐
             // 吃掉的那段)。改从锚点槽读回「对齐前的帧顶」。
             // mov %rsp, anchor_off(%r13) : REX.WB 8B /r (load), reg=rsp(100),
@@ -2435,8 +2506,14 @@ impl Codegen {
             insn.gas_text = Some(format!("mov {}(%r13), %rsp", anchor_off));
             self.emit_insn(&insn);
         } else {
+            // P11: 这一条必须保留 0x49 0x8b 0xe5 形式（mov r/m64,r64 中 rsp 是 r/m，需
+            // REX.B=1 扩展 r13/r/m）。走 `mov_rm_reg` 的 0x89 形式会发出不同的 REX 字节，
+            // 而依赖这份字节形的快照会当场对不上。
             self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
         }
+        // 上面的三种形状里，只有 add 那一条是「按字节退回」；旧式那两条都是「从帧基读回」，
+        // 两者对 `stack_shift` 这本账是同一个终点（帧基 + 弹回 r13 的那一格），所以下面
+        // 那句清零与形状无关。
         self.emit_insn(
             &Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 13)
                 .with_gas("pop %r13".to_string()),
@@ -2463,6 +2540,17 @@ impl Codegen {
         // 是函数级成对, 都不计入 `stack_shift` (它只计量调用点仍存活的
         // 跨调用 push, 见 codegen.rs 的字段注释)。
         self.stack_shift = 0;
+        // 把尾声期间暂停掉的那本账**原样放回**，不是重新起账。
+        //
+        // 为什么不能重新起账（实测教训）：早期返回的尾声之后的落空代码属于另一条路径，
+        // 那条路径上的 rsp 由「本函数迄今的线性账」描述 —— 若中途有过 VLA 那种
+        // 动态 `subq %rax, %rsp`（账已经弃了），重新起账会把它假装成「rsp 正落在帧线」，
+        // 于是同一函数的**第二个**返回点就敢发 `add $帧长,%rsp` —— 实测
+        // `tests/fixtures/c/va_arg/vla_agg_via_va_arg.c` 在 -O0 下 SIGSEGV：
+        // `probe` 的第一个尾声还是旧式（弃账），第二个却换成了 add，退栈少退了 VLA 那一截。
+        // `stack_shift = 0` 那一招对「mod 16 同余」的判据成立（VLA 的下推是 16 对齐的），
+        // 对「绝对等于零」不成立，这里不能照抄。
+        self.rsp_below_frame_line = ledger;
         self.emit_return_tail();
     }
 
@@ -2684,6 +2772,52 @@ mod tests {
         assert!(
             !Codegen::late_need(&body_of(scalar_src, "f")).agg_tmp,
             "标量字段不得当聚合成员赋值计费"
+        );
+    }
+
+    /// E1128 的那条账：**经运行时地址目标的聚合赋值要一个 sret 地址槽**，规划期必须
+    /// 按分配器那把尺登记它。
+    ///
+    /// 实测现场（`report/linux71-dcc-fulltree-build-2026-10-28.md` §3.21）：
+    /// `block/blk-mq.o` 的 `blk_mq_extract_queue_requests` 里 `*queue_rqs = matched_rqs;` 让
+    /// 发射侧调 `alloc_sret_slot(8)`（`dispatch.rs` 的 `AggDst::Indirect` 分支），而旧扫描的
+    /// `Expr::Assign` 臂只算 `sret_bytes_expr(l) + sret_bytes_expr(r)` —— 两边都不是 Call ⇒
+    /// 登记 0 字节，发射期第一个槽（步长 16）就压穿 spill 带顶，整 TU 以 E1128 硬错收场。
+    /// 本用例把两侧口径钉在一起：形状对了就必须留，形状不对时一格都不许多留。
+    #[test]
+    fn aggregate_assign_through_runtime_address_is_budgeted() {
+        // 尺子本身：分配器按 16B 步进，扫描登记必须是同一个式子。
+        assert_eq!(Codegen::sret_slot_bytes(0), 0);
+        assert_eq!(Codegen::sret_slot_bytes(1), 16);
+        assert_eq!(Codegen::sret_slot_bytes(8), 16);
+        assert_eq!(Codegen::sret_slot_bytes(16), 16);
+        assert_eq!(Codegen::sret_slot_bytes(17), 32);
+
+        let src = "struct S { long a, b; }; struct T { struct S q; }; \
+                   long f(struct T *t, struct S s){ *t = (struct T){ s }; return t->q.a; }";
+        let items = body_of(src, "f");
+        assert!(
+            Codegen::max_sret_bytes(&items) >= Codegen::sret_slot_bytes(8),
+            "经运行时地址目标的聚合赋值必须为 `AggDst::Indirect` 的地址槽留预算，\
+             实测 max_sret_bytes={}（旧扫描在这里登记 0 ⇒ blk-mq.o 的 E1128）",
+            Codegen::max_sret_bytes(&items)
+        );
+
+        // 反向对照：目标是一个具名局部（`Ident` 左值，直接按帧偏移存）时一格都不许多留。
+        let local_src = "struct S { long a, b; }; long f(long k){ struct S s; s.a = k; s.b = k; \
+                         struct S d; d = s; return d.a; }";
+        assert_eq!(
+            Codegen::max_sret_bytes(&body_of(local_src, "f")),
+            0,
+            "Ident 目标的聚合赋值不走地址槽那一形，不得凭空多留"
+        );
+
+        // 标量经指针写入同样不得计费（否则是把每个 `*p = v` 都当聚合）。
+        let scalar_src = "long f(long *p, long v){ *p = v; return *p; }";
+        assert_eq!(
+            Codegen::max_sret_bytes(&body_of(scalar_src, "f")),
+            0,
+            "标量经指针赋值不得当聚合地址槽计费"
         );
     }
 }

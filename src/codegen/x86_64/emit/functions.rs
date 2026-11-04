@@ -47,6 +47,12 @@ impl Codegen {
                     if f.error_msg.is_some() {
                         return None;
                     }
+                    if std::env::var_os("DCC_SKIP_AI_BODY").is_some()
+                        && f.is_always_inline
+                        && f.is_static
+                    {
+                        return None;
+                    }
                     if f.body.is_some() {
                         Some(f.clone())
                     } else {
@@ -57,12 +63,68 @@ impl Codegen {
                 }
             })
             .collect();
+        // 排障用：`DCC_EMIT_TRACE=1` 打出本 TU 真正进入发射的函数名。判定
+        // 「某个函数体/内联副本漏发射或误发射」时，这是唯一能分清
+        // 「根本没发射」与「发射了但诊断把名字记成 callee」的观测点。
+        if std::env::var_os("DCC_EMIT_TRACE").is_some() {
+            for f in &top_funcs {
+                eprintln!(
+                    "EMIT| {} static={} always_inline={} body_items={}",
+                    f.name.name,
+                    f.is_static,
+                    f.is_always_inline,
+                    f.body.as_ref().map(|b| b.items.len()).unwrap_or(0)
+                );
+            }
+        }
+        // 临时探针（DCC_DUMP_LEFTOVER）：列出「内联之后仍被直接调用」的强制内联函数，
+        // 用来定位“某个调用点没能内联、于是要发射一份带 asm goto 的外带副本”的现场。
+        if std::env::var_os("DCC_DUMP_LEFTOVER").is_some() {
+            let names: std::collections::HashSet<String> = top_funcs
+                .iter()
+                .map(|f| f.name.name.clone())
+                .collect();
+            for f in &top_funcs {
+                let (calls, _) = crate::ssa::passes::collect_func_refs(f, &names);
+                let mut left: Vec<&String> = calls
+                    .iter()
+                    .filter(|c| {
+                        top_funcs
+                            .iter()
+                            .any(|g| g.name.name == **c && g.is_always_inline)
+                    })
+                    .collect();
+                left.sort();
+                left.dedup();
+                if !left.is_empty() {
+                    eprintln!("LEFTOVER {} -> {:?}", f.name.name, left);
+                }
+            }
+        }
         if self.parallel_codegen && self.relocatable && top_funcs.len() >= 2 {
             self.emit_functions_parallel(&top_funcs, prog);
             return;
         }
+        // 诊断窗口（`DCC_FN_RSS=1`）：逐函数打印本进程 RSS 与耗时。
+        // 为什么必须有：单 TU 的 RSS 会随函数数单调上涨（实测 `net/unix/af_unix.c`
+        // 单跑爬到 6.7 GB 被 OOM 杀，而 `-fsyntax-only` 只有 247 MB、`-O0` 照涨），
+        // 没有逐函数读数就分不清「某个函数一次爆」与「每个函数都留下一块不回收的
+        // 内存」—— 两种根因的修法完全不同。只写 stderr，不进产物字节。
+        let fn_rss = std::env::var_os("DCC_FN_RSS").is_some();
         for f in &top_funcs {
+            let r0 = fn_rss.then(crate::opt::memdbg_rss_kb);
+            let t0 = fn_rss.then(std::time::Instant::now);
             self.compile_func(f, prog);
+            if let (Some(r0), Some(t0)) = (r0, t0) {
+                let now = crate::opt::memdbg_rss_kb();
+                eprintln!(
+                    "dcc: fn-rss {} rss={}kB (+{}kB) dt={}ms",
+                    f.name.name,
+                    now,
+                    now.saturating_sub(r0),
+                    t0.elapsed().as_millis()
+                );
+            }
         }
     }
     /// 汇总全程序里「地址被取走」的对象根名，一个 Codegen 实例只算一次。
@@ -328,6 +390,9 @@ impl Codegen {
         );
         self.cleanup_vars.clear();
         self.sret_watermark = 0;
+        // 发射站点日志也是逐函数状态：不清会把上一个函数的site 拼进本函数的 E1128，
+        // 而那条诊断的全部价值就是「本函数哪几个发射站点分过槽」。
+        self.sret_site_log.clear();
         self.sret_region_base = 0;
         // 帧解算表也是**逐函数**状态：`frame_size` 要等本函数的 `LayoutMap::resolve` 才算出来，
         // 在那之前 `check_frame_budget` 必须处于「尚未知帧底」而不检查的状态（`unresolved()`
@@ -500,6 +565,12 @@ impl Codegen {
             self.label(&sym_name);
             func_start
         };
+        // -fcf-protection=branch|full: 函数入口（patchable 前缀 nop 之后）先发 endbr64。
+        // gcc 在 `arch/x86/mm/fault.o` 里就是这个形态（16 字节 nop → 符号 → `f3 0f 1e fa`），
+        // 内核 IBT 靠它把函数入口认定成合法的间接分支目标。
+        if self.target.cf_protection {
+            self.emit_insn(&Insn::raw_with_mnemonic(&[0xF3, 0x0F, 0x1E, 0xFA], "endbr64"));
+        }
         // __attribute__((naked)): 不生成 prologue/epilogue，
         // 函数体完全由内联汇编组成，直接发射 asm 指令后返回。
         // 必须在 ftrace/prologue 之前检查，避免插入编译器生成的代码。
@@ -1065,6 +1136,9 @@ impl Codegen {
             }
             // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后.
             self.emit_over_align_anchor();
+            // 帧已分配 ⇒ 此刻 rsp 正落在帧线上，从这里开始记「体内比帧线低多少」的账
+            // （尾声据此决定发 `add $帧长,%rsp` 还是退回 `mov %r13,%rsp`）。
+            self.arm_rsp_ledger();
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧. 对超大帧跳过.
             if self.target.auto_var_init_zero
                 && self.frame_layout.frame_size > 0
@@ -1379,6 +1453,9 @@ impl Codegen {
             }
             // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后.
             self.emit_over_align_anchor();
+            // 帧已分配 ⇒ 此刻 rsp 正落在帧线上，从这里开始记「体内比帧线低多少」的账
+            // （尾声据此决定发 `add $帧长,%rsp` 还是退回 `mov %r13,%rsp`）。
+            self.arm_rsp_ledger();
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧. 对超大帧跳过.
             if self.target.auto_var_init_zero
                 && self.frame_layout.frame_size > 0
@@ -1920,7 +1997,14 @@ impl Codegen {
                 nf_decl.name.name = unique_name.clone();
                 // 将嵌套函数加入 defined_funcs，这样 ELF 发射器知道它的符号
                 self.defined_funcs.insert(unique_name.clone());
+                // 非局部 goto 要用父帧长把 %rsp 拉回父帧底（见
+                // `Codegen::nonlocal_parent_frame`）。此处父函数正在发体中段，
+                // `frame_layout` 已解算定稿，读到就是父帧长；`compile_func` 会把
+                // 它改写成子函数自己的，所以子函数编完必须回填。
+                let saved_parent_frame = self.nonlocal_parent_frame;
+                self.nonlocal_parent_frame = Some(self.frame_layout.frame_size);
                 self.compile_func(&nf_decl, prog);
+                self.nonlocal_parent_frame = saved_parent_frame;
                 // 恢复父级链状态 (父函数可能还有兄弟嵌套函数)
                 self.upvar_chain_depth = saved_upvar_chain_depth;
                 self.upvar_intermediate_offsets = saved_upvar_intermediate;

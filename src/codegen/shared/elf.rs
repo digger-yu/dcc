@@ -889,6 +889,10 @@ fn build_elf_rel_generic(
         .iter()
         .map(|g| sec_name_off(&mut shstr, &format!(".group.{}", g.signature)))
         .collect();
+    // `.note.GNU-stack`：与 x86_64 写者 `build_elf_rel_x86_64` 同一条规则（GAS 对每个 C
+    // 文件都补，缺节会被 `ld` 判成「implied executable stack」并刷警告）。本表的节号是
+    // 现算的，但仍一律**追加**在最后一条，与 x86_64 侧的坐标口径保持一致。
+    let note_stack_name = sec_name_off(&mut shstr, ".note.GNU-stack");
 
     // ===== .symtab: 三条 gABI 硬约束 (本轮一次性补齐) =====
     // (A) 条目尺寸: Elf64_Sym 恒为 24 字节, 与端序无关。
@@ -1035,7 +1039,8 @@ fn build_elf_rel_generic(
         + 1
         + if rela_rodata.is_empty() { 0 } else { 1 }
         + extra_sections.len()
-        + comdat_groups.len();
+        + comdat_groups.len()
+        + 1; // .note.GNU-stack
 
     let symtab_idx = if rodata.is_empty() { 2u32 } else { 3 };
     let strtab_idx = symtab_idx + 1;
@@ -1242,6 +1247,21 @@ fn build_elf_rel_generic(
             is_be,
         );
     }
+    // [.note.GNU-stack] —— 零内容/零标志，字段与 GAS 逐字同形（见 x86_64 写者那条注释）。
+    write_section_header(
+        &mut out,
+        note_stack_name,
+        SHT_PROGBITS,
+        0,
+        0,
+        (shstrtab_off + shstr.len()) as u64,
+        0,
+        0,
+        0,
+        1,
+        0,
+        is_be,
+    );
     out
 }
 
@@ -1305,6 +1325,7 @@ pub fn build_elf_rel_x86_64(
     // [9+N+G+M] .symtab
     // [10+N+G+M] .strtab
     // [11+N+G+M] .shstrtab
+    // [12+N+G+M] .note.GNU-stack  (末位，见下)
     let n_extra = extra_sections.len() as u16;
     let n_comdat = comdat_groups.len() as u16;
     let n_extra_rela = extra_rela_sections.len() as u16;
@@ -1315,7 +1336,11 @@ pub fn build_elf_rel_x86_64(
     let sh_symtab: u16 = 8 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
     let sh_strtab: u16 = 9 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
     let sh_shstrtab: u16 = 10 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
-    let shnum: u16 = 11 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
+    // `.note.GNU-stack` 只能**追加**在固定表末尾：`.text`=1 … `.tbss`=6、自定义节从 7 起，
+    // `codegen/x86_64/elf/resolve.rs` 里成片的 `7 + sec_idx` 依赖这个坐标，插在中间会把
+    // 后面所有节号整体后移（与 `.tdata` 空节那次的处置同理）。
+    let _sh_note_stack: u16 = 11 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
+    let shnum: u16 = 12 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
 
     // 构建 .shstrtab (节名字符串表)
     let shstrtab = build_shstrtab_with_tls(extra_sections, extra_rela_sections, comdat_groups);
@@ -1625,11 +1650,27 @@ pub fn build_elf_rel_x86_64(
     );
 
     // [5] .tdata
+    //
+    // **没有 TLS 内容时不得带 SHF_ALLOC**（`tdata.is_empty()` / `tbss_size == 0`）。
+    // GAS 在这种情况下根本不建这个节（实测 gcc 的 `init/version-timestamp.o` 里没有
+    // `.tdata`/`.tbss`），而本写入器的节号是**固定表**（`.text`=1 … `.tdata`=5 `.tbss`=6，
+    // 自定义节从 7 起，`resolve.rs` 里成片的 `7 + sec_idx` / 「`.rodata` 节号=2」都依赖
+    // 它），所以不能靠「少写一条节表项」对齐 GAS —— 那会把后面所有节号整体前移。
+    // 保留表项、去掉分配标志是等价做法：非 ALLOC 的节不进入 ld 的段分配，也就不会被
+    // 当孤儿节塞进 LOAD 段。实测 `full17` 少了这一步，最终链接先死在
+    // `ld: .tmp_vmlinux1: section '.tdata' can't be allocated in segment 1 LOAD: .data …
+    // .modinfo .tdata .tbss`，前面还带着 6 条 orphan 警告（来源 `vmlinux.o` /
+    // `.vmlinux.export.o` / `init/version-timestamp.o`）—— 即**未定义引用清零也过不了
+    // 这一道**：内核的 TLS 输出节归 `PT_TLS`，被孤儿处理排到 LOAD 段末尾直接报错。
     write_section_header(
         &mut out,
         26,
         SHT_PROGBITS,
-        SHF_ALLOC | SHF_WRITE | SHF_TLS,
+        if tdata.is_empty() {
+            0
+        } else {
+            SHF_ALLOC | SHF_WRITE | SHF_TLS
+        },
         0,
         tdata_off,
         tdata.len() as u64,
@@ -1645,7 +1686,11 @@ pub fn build_elf_rel_x86_64(
         &mut out,
         33,
         SHT_NOBITS,
-        SHF_ALLOC | SHF_WRITE | SHF_TLS,
+        if tbss_size == 0 {
+            0
+        } else {
+            SHF_ALLOC | SHF_WRITE | SHF_TLS
+        },
         0,
         tbss_off,
         tbss_size,
@@ -1736,6 +1781,7 @@ pub fn build_elf_rel_x86_64(
     let symtab_name_off = rela_data_name_off + ".rela.data".len() as u32 + 1;
     let strtab_name_off = symtab_name_off + ".symtab".len() as u32 + 1;
     let shstrtab_name_off_val = strtab_name_off + ".strtab".len() as u32 + 1;
+    let note_stack_name_off = shstrtab_name_off_val + ".shstrtab".len() as u32 + 1;
     write_section_header(
         &mut out,
         rela_text_name_off,
@@ -1817,6 +1863,31 @@ pub fn build_elf_rel_x86_64(
         false,
     );
 
+    // [.note.GNU-stack] —— 零内容、零标志的 SHT_PROGBITS，与 GAS 对每个 C 文件补的那条
+    // 逐字段同形（实测 gcc 的 `init/version-timestamp.o`：
+    // `.note.GNU-stack PROGBITS … 000000 00 (无 flags) 0 0 1`）。
+    //
+    // 为什么必须发：GAS 只在该节**存在且 sh_flags 为 0** 时才认定栈不可执行；缺节的对象
+    // 会让 `ld` 报 `warning: missing .note.GNU-stack section implies executable stack`，
+    // 内核 `ld -r` 阶段因此刷一整片告警，而 `driver.rs` 那侧只好硬塞 `-Wl,-z,noexecstack`
+    // 绕行。补上之后警告消失、绕行也不必了，产物同时与 gcc 同形。
+    write_section_header(
+        &mut out,
+        note_stack_name_off,
+        SHT_PROGBITS,
+        0,
+        0,
+        // 零长度节没有内容，偏移直接取 .shstrtab 之后（GAS 也这么放，见上面实测：
+        // sh_offset 0x373 落在 .comment 尾部，本身不对齐）。
+        shstrtab_off + shstrtab.len() as u64,
+        0,
+        0,
+        0,
+        1,
+        0,
+        false,
+    );
+
     out
 }
 
@@ -1857,6 +1928,7 @@ fn build_shstrtab_with_tls(
         ".symtab",
         ".strtab",
         ".shstrtab",
+        ".note.GNU-stack",
     ] {
         s.extend_from_slice(name.as_bytes());
         s.push(0);
@@ -2393,6 +2465,8 @@ fn build_elf32_rel_generic(
         .iter()
         .map(|s| sec_name_off(&mut shstr, &s.name))
         .collect();
+    // `.note.GNU-stack`：与上面两个 ET_REL 写者同一条规则（一律追加在节表末尾）。
+    let note_stack_name = sec_name_off(&mut shstr, ".note.GNU-stack");
 
     // ===== .symtab: ELF32 与 ELF64 的 gABI 两条硬约束 =====
     // (C) 排布: 所有 STB_LOCAL 必须整体排在首个 GLOBAL/WEAK 之前, 且节头
@@ -2505,7 +2579,8 @@ fn build_elf32_rel_generic(
         + 3
         + 1
         + if rel_rodata.is_empty() { 0 } else { 1 }
-        + extra_sections.len();
+        + extra_sections.len()
+        + 1; // .note.GNU-stack
 
     let symtab_idx = if rodata.is_empty() { 2u32 } else { 3 };
     let strtab_idx = symtab_idx + 1;
@@ -2681,6 +2756,21 @@ fn build_elf32_rel_generic(
             is_be,
         );
     }
+    // [.note.GNU-stack] —— 零内容/零标志，字段与 GAS 同形。
+    write_section_header32(
+        &mut out,
+        note_stack_name,
+        SHT_PROGBITS,
+        0,
+        0,
+        (shstrtab_off + shstr.len()) as u32,
+        0,
+        0,
+        0,
+        1,
+        0,
+        is_be,
+    );
     out
 }
 

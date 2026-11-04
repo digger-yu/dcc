@@ -1,22 +1,22 @@
 foo:
 push %r13
 mov %rsp,%r13
-sub $0x300,%rsp
+sub $0x310,%rsp
 <nop padding>
 mov %rdi,-0x58(%r13)
 movups %xmm0,-0x50(%r13)
 mov -0x50(%r13),%rax
 mov -0x48(%r13),%rdx
-mov %rax,-0x2b8(%r13)
-mov %rdx,-0x2b0(%r13)
+mov %rax,-0x2c8(%r13)
+mov %rdx,-0x2c0(%r13)
 mov $0x0,%eax
-mov %rax,-0x2a8(%r13)
+mov %rax,-0x2b8(%r13)
 xor %rdx,%rdx
-mov %rdx,-0x2a0(%r13)
-mov -0x2b8(%r13),%rax
-mov -0x2b0(%r13),%rdx
-mov -0x2a8(%r13),%rcx
-mov -0x2a0(%r13),%r8
+mov %rdx,-0x2b0(%r13)
+mov -0x2c8(%r13),%rax
+mov -0x2c0(%r13),%rdx
+mov -0x2b8(%r13),%rcx
+mov -0x2b0(%r13),%r8
 cmp %rax,%rcx
 sete %al
 cmp %r8,%rdx
@@ -26,12 +26,12 @@ movzbq %al,%rax
 xor $0x1,%rax
 neg %rax
 mov %rax,%rdx
-mov %rax,-0x2c8(%r13)
-mov %rdx,-0x2c0(%r13)
-lea -0x2c8(%r13),%rax
+mov %rax,-0x2d8(%r13)
+mov %rdx,-0x2d0(%r13)
+lea -0x2d8(%r13),%rax
 mov %rdi,%rax
 mov %rax,%rdi
-lea -0x2c8(%r13),%rsi
+lea -0x2d8(%r13),%rsi
 mov $0x10,%ecx
 cld
 rep movsb %ds:(%rsi),%es:(%rdi)

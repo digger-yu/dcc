@@ -727,6 +727,7 @@ mod tests {
             vendor: "unknown".into(),
             os: crate::cli::Os::Linux,
             abi: crate::cli::Abi::Gnu,
+            x86_bits: crate::cli::TargetTriple::NATIVE_BITS,
         });
         let overrides = CpuFeatureOverrides {
             avx: Some(true),
@@ -760,6 +761,7 @@ mod tests {
             vendor: "unknown".into(),
             os: crate::cli::Os::Linux,
             abi: crate::cli::Abi::Gnu,
+            x86_bits: crate::cli::TargetTriple::NATIVE_BITS,
         });
         let overrides = CpuFeatureOverrides {
             avx: Some(true),

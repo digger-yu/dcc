@@ -89,7 +89,7 @@ src=""
 for ((i = n - 1; i >= 0; i--)); do
     a="${args[i]}"
     case "$a" in
-        *.c|*.S)
+        *.c|*.S|*.s)
             src="$a"
             break
             ;;
@@ -126,56 +126,124 @@ replace_dcc_only_flags() {
     done
 }
 
-# 把一次编译显式交给 gcc：每条都必须留一行可被日志 grep 的判据。
-# 「全程用 dcc 编内核」是当前目标，所以剩下这些 gcc 通路必须点名，不能再藏在
-# 包装器里：靠 `.comment=GCC` 只能知道「有代工件」，说不出是哪一条路为什么走的。
-delegate_gcc() {
-    echo "GCC-DELEGATE reason=$1 src=${src:-<none>}" >&2
-    exec gcc "${@:2}"
-}
+# （原 `delegate_gcc` 已删除。它是一个"留痕后 exec gcc"的出口，但内核全树验收的判据
+# 是"产物里不能出现 GCC"，所以出口只剩：自己答（DCC-PROBE）或硬错（DCC-GAP）。
+# 真正需要的 gcc 保底只剩末尾显式的 DCC_KERNEL_ALLOW_GCC_FALLBACK=1，且它也不是给
+# 内核构建用的默认行为。）
 
-# realmode / 16-bit 代码: 需要 -m32 或 -m16, dcc 只支持 x86_64,
-# 将这些文件委托给 gcc.  同时过滤 dcc 专属标志 (gcc 不认识).
+# realmode / 16-bit 代码: `-m32` / `-m16` 不再委托 gcc。
+#
+# 汇编输入（`arch/x86/realmode/rm/{header,trampoline_64,stack,reboot}.S`、
+# `arch/x86/boot/header.S` 等）：GAS 根本没有 `-m16`，16 位的代码宽度来自源文件里的
+# `.code16`/`.code16gcc`，`-m16` 在汇编输入上唯一的作用是让驱动给 `as` 传 `--32`
+# （即输出 ELF32）。dcc 已照此实现（`driver.rs::run_assembler_driver`），实测四个
+# realmode `.S` 的产物与 gcc `-m16 -c` **逐字节相同**，所以这条路直接交给 dcc。
+#
+# C 输入（`arch/x86/boot/*.c`、`arch/x86/realmode/rm/*.c`、`vdso32/*.c`）：需要 16/32 位
+# x86 代码生成后端，dcc 没有。此时 dcc 会硬错 E0319 —— 这是**如实报缺口**，不是把
+# 旗标吐掉后静默生出 64 位代码（旧行为实测就是这种形状）。PVH 验收配置
+# （`scripts/pvh-verify.sh`）把 realmode 的 C 部分（`ACPI_SLEEP`）与 `vdso32`
+# （`COMPAT_32`）关掉，让这条路在验收链上不出现；`bzImage` 路线仍需要真 16 位后端。
+#
+# 注意: 这里**不能**按 `*/realmode/*` 路径委托。`arch/x86/realmode/init.c` 是普通 64 位
+# TU（`.init.o.cmd` 里没有 -m16），按路径一刀切会把一个 dcc 本可以编的文件白送给 gcc。
 for a in "$@"; do
     case "$a" in
         -m32|-m16)
-            rout=()
-            replace_dcc_only_flags rout "${args[@]}"
-            out=()
-            filter_clang_flags out "${rout[@]}"
-            delegate_gcc "m16/m32-no-dcc-backend" "${out[@]}"
+            case "$src" in
+                *.c) echo "DCC-GAP reason=m16/m32-no-c-backend src=$src flag=$a" >&2 ;;
+            esac
+            break
             ;;
     esac
 done
-# Also delegate realmode directory sources
-case "$src" in
-    */realmode/*)
-            rout=()
-            replace_dcc_only_flags rout "${args[@]}"
-            out=()
-            filter_clang_flags out "${rout[@]}"
-            delegate_gcc "realmode-dir" "${out[@]}"
-            ;;
-esac
 
-# 链接步骤: 委托给 gcc (dcc 内置链接器不能解析内核外部符号)
+# 链接步骤: 交给 dcc（driver 自己直驱 host `ld` + crt*/libc/libgcc）
+#
+# 旧实现在这里 `exec gcc`。内核里走 `$(CC)` 的链接步骤只有 userprogs
+# （`scripts/Makefile.userprogs`：`$(CC) ... -o ucon ucon.c`，单源直接编链）和个别
+# 宿主工具；vmlinux 本身是 `$(LD) -T ...`，不经这条。dcc 的 `run_with_host_link`
+# 已经能做到「编译 + host ld 直驱」且补了 `-lgcc`，所以这里不再需要 gcc。
+#
+# 注意 dcc 只认白名单里的 `-Wp,` 子选项（`-MMD`/`-MF`/`-MT`… 都在里面）；kbuild
+# 恰好只传这几个，多余的会显式报错而不是静默丢参。
 if is_link_step "$@"; then
     rout=()
     replace_dcc_only_flags rout "${args[@]}"
     out=()
     filter_clang_flags out "${rout[@]}"
-    # 链接步骤：dcc 没有自己的链接器（vmlinux 的脚本链接语义只能交 GNU ld 驱动），
-    # 这不是「用 gcc 代编 C 代码」，但依然留痕。
-    delegate_gcc "link-step" "${out[@]}"
+    echo "DCC-LINK reason=cc-link-step src=${src:-<none>}" >&2
+    exec "$DCC_BIN" "${out[@]}"
 fi
 
-# 无源文件 (可能是其他非编译调用): 直接委托 gcc
+# 无源文件 (探针 / 版本询问 / 纯链接)：一律不许再问 gcc，三条各自留痕。
+#
+#   * `-E`/`-dM`/`-x c -` 这类**预处理探针**交 dcc 自己做（同 `dcc-host-wrapper.sh` 那侧的
+#     同一条规则）。内核的 `scripts/cc-version.sh` 就是靠 `__clang__`/`__GNUC__` 宏认人的，
+#     而 dcc 本来就预定义 `__clang__ 1 / __clang_major__ 18` 这一族兼容宏，所以这是**如实**
+#     回答而不是伪装成别人。
+#   * `-Wa,--version`（`scripts/as-version.sh` 要的第一行）：报 binutils `as` 的版本行。
+#     内核只用它做 `CONFIG_AS_*` 的能力闸门；本构建的汇编实际由 dcc 自己完成。
+#   * `-print-file-name=X`（`scripts/gcc-plugins/Kconfig`）：给一个**不存在**的路径，于是
+#     GCC_PLUGINS 自动关掉（dcc 没有 gcc 插件这套东西）。
 if [ -z "$src" ]; then
+    for a in "${args[@]}"; do
+        case "$a" in
+            -E|-dM|-dD|-E*|*-cpp-output)
+                rout=()
+                replace_dcc_only_flags rout "${args[@]}"
+                out=()
+                filter_clang_flags out "${rout[@]}"
+                echo "DCC-PROBE reason=preprocess-only src=${src:-<none>}" >&2
+                exec "$DCC_BIN" "${out[@]}"
+                ;;
+        esac
+    done
+
+    if printf '%s\n' "${args[@]}" | grep -q -- '-Wa,--version'; then
+        echo "DCC-PROBE reason=as-version" >&2
+        as --version 2>/dev/null | head -n 1
+        exit 0
+    fi
+
+    for a in "${args[@]}"; do
+        case "$a" in
+            -print-file-name=*)
+                # 不存在的路径：`test -d` 会失败，相关 config（GCC_PLUGINS）自己关。
+                echo "DCC-PROBE reason=print-file-name arg=$a" >&2
+                echo "/nonexistent-dcc-toolchain/${a#-print-file-name=}"
+                exit 0
+                ;;
+            --version|--version=*)
+                echo "DCC-PROBE reason=cc-version" >&2
+                exec "$DCC_BIN" --version
+                ;;
+        esac
+    done
+
     rout=()
     replace_dcc_only_flags rout "${args[@]}"
     out=()
     filter_clang_flags out "${rout[@]}"
-    delegate_gcc "no-source-file" "${out[@]}"
+    # `/dev/null` 与 `-` 也是合法输入：Kconfig 的 `cc-option` 就是
+    #   $(CC) -Werror $(1) -c -x c /dev/null -o .tmp_$$/tmp.o
+    # 把它当「没有源文件」交给 gcc，探针就在替 dcc 扯谎：探到的能力是 gcc 的，真编译时
+    # dcc 又做不到（实测：`-fsanitize=bounds-strict` 探测因这一条回答「支持」，于是
+    # CONFIG_UBSAN_BOUNDS_STRICT 一直是 y，旗标递到真编译后 dcc 直接错）。
+    for a in "${args[@]}"; do
+        case "$a" in
+            /dev/null|-)
+                echo "DCC-PROBE reason=empty-input src=$a" >&2
+                exec "$DCC_BIN" "${out[@]}"
+                ;;
+        esac
+    done
+    # 走到这里说明是一条我们没归类的「无源文件」调用。以前这里 `exec gcc`，那等于给
+    # 「全程 dcc」开了个后门：gcc 进程一起，产物里的 `.comment` 已经是 GCC，判据就废了。
+    # 现在硬错并把整条 argv 打出来，下一次命中时能直接看出是哪条探针缺了归类。
+    echo "DCC-GAP reason=no-source-file argv=$*" >&2
+    echo "dcc-wrapper: refusing to spawn gcc for a source-less invocation; add an explicit DCC-PROBE branch" >&2
+    exit 1
 fi
 
 # 以下是 dcc 编译路径

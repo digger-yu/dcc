@@ -91,6 +91,25 @@ struct BodyFacts {
     addr_of_counts: HashMap<String, usize>,
     object_writes: HashMap<String, usize>,
     local_decl_counts: HashMap<String, usize>,
+    /// 出现在任一 `asm` 操作数子树里的**全部**具名对象。
+    ///
+    /// 为什么需要单独一张表：`"m"`/`"=m"`/`"+m"` 这类内存约束把对象的**地址**直接交给
+    /// 未知代码，而 AST 上根本没有 `&` —— `addr_of_counts` 看不见它。没有这张表，
+    /// 「从不被取址 ⇒ 值必定」那条捷径就会对 asm 输错 `__builtin_constant_p`。
+    asm_named: BTreeSet<String>,
+}
+
+/// 这个名字是内联器造出来的临时量（`__inl<N>$<形参>`、`__inl<N>$rv`、
+/// `__inlexp<N>$rv`、`__inl<N>_l<局部>_<序号>`，见 `opt::function_inline`）。
+///
+/// 为什么要按名字划这条线：「地址从未逃逸 ⇒ 值必定就是初值」这个推论对源码里的局部
+/// 同样成立，但它的**答案不该被代回器改写**。`int x = 1; if (__builtin_constant_p(x) != 0)`
+/// 在 gcc 里会随 -O 变（-O0 答 0、-O1 以上答 1），而本仓的契约是**档位无关**
+/// （`scripts/check_opt_equivalence.sh` 就是这条契约的判据，语料 `constp.c` 断言 0）。
+/// 内联临时量不在此列：它根本不是源码里的对象，而是「调用点那个实参」的副本，
+/// gcc 对它的答案恒为 1（内核 `BUILD_BUG_ON` 族就靠这一点折掉）。
+fn is_inline_generated(name: &str) -> bool {
+    name.starts_with("__inl")
 }
 
 fn is_ptr(ty: &Type) -> bool {
@@ -202,6 +221,53 @@ fn note(ctx: Ctx, prov: Prov, facts: &mut BodyFacts) {
         // 且指针本身也流出了本函数的可控范围 ⇒ 同时记 mod 与 escape。
         facts.direct_mods.insert(j);
         facts.escape_params.insert(j);
+    }
+}
+
+/// 把一条 asm 操作数子树里出现的**所有**具名对象收进 `asm_named`。
+///
+/// 为什么不是只收根名字：内核的 asm 操作数常常是 `(p + off)`、`*(&v->a)`、
+/// `container_of(...)` 这一类算式，里面每一个名字都可能被内存约束或算式里的取址
+/// 交给未知代码。宁可少判一个常量，也不能多判一个。
+fn collect_asm_ident_names(e: &Expr, facts: &mut BodyFacts) {
+    match e {
+        Expr::Ident { name, .. } => {
+            facts.asm_named.insert(name.name.clone());
+        },
+        Expr::Member { expr, .. }
+        | Expr::Index { arr: expr, .. }
+        | Expr::AddrOf { e: expr, .. }
+        | Expr::Deref { e: expr, .. }
+        | Expr::Cast { e: expr, .. }
+        | Expr::Unary { e: expr, .. }
+        | Expr::Real { e: expr, .. }
+        | Expr::Imag { e: expr, .. }
+        | Expr::SizeofExpr { e: expr, .. }
+        | Expr::AlignofExpr { e: expr, .. }
+        | Expr::PostInc { e: expr, .. }
+        | Expr::PostDec { e: expr, .. }
+        | Expr::PreInc { e: expr, .. }
+        | Expr::PreDec { e: expr, .. } => collect_asm_ident_names(expr, facts),
+        Expr::Binop { l, r, .. }
+        | Expr::Assign { l, r, .. }
+        | Expr::Comma { l, r, .. } => {
+            collect_asm_ident_names(l, facts);
+            collect_asm_ident_names(r, facts);
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            collect_asm_ident_names(cond, facts);
+            collect_asm_ident_names(then_, facts);
+            collect_asm_ident_names(else_, facts);
+        },
+        Expr::Call { callee, args, .. } => {
+            collect_asm_ident_names(callee, facts);
+            for a in args {
+                collect_asm_ident_names(a, facts);
+            }
+        },
+        _ => {},
     }
 }
 
@@ -338,8 +404,13 @@ fn scan_expr(e: &Expr, ctx: Ctx, params: &HashMap<String, usize>, facts: &mut Bo
             // asm 输入/输出都是"指针/值逃逸点": 输出视为 Store (note 会同时记
             // mod+escape), 输入保守记 opaque; 输入里的形参派生指针同样可能
             // 被 asm 存到任何地方 ⇒ 记 escape。
+            // 操作数子树里出现的具名对象全部进 `asm_named`（内存约束不发 `&`）。
             for o in outputs {
+                collect_asm_ident_names(o, facts);
                 scan_expr(o, Ctx::Store, params, facts);
+            }
+            for i in inputs {
+                collect_asm_ident_names(i, facts);
             }
             if !inputs.is_empty() {
                 facts.opaque_store = true;
@@ -464,6 +535,7 @@ fn scan_stmt(s: &Stmt, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
             // asm 可任意写内存 ⇒ 不可归因; 递归输入以捕获嵌套调用/取址。
             facts.opaque_store = true;
             for i in inputs {
+                collect_asm_ident_names(i, facts);
                 scan_expr(i, Ctx::Value, params, facts);
             }
         },
@@ -756,7 +828,6 @@ fn proven_const_locals(
     bf: &BodyFacts,
     summaries: &HashMap<String, ModRefSummary>,
 ) -> HashMap<String, i128> {
-    let mut out: HashMap<String, i128> = HashMap::new();
     let safe = safe_arg_counts(bf, summaries);
     let param_names: BTreeSet<String> = f
         .params
@@ -764,85 +835,244 @@ fn proven_const_locals(
         .filter_map(|p| p.name.as_ref().map(|id| id.name.clone()))
         .collect();
 
-    let collect = |v: &VarDecl, out: &mut HashMap<String, i128>| {
+    // 先把函数里**所有**局部声明收齐（不收指针进去不行：收集器与判据必须同寿命），
+    // 再过结构筛子。结构筛子完全不看初值能不能折——那一条挪到了下面的不动点里，
+    // 为的是接住「初值里读另一个已证常量」的链：`int a = 2; int b = a * 3;`，以及强制
+    // 内联拼接出的 `__inl$_nr = __inl$_bit`（形状表 `.work_tmp/constp_shapes.c` 的 c15：
+    // gcc=1、旧 dcc=0）。同一条链在 `opt.rs::subst_cand_reads_items` 里已有实现（它只
+    // 服务 asm 立即数操作数），这里复用同一个替换器 `subst_proven_locals`，不另升第二套规则。
+    let mut all_decls: Vec<&VarDecl> = Vec::new();
+    if let Some(body) = &f.body {
+        collect_vars_in_block(body, &mut all_decls);
+    }
+    // 排障：`DCC_CONSTP_TRACE=1` 打出每个候选被拒的原因。没有它只能看到「constp 返回 0」
+    // 这一句，而背后有六条筛子 + 一个不动点，逐条猜测会很慢（本轮已付过学费）。
+    let ctrace = constp_trace();
+    let passes = |v: &VarDecl| -> bool {
         let name = &v.name.name;
+        macro_rules! deny {
+            ($why:expr) => {{
+                if ctrace {
+                    eprintln!("CONSTP-REJ| {} {} :: {}", f.name.name, name, $why);
+                }
+                return false;
+            }};
+        }
         // 1. 非 extern、非 volatile.
         if v.is_extern || v.quals.is_volatile() {
-            return;
+            deny!("extern/volatile");
         }
         // 2. 整型标量.
         if !is_int_scalar(&v.ty) {
-            return;
+            deny!("非整型标量");
         }
-        // 3. 本函数内只声明一次、且不是形参名 (排除遮蔽).
-        if bf.local_decl_counts.get(name).copied().unwrap_or(0) != 1 {
-            return;
-        }
+        // 3. 不是形参名 (排除遮蔽)。
+        //
+        // 「本函数内只声明一次」这一条不再写在这里：内联会把同一个 `static` 函数体
+        // 拼接进同一个 caller 两次（`get_thr_limit()` 同时被 `init_a/init_b` 调、两者又
+        // 一起被内联），两份 `({ auto ux = …; })` 带着**同一个**声明名落地，于是这条
+        // 「只声明一次」一律失败、候选全丢。改为在下面的不动点里按名字分组：**同名多份
+        // 声明只要全部证成同一个常量，替换依旧安全**（同值，读哪一份都一样）。
         if param_names.contains(name) {
-            return;
+            deny!("形参同名");
         }
-        // 4. 初值是编译期整常量 (显式匹配 Int, 避免 Float 截断).
-        let Some(init) = &v.init else { return };
-        let cv = match const_eval::eval_full(init, false) {
-            Ok(ConstValue::Int(cv)) => cv,
-            _ => return,
-        };
-        // 5+6. 必须被取址, 且全部取用点都是安全实参.
+        // 4. 必须有初值（能不能折到不动点那一轮里再试）.
+        if v.init.is_none() {
+            deny!("无初值");
+        }
+        // 5+6. 两条都能证明「这个局部的值就是初值」：
+        //   (a) 原口径：被取址，但**全部**取用点都是安全实参（被调者不写它）；
+        //   (b) 「隔离」口径：从来没被取址过（`addr == 0`），且不在任何 asm
+        //       操作数里（内存约束不发 `&`，只能单独记）—— 但**只对inline 造出的
+        //       临时量**成立，见 [`is_inline_generated`] 的理由。
+        // 内核那一族 `BUILD_BUG_ON`/`compiletime_assert` 的「常量化判定」完全押在
+        // `__builtin_constant_p(<内联出来的局部>)` 上（实测 `mm/shmem.o` 的 9 条
+        // `__compiletime_assert_NNN`），(b) 就是为它们加的：形参被内联成一个有字面量
+        // 初值的局部，对 gcc 而言那次替换已经发生，所以答 1。
         let addr = bf.addr_of_counts.get(name).copied().unwrap_or(0);
-        if addr == 0 {
-            return;
+        if bf.asm_named.contains(name) {
+            deny!("出现在 asm 操作数里");
         }
-        if addr != safe.get(name).copied().unwrap_or(0) {
-            return;
+        let isolated = addr == 0 && is_inline_generated(name);
+        let via_safe_args = addr != 0 && addr == safe.get(name).copied().unwrap_or(0);
+        if !(isolated || via_safe_args) {
+            deny!("地址流出去向不明");
         }
         // 7. 从未被直接写.
         if bf.object_writes.get(name).copied().unwrap_or(0) != 0 {
-            return;
+            deny!("被写过");
         }
-        out.insert(name.clone(), cv);
+        true
     };
+    let cands: Vec<&VarDecl> = all_decls.into_iter().filter(|v| passes(v)).collect();
 
-    // 只扫函数体顶层的 Decl::Var (局部); 嵌套块的局部也扫 (递归进 Block).
-    if let Some(body) = &f.body {
-        collect_vars_in_block(body, &collect, &mut out);
+    // 不动点：先把「初值不含任何候选读」的直接算出来，再把含有已证候选的那几条接上。
+    // 每轮至少新增一条才会继续，故必然终止（候选数有限且已入表的不重复推）。
+    //
+    // **按名字分组**：同名多份声明必须全部折到同一个常量才入表（见上面第 3 条的理由）。
+    // 只要有一份折不动或算出来的值不同，这个名字就永远不入表——宁可不折，不能折错。
+    let mut by_name: HashMap<&str, Vec<&VarDecl>> = HashMap::new();
+    for v in &cands {
+        by_name.entry(v.name.name.as_str()).or_default().push(v);
+    }
+    let mut out: HashMap<String, i128> = HashMap::new();
+    loop {
+        let mut grew = false;
+        for (name, decls) in &by_name {
+            if out.contains_key(*name) {
+                continue;
+            }
+            let mut agreed: Option<i128> = None;
+            let mut all_ok = true;
+            for v in decls {
+                let Some(init) = &v.init else {
+                    all_ok = false;
+                    break;
+                };
+                let probe = subst_proven_locals(init, &out);
+                match const_eval::eval_full(&probe, false) {
+                    Ok(ConstValue::Int(cv)) => match agreed {
+                        None => agreed = Some(cv),
+                        Some(prev) if prev == cv => {},
+                        Some(_) => {
+                            all_ok = false;
+                            break;
+                        },
+                    },
+                    _ => {
+                        all_ok = false;
+                        break;
+                    },
+                }
+            }
+            if all_ok {
+                if let Some(cv) = agreed {
+                    out.insert((*name).to_string(), cv);
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    if ctrace {
+        let mut keys: Vec<&String> = out.keys().collect();
+        keys.sort();
+        for k in keys {
+            eprintln!("CONSTP-OK| {} {}={}", f.name.name, k, out[k]);
+        }
     }
     out
 }
 
-fn collect_vars_in_block(
-    b: &Block,
-    collect: &dyn Fn(&VarDecl, &mut HashMap<String, i128>),
-    out: &mut HashMap<String, i128>,
-) {
-    for it in &b.items {
+/// `DCC_CONSTP_TRACE` 只查一次环境变量：`fold_constant_p_expr` 会为每个
+/// `__builtin_constant_p` 调一次，逐次 `var_os` 在全树上是白扔的开销。
+fn constp_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DCC_CONSTP_TRACE").is_some())
+}
+
+/// 收一整个块树里的局部 `Decl::Var`（包含嵌套块；不递归进嵌套函数的体，
+/// 那些名字不属于本函数的作用域）。
+///
+/// **初始化式也要下探**：强制内联落在「声明初值」这一位置时，callee 的体被包成
+/// `int *p = ({ …__inl1$…; … });` —— 形参临时量声明在那个**语句表达式**里，而它
+/// 正是 `__builtin_constant_p(形参)` 唯一的答案来源。旧写法在这里只 `out.push(v)`，
+/// 于是 `.work_tmp/cp3.c` 那一形（内联 + `restart:` 标号的 `__rhashtable_lookup`）
+/// 的临时量连候选表都进不了 ⇒ constp 一律答 0 ⇒ `BUILD_BUG_ON` 变成真引用
+/// （实测 `fs/xattr.o`/`fs/pidfs.o`/`kernel/events/hw_breakpoint.o` 各留 2–4 条
+/// `__compiletime_assert_473/487`）。
+fn collect_vars_in_block<'a>(b: &'a Block, out: &mut Vec<&'a VarDecl>) {
+    collect_vars_in_items(&b.items, out)
+}
+
+fn collect_vars_in_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a VarDecl>) {
+    match s {
+        Stmt::Block { b, .. } => collect_vars_in_block(b, out),
+        Stmt::Expr { e, .. } => collect_vars_in_expr(e, out),
+        Stmt::Return { val: Some(e), .. } => collect_vars_in_expr(e, out),
+        Stmt::Return { val: None, .. } => {},
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            collect_vars_in_expr(cond, out);
+            collect_vars_in_stmt(then_, out);
+            if let Some(e) = else_ {
+                collect_vars_in_stmt(e, out);
+            }
+        },
+        Stmt::While { cond, body, .. } => {
+            collect_vars_in_expr(cond, out);
+            collect_vars_in_stmt(body, out);
+        },
+        Stmt::Do { body, cond, .. } => {
+            collect_vars_in_expr(cond, out);
+            collect_vars_in_stmt(body, out);
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                collect_vars_in_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                collect_vars_in_expr(c, out);
+            }
+            if let Some(st) = step {
+                collect_vars_in_expr(st, out);
+            }
+            collect_vars_in_stmt(body, out);
+        },
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
+            collect_vars_in_expr(expr, out);
+            collect_vars_in_items(prelude, out);
+            for c in cases {
+                collect_vars_in_block(&c.body, out);
+            }
+        },
+        Stmt::Label { stmt, .. } => collect_vars_in_stmt(stmt, out),
+        _ => {},
+    }
+}
+
+fn collect_vars_in_items<'a>(items: &'a [BlockItem], out: &mut Vec<&'a VarDecl>) {
+    for it in items {
         match it {
-            BlockItem::Decl(Decl::Var(v)) => collect(v, out),
-            BlockItem::Stmt(s) => collect_vars_in_stmt(s, collect, out),
+            BlockItem::Decl(Decl::Var(v)) => {
+                out.push(v);
+                if let Some(e) = &v.init {
+                    collect_vars_in_expr(e, out);
+                }
+            },
+            BlockItem::Stmt(s) => collect_vars_in_stmt(s, out),
             _ => {},
         }
     }
 }
 
-fn collect_vars_in_stmt(
-    s: &Stmt,
-    collect: &dyn Fn(&VarDecl, &mut HashMap<String, i128>),
-    out: &mut HashMap<String, i128>,
-) {
-    match s {
-        Stmt::Block { b, .. } => collect_vars_in_block(b, collect, out),
-        Stmt::If { then_, else_, .. } => {
-            collect_vars_in_stmt(then_, collect, out);
-            if let Some(e) = else_ {
-                collect_vars_in_stmt(e, collect, out);
-            }
-        },
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            collect_vars_in_stmt(body, collect, out)
-        },
-        Stmt::For { body, .. } => collect_vars_in_stmt(body, collect, out),
-        Stmt::Label { stmt, .. } => collect_vars_in_stmt(stmt, collect, out),
-        _ => {},
-    }
+/// 语句表达式 `({ ... })` 里的声明也算本函数的局部。
+///
+/// 内核 `min()/max()/clamp()` 的 `__careful_cmp_once` 就是
+/// `({ auto ux = (x); auto uy = (y); __cmp(op, ux, uy); })`。那份 `ux/uy` 收不进候选表，
+/// `statically_true((long long)uy >= 0)` 就永远拿不到 1，`__sign_use` 退化成
+/// 2 ⇒ `__types_ok` 判 0 ⇒ `BUILD_BUG_ON_MSG` 真的发出一条
+/// `__compiletime_assert_NNN` 引用（全树链接期就是一堆未定义引用）。
+///
+/// 实测（`-O2`，夹具 `.work_tmp/constp_stmt_shape.c`）：函数体顶层的两形 gcc/dcc 都是
+/// 1，坐在 `({...})` 里的两形 gcc=1、dcc=0。首例现场是
+/// `arch/x86/kernel/cpu/mce/amd.c` 的 `min(thr_limit /*u32*/, THRESHOLD_MAX /*int 0xFFF*/)`。
+fn collect_vars_in_expr<'a>(e: &'a Expr, out: &mut Vec<&'a VarDecl>) {
+    crate::opt::visit_expr_stmtexprs(e, &mut |items| collect_vars_in_items(items, out));
 }
 
 // ---- __builtin_constant_p 折叠 ----
@@ -917,6 +1147,16 @@ fn fold_constant_p_expr(e: &mut Expr, proven: &HashMap<String, i128>) {
                     } else {
                         0
                     };
+                    if v == 0 && constp_trace() {
+                        let mut keys: Vec<&String> = proven.keys().collect();
+                        keys.sort();
+                        eprintln!(
+                            "CONSTP-ZERO| proven({})={:?} arg={:?}",
+                            keys.len(),
+                            keys,
+                            &args[0]
+                        );
+                    }
                     *e = Expr::Int {
                         v,
                         span: span.clone(),
@@ -970,6 +1210,24 @@ fn fold_constant_p_expr(e: &mut Expr, proven: &HashMap<String, i128>) {
             fold_constant_p_expr(inner, proven)
         },
         Expr::VaArg { ap, .. } => fold_constant_p_expr(ap, proven),
+        // **语句表达式必须下探**：内核 `min()/max()/READ_ONCE/…` 那一族把
+        // `__builtin_constant_p(<局部>)` 坐在 `({...})` 里（实测 `lib/kstrtox.o` 的 11 条
+        // `__compiletime_assert_NNN` 全仍活着，站点条件就是 `__sign_use` 里的
+        // `__builtin_constant_p((long long)__UNIQUE_ID_x__197 …)`）。不下探这一臂，上面的
+        // `proven` 表再准也轮不到它跑。臂表与 `opt.rs::fold_branches_in_expr` 保持同一份
+        // 形状（那两个 walker 一旦覆盖不一致，就会出现「同一个构造一条路径看得到、
+        // 另一条看不到」这种最难查的不对称）。这里不拆子表达式，只折 constp 本身。
+        Expr::StmtExpr { block, .. } => fold_constant_p_block(block, proven),
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for it in inits {
+                match it {
+                    crate::ast::InitItem::Expr(x) => fold_constant_p_expr(x, proven),
+                    crate::ast::InitItem::Designated { value, .. } => {
+                        fold_constant_p_expr(value, proven)
+                    },
+                }
+            }
+        },
         _ => {},
     }
 }
@@ -1011,10 +1269,17 @@ fn fold_constant_p_stmt(s: &mut Stmt, proven: &HashMap<String, i128>) {
             fold_constant_p_stmt(body, proven);
         },
         Stmt::Block { b, .. } => fold_constant_p_block(b, proven),
-        Stmt::Switch { expr, prelude, .. } => {
+        Stmt::Switch {
+            expr, prelude, cases, ..
+        } => {
             fold_constant_p_expr(expr, proven);
             for it in prelude.iter_mut() {
                 fold_constant_p_item(it, proven);
+            }
+            // 只走 prelude 而不下探臂体，等于「switch 里的 constp 没人看」（臂体
+            // 坐的恰好是 `({...})` 展开后的那一堆语句）。
+            for c in cases.iter_mut() {
+                fold_constant_p_block(&mut c.body, proven);
             }
         },
         Stmt::Label { stmt, .. } => fold_constant_p_stmt(stmt, proven),

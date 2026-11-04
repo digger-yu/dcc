@@ -28,6 +28,7 @@ pub mod elf_dyn;
 pub mod elf_exec;
 pub mod fini_dispatch;
 pub mod gnu_hash;
+pub mod host_ld;
 pub mod ifunc;
 pub mod layout;
 pub mod legacy;

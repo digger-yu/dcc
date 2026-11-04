@@ -42,7 +42,9 @@ impl Codegen {
                 }
                 self.emit_insn(&Insn::raw(&[
                     Self::rex(w, *d, index.unwrap_or(0), *base),
-                    0x03 + op * 8,
+                    // 8 位是 `op r8, r/m8`：add=0x02、cmp=0x3A…；
+                    // 32/64 位才是 0x03+op*8。发 0x03 会把读到的字节当成 dword。
+                    (if bits == 8 { 0x02 } else { 0x03 }) + op * 8,
                 ]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
@@ -64,7 +66,8 @@ impl Codegen {
                 }
                 self.emit_insn(&Insn::raw(&[
                     Self::rex(w, *s, index.unwrap_or(0), *base),
-                    0x01 + op * 8,
+                    // 8 位是 `op r/m8, r8`：add=0x00、cmp=0x38…
+                    (if bits == 8 { 0x00 } else { 0x01 }) + op * 8,
                 ]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
@@ -162,7 +165,11 @@ impl Codegen {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
                 self.emit_insn(&Insn::raw(&[Self::rex(w, *d, index.unwrap_or(0), *base)]));
-                self.emit_insn(&Insn::raw(&[0x03 + op * 8]));
+                self.emit_insn(&Insn::raw(&[if bits == 8 {
+                    0x02 + op * 8
+                } else {
+                    0x03 + op * 8
+                }]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -178,7 +185,11 @@ impl Codegen {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
                 self.emit_insn(&Insn::raw(&[Self::rex(w, *s, index.unwrap_or(0), *base)]));
-                self.emit_insn(&Insn::raw(&[0x01 + op * 8]));
+                self.emit_insn(&Insn::raw(&[if bits == 8 {
+                    0x00 + op * 8
+                } else {
+                    0x01 + op * 8
+                }]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             (
@@ -194,7 +205,9 @@ impl Codegen {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
                 self.emit_insn(&Insn::raw(&[Self::rex(w, 0, index.unwrap_or(0), *base)]));
-                if *v >= -128 && *v <= 127 && op == 7 {
+                // `cmp mem, imm8` 的 0x83 /7 只适用于 16/32/64 位（imm8 符号扩展）；
+                // 8 位必须走下面的 `0x80 /digit ib`，否则会把 dword 当比较宽度。
+                if bits != 8 && *v >= -128 && *v <= 127 && op == 7 {
                     self.emit_insn(&Insn::raw(&[0x83]));
                     self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
                     self.emit_insn(&Insn::raw(&[*v as u8]));
@@ -1003,6 +1016,27 @@ impl Codegen {
                 self.emit_insn(&Insn::raw(&[Self::rex(w, 0, index.unwrap_or(0), *base), 0xD3]));
                 self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
             },
+            (
+                AsmOperand::Imm(count),
+                AsmOperand::SymDisp(sym, _),
+            ) if (0..=255).contains(count) => {
+                // `sarq $5, sym(%rip)`：移位指令对内存目标只有 `C1 /id ib` 这一族（imm8），
+                // 编码与上面 `(Imm, SymDisp)` 那条 ALU 形状同一家。以前这里没有分支，
+                // 直接 `asm_reject("unsupported shift operand pattern")`（E0311）——
+                // 但长期以来没人看见：数据 pushsection 里的指令整体被丢弃（见
+                // `elf/output.rs::encode_insn_into_data_pushsection`），而
+                // `arch/x86/kernel/callthunks.c:70` 的 `INCREMENT_CALL_DEPTH` 正是
+                // `sarq $5, PER_CPU_VAR(__x86_call_depth)` 这一形。不丢弃之后必须把它能编出来，
+                // 否则就从「静默缺代码」变成「静默错代码」（更坏）。
+                if bits == 16 {
+                    self.emit_insn(&Insn::raw(&[0x66]));
+                }
+                self.emit_insn(&Insn::raw(&[Self::rex(w, 0, 0, 0), 0xC1]));
+                self.emit_asm_modrm_mem_only(op, 0, ASM_BASE_RIP, None, 1);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+                self.emit_insn(&Insn::raw(&[*count as u8]));
+            },
             _ => {
                 self.asm_reject("unsupported shift operand pattern");
             },
@@ -1113,7 +1147,10 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x85]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, *d, index.unwrap_or(0), *base),
+                    if bits == 8 { 0x84 } else { 0x85 },
+                ]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             return;
@@ -1132,7 +1169,10 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x85]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, *s, index.unwrap_or(0), *base),
+                    if bits == 8 { 0x84 } else { 0x85 },
+                ]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             return;
@@ -1142,8 +1182,11 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_rex_if_used(w, *s, 0, *d, false);
-                self.emit_insn(&Insn::raw(&[0x85, Self::modrm_reg_reg(*s, *d)]));
+                self.emit_rex_if_used(w, *s, 0, *d, bits == 8);
+                self.emit_insn(&Insn::raw(&[
+                    if bits == 8 { 0x84 } else { 0x85 },
+                    Self::modrm_reg_reg(*s, *d),
+                ]));
             },
             (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
                 if bits == 16 {
@@ -1213,7 +1256,10 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x85]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, *s, index.unwrap_or(0), *base),
+                    if bits == 8 { 0x84 } else { 0x85 },
+                ]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             (
@@ -1228,7 +1274,10 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x85]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, *d, index.unwrap_or(0), *base),
+                    if bits == 8 { 0x84 } else { 0x85 },
+                ]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -1243,7 +1292,15 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw(&[Self::rex(w, 0, index.unwrap_or(0), *base), 0xF7]));
+                // 8 位 (testb) 必须发 F6 /0 ib：F7 是 TEST r/m32, imm32，
+                // 按 32 位读立即数会把后面 3 字节指令当 imm 吞掉，整段错位。
+                // 内核 `constant_test_bit_acquire` 的 `asm("testb %2,%1" : "=@ccnz" :
+                // "m" (byte), "i" (mask))` 就落在这个臂，错位后 objtool 报
+                // `unannotated intra-function call`。
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, 0, index.unwrap_or(0), *base),
+                    if bits == 8 { 0xF6 } else { 0xF7 },
+                ]));
                 self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
                 if bits == 8 {
                     self.emit_insn(&Insn::raw(&[*v as u8]));

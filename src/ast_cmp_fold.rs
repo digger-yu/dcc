@@ -43,6 +43,7 @@ pub fn run(module: &mut Module, strict_overflow: bool) {
 /// 有符号整数类型的规范键；非有符号整数返回 None。
 fn sint_key(ty: &Type) -> Option<&'static str> {
     match ty {
+        Type::Char => Some("char"),
         Type::SChar => Some("schar"),
         Type::Short => Some("short"),
         Type::Int => Some("int"),

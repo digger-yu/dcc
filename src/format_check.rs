@@ -180,7 +180,9 @@ fn check_format_call(f: &FuncDecl, args: &[Expr], span: &Span, out: &mut Vec<Dia
     // 计算需要的参数数 (包括 * width/precision 消耗的额外参数)
     let mut needed = 0usize;
     for spec in &specs {
-        needed += 1; // 转换说明符本身需要一个参数
+        if spec.needs_arg {
+            needed += 1; // 转换说明符本身需要一个参数（`%m` 这类不吃实参的不算）
+        }
         if spec.width_star {
             needed += 1;
         }
@@ -214,6 +216,10 @@ fn check_format_call(f: &FuncDecl, args: &[Expr], span: &Span, out: &mut Vec<Dia
             // * precision 需要一个 int 参数
             arg_pos += 1;
         }
+        if !spec.needs_arg {
+            // 不吃实参的指令（`%m`）既不动 `arg_pos`，也不参与类型比对。
+            continue;
+        }
         if arg_pos < arg_tys.len() {
             check_format_type(spec, arg_tys[arg_pos].as_ref(), is_scanf, span, &f.name.name, out);
         }
@@ -228,6 +234,10 @@ struct FmtSpec {
     prec_star: bool,
     length: String,
     conv: char,
+    /// 这个说明符**要不要吃一个实参**。glibc 的 `%m`（printf 侧打 `strerror(errno)`）
+    /// 不吃实参，把它当普通转换算会凭空多出一个「参数不够」的假阳（实测
+    /// `scripts/mod/modpost.c` 的 `fatal("…%s: %m", filename)`，gcc 同旗标不报）。
+    needs_arg: bool,
 }
 
 /// 解析格式字符串中的所有转换说明符
@@ -306,7 +316,23 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
         }
         // 解析 conversion specifier
         if i < bytes.len() {
-            let conv = bytes[i] as char;
+            let mut conv = bytes[i] as char;
+            // `%m` 有两种身份，靠它后面紧跟的字符分家：
+            //   * printf 侧（glibc）= 打 `strerror(errno)`，**不吃实参**；
+            //   * scanf 侧 = 「库自己分配」的修饰符（`%ms`/`%as` 那一族），真正要吃
+            //     实参的是它后面那个转换。
+            let mut needs_arg = true;
+            if conv == 'm' {
+                if i + 1 < bytes.len()
+                    && "diouxXeEfFgGaAcCsSpn[".contains(bytes[i + 1] as char)
+                {
+                    length.push('m');
+                    i += 1;
+                    conv = bytes[i] as char;
+                } else {
+                    needs_arg = false;
+                }
+            }
             // C23 %b/%B: 无符号二进制格式 (同 %u 参数类型)
             if "diouxXbBfFeEgGaAcCsSpnm".contains(conv) {
                 specs.push(FmtSpec {
@@ -315,6 +341,7 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
                     prec_star,
                     length,
                     conv,
+                    needs_arg,
                 });
             }
             i += 1;
@@ -340,6 +367,11 @@ fn check_format_type(
     let effective_ty = if is_scanf {
         match ty {
             Type::Ptr(inner) => &inner.base,
+            // 数组名在参数位置退化为指向首元素的指针（C11 6.3.2.1p3），那正是
+            // `char tok[21]` 配 `%20s` 的合法写法（实测 `kernel/sched/core.c:10428` 的
+            // `sscanf(buf, "%20s %llu", tok, period_us_p)`，gcc 不报）。只认 `Ptr`
+            // 会把这种写法判成「非指针类型」。
+            Type::Array(inner, _) => &inner.base,
             _ => {
                 out.push(Diagnostic::warn(
                     "W0003",
@@ -356,9 +388,16 @@ fn check_format_type(
         ty
     };
     let mismatch = match spec.conv {
+        // `%d`/`%i` 接受**任意同秩整型**，不看符号位：gcc 的 `-Wformat` 只查宽度/秩，
+        // 符号性不匹配属于 `-Wformat-signedness`（默认关）。这里原先的可接受表里
+        // 有 `UShort`/`UChar`/`ULong`/`ULongLong` 却**漏了 `UInt`**，于是内核满地的
+        // `u32 & MASK` 喂给 `%d` 全被判不兼容（实测 localmodconfig 全树 2 048 条，
+        // 主体是 `drivers/usb/host/xhci.h` 与 `net/mac80211/trace.h` 里的位域提取）。
+        // 宽度判据不动：`%d` 配 `long` 仍然报（与 gcc 一致）。
         'd' | 'i' => !matches!(
             effective_ty,
             Type::Int
+                | Type::UInt
                 | Type::Short
                 | Type::UShort
                 | Type::Char
@@ -409,10 +448,20 @@ fn check_format_type(
                 | Type::Enum(_, _, _)
         ),
         // %s accepts any pointer (char*) or array (decays to pointer)
+        // 但 scanf 那一侧上面已经剥过一层（`Ptr`/`Array` → 元素类型），这里要比的是
+        // **元素是不是字符**：gcc 对 `sscanf(buf, "%s", &int_var)` 报「expects argument of
+        // type ‘char *’」，而对 `char tok[21]` 不报。所以 scanf 走字符判据，
+        // printf 仍走「指针/数组」那条（那边传的就是 `char*`，没有剥层这回事）。
+        's' if is_scanf => !matches!(effective_ty, Type::Char | Type::SChar | Type::UChar),
         's' => !matches!(effective_ty, Type::Ptr(_) | Type::Array(_, _)),
         // %p accepts any pointer, array (decays to ptr), or function (decays to fn ptr).
         // 内核 %p 扩展 (%pS/%pF/%pU 等) 也接受函数指针和各类指针.
         'p' => !matches!(effective_ty, Type::Ptr(_) | Type::Array(_, _) | Type::Func(_, _)),
+        // `%n` 存的是「写到哪」：printf 一侧传的是 `int*`，判据不变；scanf 一侧上面已剥
+        // 一层，要比元素是不是 `int`（gcc 实测：`sscanf(s, "%n", &int)` 不报，
+        // 配 `long *`/`char *` 都报）。不区分就会把 `kernel/cgroup/cgroup.c:7330`
+        // 那种 `sscanf(buf, "%d%n", val, &off)` 误报成不兼容（gcc 不报）。
+        'n' if is_scanf => !matches!(effective_ty, Type::Int),
         'n' => !matches!(effective_ty, Type::Ptr(_)),
         _ => false,
     };
@@ -535,6 +584,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'd',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -551,6 +601,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'f',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -568,6 +619,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'd',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -585,6 +637,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'd',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -608,6 +661,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 's',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -631,6 +685,7 @@ mod tests {
             prec_star: false,
             length: "L".to_string(),
             conv: 'f',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -887,6 +942,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'b',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -903,6 +959,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'B',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -919,6 +976,7 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'b',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
@@ -936,10 +994,120 @@ mod tests {
             prec_star: false,
             length: String::new(),
             conv: 'B',
+            needs_arg: true,
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
         check_format_type(&spec, Some(&Type::Int), false, &span, "log", &mut out);
         assert!(out.is_empty(), "int should match %B: {out:?}");
+    }
+
+    // `%d` 对 `unsigned int` 必须放行（gcc 的 -Wformat 不看符号位，那是
+    // -Wformat-signedness 的事）。反向对照同一条里带上：浮点实参仍必须报，
+    // 否则「把整条检查关掉」这种改法能过前者、过不了后者。
+    // 已知遗留（本条不改）：宽度/秩的差异现在一律放行（`%d` 配 `long long` 也报不出来，
+    // 而 gcc 会报），那是这表格另一侧的松动，要收得连 `spec.length` 一起判，另行处理。
+    #[test]
+    fn check_type_percent_d_ignores_signedness_but_not_float() {
+        let mk = |conv: char, length: &'static str| FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: length.to_string(),
+            conv,
+            needs_arg: true,
+        };
+        let span = Span::point("t.c", 1, 1);
+        for ty in [
+            Type::UInt,
+            Type::Int,
+            Type::UChar,
+            Type::ULong,
+            Type::Enum("e".to_string(), Default::default(), None),
+        ] {
+            let mut out = Vec::new();
+            check_format_type(&mk('d', ""), Some(&ty), false, &span, "log", &mut out);
+            assert!(out.is_empty(), "{ty:?} 该被 %d 接受: {out:?}");
+        }
+        let mut out = Vec::new();
+        check_format_type(&mk('d', ""), Some(&Type::Double), false, &span, "log", &mut out);
+        assert_eq!(out.len(), 1, "%d 配 double 必须报: {out:?}");
+        // 诊断里的转换符写法要带上长度前缀：否则报出的 `'%d'` 与源码里的 `%Ld`
+        // 对不上，读日志的人会去查错的转换符。
+        let mut out = Vec::new();
+        check_format_type(&mk('d', "L"), Some(&Type::Double), false, &span, "log", &mut out);
+        assert_eq!(out.len(), 1, "%Ld 配 double 必须报: {out:?}");
+        assert!(
+            out[0].msg.contains("'%Ld'"),
+            "诊断里的转换符写法丢了长度前缀: {}",
+            out[0].msg
+        );
+    }
+
+    /// glibc 的 `%m`（printf 侧打 `strerror(errno)`）**不吃实参**；scanf 侧的 `%ms` 里
+    /// `m` 只是「让库自己分配」的修饰符，吃实参的是后面那个转换。判据取 gcc 实测
+    /// （`/tmp/gp/mfmt.c`，同一份源码同一组旗标）：
+    /// `logit(0, "can\'t open %s: %m", filename)` gcc 不报「参数不够」，
+    /// 而 `logit(0, "count %d")` gcc 报 `expects a matching ‘int’ argument`。
+    /// 现场：`scripts/mod/modpost.c` 的 `fatal()` 那族包装全用 `%m`，旧实现按转换计数，
+    /// 于是每条都刷出一句凭空的 W0003。
+    #[test]
+    fn percent_m_directive_consumes_no_argument() {
+        let specs = parse_format_specs("can\'t open %s: %m\n");
+        assert_eq!(specs.len(), 2, "`%s` 与 `%m` 都要成谱");
+        assert_eq!(specs[0].conv, 's');
+        assert!(specs[0].needs_arg, "`%s` 当然吃一个实参");
+        assert_eq!(specs[1].conv, 'm');
+        assert!(!specs[1].needs_arg, "`%m` 不该算一个实参");
+
+        // scanf 侧的分配修饰符：`%ms` 仍然要那个 `char **`
+        let specs = parse_format_specs("%ms");
+        assert_eq!(specs.len(), 1, "`%ms` 应解析成一个吃实参的 %s");
+        assert_eq!(specs[0].conv, 's');
+        assert!(specs[0].needs_arg);
+        assert_eq!(specs[0].length, "m", "分配修饰符要留在谱里，诊断写法才对得上源码");
+
+        // 反向对照：普通转换照旧吃实参，少给了就必须报
+        let specs = parse_format_specs("count %d");
+        assert_eq!(specs.len(), 1);
+        assert!(specs[0].needs_arg, "把 `%d` 也算成不吃实参 = 整条参数计数检查被钝掉");
+    }
+
+    /// scanf 的 `%s` 要比**目的缓冲区的元素类型**（前面已剥一层），不能要求它本身
+    /// 还是指针/数组：实测现场是 `kernel/sched/core.c:10428` 的
+    /// `sscanf(buf, "%20s %llu", tok, period_us_p)`（`char tok[21]`，gcc 不报）。
+    /// 反向对照：`int *` 喂给 scanf 的 `%s` 必须仍报（gcc 也报），printf 一侧的
+    /// 既有判据（传 `char*`/数组）也不能被带歪。
+    #[test]
+    fn check_type_scanf_percent_s_compares_element_type() {
+        let spec_s = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 's',
+            needs_arg: true,
+        };
+        let span = Span::point("t.c", 1, 1);
+        let char_ptr = Type::Ptr(Box::new(crate::ast::QualType::new(Type::Char)));
+        let int_ptr = Type::Ptr(Box::new(crate::ast::QualType::new(Type::Int)));
+        let char_arr = Type::Array(
+            Box::new(crate::ast::QualType::new(Type::Char)),
+            crate::ast::ArraySize::Const(21),
+        );
+
+        for (ty, is_scanf) in [(char_ptr.clone(), true), (char_arr.clone(), true), (char_ptr, false)]
+        {
+            let mut out = Vec::new();
+            check_format_type(&spec_s, Some(&ty), is_scanf, &span, "sscanf", &mut out);
+            assert!(out.is_empty(), "合法写法被误报 (is_scanf={is_scanf}): {out:?}");
+        }
+
+        let mut out = Vec::new();
+        check_format_type(&spec_s, Some(&int_ptr), true, &span, "sscanf", &mut out);
+        assert_eq!(out.len(), 1, "scanf %s 配 int * 必须报: {out:?}");
+        let mut out = Vec::new();
+        check_format_type(&spec_s, Some(&Type::Int), false, &span, "printf", &mut out);
+        assert_eq!(out.len(), 1, "printf %s 配 int 必须报: {out:?}");
     }
 }

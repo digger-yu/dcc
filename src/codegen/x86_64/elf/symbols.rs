@@ -58,6 +58,10 @@ impl Codegen {
                 if f.body.is_none() {
                     // 外部函数声明: 注册为 undefined 符号 (SHN_UNDEF).
                     // 使 resolve() 能识别已知外部符号并发出诊断而非 panic.
+                    //
+                    // 符号类型必须是 `STT_NOTYPE`，与 ET_REL 那份（`rel_symbols.rs` 的同一条规则）
+                    // 口径一致：GAS 对未定义引用从不标函数类型。两处以前一份发 FUNC、
+                    // 一份发 NOTYPE，同一个事实两个出处 —— 改一边就得改另一边。
                     if !self.sym_index.contains_key(&resolved_name) {
                         self.symbols.push(ElfSym {
                             name: resolved_name,
@@ -65,7 +69,7 @@ impl Codegen {
                             value: 0,
                             size: 0,
                             bind: STB_GLOBAL,
-                            ty: STT_FUNC,
+                            ty: STT_NOTYPE,
                             visibility: STV_DEFAULT,
                         });
                     }
@@ -85,6 +89,8 @@ impl Codegen {
                         value: off,
                         size: sz,
                         bind: if f.is_static {
+                            // `static inline` 是内部链接（与 ET_REL 那份同口径）：先判 `static`，
+                            // 再把 GNU89 的裸 `inline` / `__attribute__((weak))` 归 WEAK。
                             STB_LOCAL
                         } else if f.is_weak || f.is_inline {
                             // GNU89 inline 语义: 非 static inline 函数发射为 weak 符号,

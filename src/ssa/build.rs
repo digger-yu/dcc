@@ -1663,6 +1663,31 @@ impl Builder {
                 span,
                 ty,
             } => {
+                // 「只能接立即数」的 asm 操作数在 GCC 里不是值，而是**链接期常量契约**：
+                // 它的表达式必须原样活着给后端折。SSA 会把它值化成一个临时量（`&g` →
+                // `_taddr_1`），后端只看得到那个名字，`"i"` 再也折不出符号地址（实测
+                // `arch/x86/boot/startup/gdt_idt.c` 报 `impossible constraint ... (expression:
+                // _taddr_1)`）。而 SSA 里没有「保存表达式」的槽，所以这种函数整退 AST
+                // 通道（那里操作数还是 `&g` 这样的表达式，常量求值器能直接吃）。
+                // 纯整型字面量不必逃：值化后仍然是同一个 Immediate（如内核无处不在的
+                // `ALTERNATIVE("", insn, X) ` 里的 `"i"(预算常量)`）。
+                for (idx, e) in inputs.iter().enumerate() {
+                    let imm_only = input_constraints.get(idx).is_some_and(|c| {
+                        crate::codegen::shared::asm_constraints::constraint_is_immediate_only(c)
+                    });
+                    if !imm_only {
+                        continue;
+                    }
+                    if !matches!(
+                        crate::const_eval::eval_full(e, false),
+                        Ok(crate::const_eval::ConstValue::Int(_))
+                    ) {
+                        self.unsupported(
+                            "asm 的「只能接立即数」操作数不是整型常量（SSA 值化会丢掉表达式形态）",
+                        );
+                        return Operand::Int(0);
+                    }
+                }
                 let mut input_ops: Vec<Operand> =
                     inputs.iter().map(|e| self.lower_expr(e)).collect();
                 let mut output_vars = Vec::new();

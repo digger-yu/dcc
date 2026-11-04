@@ -3,14 +3,21 @@
 # 所有清理项均为可自动再生的数据，删除后无任何不良影响。
 #
 # 用法:
-#   bash scripts/cleanup_disk.sh          # 交互式（默认清理 1-5）
+#   bash scripts/cleanup_disk.sh          # 交互式（默认清理 1-6）
 #   bash scripts/cleanup_disk.sh --all    # 全量清理（含 Rust target/）
 #   bash scripts/cleanup_disk.sh --dry    # 仅显示占用，不删除
+#   bash scripts/cleanup_disk.sh --only 1 # 只清指定项（逗号分隔，如 --only 1,2）
+#                                         # 全树构建中途腾磁盘请用这一条：默认模式会连
+#                                         # 项 6（.work_tmp/，文档里引用的复现夹具）一起清
 #
 # 重要提示:
-#   在更新 dcc 源码（特别是 parser.rs、preproc.rs、ast.rs）后，
-#   必须运行此脚本清理缓存（至少清理项 1），否则旧缓存可能导致
-#   编译结果不一致。因为缓存键不包含 dcc 编译器本身的哈希。
+#   「改完前端必须手工清缓存」已经是**机制而不是纪律**：`incremental::hash_compiler_binary`
+#   （单份实现）把当前编译器二进制的**内容**同时混进 compile 缓存与预处理缓存的指纹，
+#   预处理缓存版本号也在 `preproc.rs::hash_macro_state` 里（当前 V14）。所以改完 dcc
+#   不需要跑本脚本项 1 来保正确性。
+#   取内容而不是 size+mtime 是有原因的：按 §5.0e 把 target/release/dcc 装成全树只读快照时
+#   字节相同、mtime 不同，旧写法会把整批预处理缓存作废（实测一个内核 TU 冷读 46 s、
+#   命中 0.8 s）。本脚本项 1 现在的定位是**腾磁盘**（缓存可达 40+ GB），不是保正确性。
 #
 # 清理项:
 #   1. ~/.dcc/cache/          — dcc 预处理缓存（可达 40+ GB）
@@ -186,6 +193,14 @@ echo ""
 
 # ── 模式判断 ──────────────────────────────────────────
 MODE="${1:-interactive}"
+# `--only 1,3` 只跑指定项。全树构建中途要腾磁盘时只能用这一条（或 `--dry`）：默认模式
+# 连项 6（`.work_tmp/`）一起清，而那里现在放着从文档里引用过的复现夹具与量测装置
+# （`repro/jl*.c`、`kw*.sh`），清掉等于把文档里的证据链剪断。
+ITEMS="1,2,3,4,5,6"
+if [[ "$MODE" == "--only" ]]; then
+    MODE="select"
+    ITEMS="${2:?--only 需要逗号分隔的项号，例如 --only 1}"
+fi
 
 if [[ "$MODE" == "--dry" ]]; then
     echo -e "${GREEN}--dry 模式：仅显示占用，不执行删除。${NC}"
@@ -306,17 +321,29 @@ clean_target() {
     fi
 }
 
+# 项号→函数的表与驱动器只写一份（定义在三个分支**之前**）：加一项只需往表里加一行，
+# 不会漏改分支——同一规则两份实现正是本仓一路在拆的东西。
+ITEM_FUNCS=([1]=clean_dcc_cache [2]=clean_tmp_dcc [3]=clean_tmp_misc [4]=clean_profile
+            [5]=clean_pch [6]=clean_work_tmp [7]=clean_target)
+run_items() {
+    local want=$1 i fn
+    IFS=',' read -ra sel <<<"$want"
+    for i in "${sel[@]}"; do
+        fn="${ITEM_FUNCS[$i]:-}"
+        if [ -z "$fn" ]; then echo "  未知项号：$i" >&2; continue; fi
+        "$fn"
+    done
+}
+
 # ── 执行 ──────────────────────────────────────────────
 if [[ "$MODE" == "--all" ]]; then
     echo -e "${RED}${BOLD}═══ 全量清理（含 Rust target/）═══${NC}"
     echo ""
-    clean_dcc_cache
-    clean_tmp_dcc
-    clean_tmp_misc
-    clean_profile
-    clean_pch
-    clean_work_tmp
-    clean_target
+    run_items "1,2,3,4,5,6,7"
+elif [[ "$MODE" == "select" ]]; then
+    echo -e "${CYAN}${BOLD}═══ 指定项清理：$ITEMS ═══${NC}"
+    echo ""
+    run_items "$ITEMS"
 else
     # 交互式：默认清理 1-6（不含 target/）
     echo -e "${GREEN}${BOLD}═══ 安全清理（不含 Rust target/）═══${NC}"

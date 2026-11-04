@@ -458,7 +458,9 @@ impl Codegen {
                 if matches!(op, BinOp::Shl | BinOp::Shr)
                     && matches!(
                         elem_ty,
-                        Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong
+                        // plain `char` 元素：值表示有符号（与 `signed char` 同），符号性判据
+                        // 必须把它算进来，否则 `vector char` 的 `>>` 会走逻辑移位那条臂。
+                        Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong
                     )
                 {
                     let from = match elem_size {
@@ -580,7 +582,8 @@ impl Codegen {
                     ));
                     let signed = matches!(
                         elem_ty,
-                        Type::SChar
+                        Type::Char
+                            | Type::SChar
                             | Type::Short
                             | Type::Int
                             | Type::Long
@@ -833,7 +836,7 @@ impl Codegen {
                     ));
                     let signed = matches!(
                         elem_ty,
-                        Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong
+                        Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong
                     );
                     match op {
                         BinOp::Shl => {
@@ -854,7 +857,8 @@ impl Codegen {
                     // 0 (假), 元素类型同操作数 (真值 -1 按元素宽度截断)
                     let signed = matches!(
                         elem_ty,
-                        Type::SChar
+                        Type::Char
+                            | Type::SChar
                             | Type::Short
                             | Type::Int
                             | Type::Long

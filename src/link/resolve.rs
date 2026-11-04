@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::object::InputBundle;
-use super::LinkConfig;
+use super::{LinkConfig, OutputKind};
 use crate::codegen::shared::elf::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
 
 /// COMDAT 组去重。
@@ -290,7 +290,19 @@ pub fn resolve_with_config(
             // 1. 允许列表中的未定义符号 → 保留为 undefined
             // 2. 弱未定义引用 → 解析为 0 (NULL)，不报错
             // 3. 强未定义引用且不在允许列表 → 报错
-            if extra_undef_allowed.iter().any(|n| *n == name) || is_implicit_undef(name) {
+            // 2026-10-30 发现：**隐式未定义允许列表只对动态输出有效**。`is_implicit_undef`
+            // 里那些名字的存在理由写在其定义处——「运行时由 libc 提供」（PIE / Shared 确实有
+            // PT_INTERP + DT_NEEDED）；静态 ET_EXEC 什么都没有，把 `printf` 绑到地址 0 必然
+            // 产出坏二进制（实测：一个 target_clones + printf 的夹具用 `-fbuiltin-linker`
+            // 「链成功」，跑起来是 SIGSEGV(rc=139)，而同一夹具 gcc 链的版本输出 21）。
+            // 以前这个硬错是**幽灵 UND 条目替它报的**（不在名单里的 libc 名字如
+            // `getc_unlocked`/`asprintf` 会先撞进来报错），所以下面这条判据长期被遮蔽；
+            // 去掉幽灵条目时它就直接变成静默坏产物。修的是这里，而不是把幽灵留着。
+            let implicit_undef_ok =
+                matches!(cfg.output_kind, OutputKind::PIE | OutputKind::Shared);
+            if extra_undef_allowed.iter().any(|n| *n == name)
+                || (implicit_undef_ok && is_implicit_undef(name))
+            {
                 let r = ResolvedSymbol {
                     name: name.clone(),
                     value: 0,

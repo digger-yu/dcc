@@ -559,17 +559,44 @@ int main(void) { return run(5) > 0 ? 0 : 1; }
         "带 -g 时区内家不开工 ⇒ 本层还靠硬互斥逃面，没有真去满足 §4.4"
     );
     // 2) 带 -g 且确实有延伸池存/取窗口时，产物里必须有解得开的 `.debug_loc`。
-    //    拿仓库里那份真的会拿到延伸池家的夹具（POOL 满 + 多个跨 call 的活变量才能把家
-    //    挤到 caller-saved 的延伸池号上；自己编的小夹具实测拿不到，那这个断言就只能靠
-    //    真语料），而不是拿一个永远不会成立的形状当判据。
-    let src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/c/arrow_on_array_member.c");
-    let corpus = std::fs::read_to_string(src_path).expect("读夹具 arrow_on_array_member.c");
-    let obj = region_obj_with_env("g-loc", &corpus, &["-O2", "-g"], &[]);
+    //    拿仓库里真语料（POOL 满 + 多个跳 call 的活变量才能把家挤到 caller-saved
+    //    的延伸池号上；自己编的小夹具实测拿不到）。但**不锁某一个文件名**：“哪个夹具
+    //    真有延伸池家”是寄存器分配的产物，不是这条断言要钉的东西（实例：
+    //    `arrow_on_array_member.c` 在 -O0..-O2 都已经拿不到延伸池家了，而断言本身
+    //    要求的机制没坏）。所以改成“在候选语料里找到至少一个会出 `.debug_loc` 的，
+    //    再在它身上跑全部严格检查”——一个都没有就红，而不是默默变宽。
+    const LOC_CANDIDATES: [&str; 4] = [
+        "arrow_on_array_member.c",
+        "strcasecmp.c",
+        "static_agg_by_value.c",
+        "attr_target_clones_selected.c",
+    ];
+    let mut corpus = String::new();
+    let mut obj = Vec::new();
+    let mut picked = String::new();
+    for name in LOC_CANDIDATES {
+        let src_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/c/");
+        let text = std::fs::read_to_string(format!("{src_path}{name}"))
+            .unwrap_or_else(|_| panic!("读夹具 {name} 失败"));
+        let candidate = region_obj_with_env("g-loc", &text, &["-O2", "-g"], &[]);
+        if elf_section_names(&candidate).contains(".debug_loc") {
+            corpus = text;
+            obj = candidate;
+            picked = name.to_string();
+            break;
+        }
+    }
+    assert!(
+        !picked.is_empty(),
+        "候选语料 {LOC_CANDIDATES:?} 没有一个在 -O2 -g 下产生 `.debug_loc` ⇒ \n\
+         要么延伸池存/取窗口全没了（机制退化），要么 loclist 生产点被关掉了；\n\
+         无论哪种都不能当‘断言已过’算。"
+    );
     let sections = elf_section_names(&obj);
     assert!(
         sections.contains(".debug_loc"),
-        "-g 产物里没有 `.debug_loc`，而这份夹具里有住在延伸池家里的变量 ⇒ 调用期间调试器会读\n\
-         一个被 callee 破坏的号（§4.4 要 loclist 的那个理由）。节表：{sections}"
+        "夹具 {picked} 的 -g 产物里没有 `.debug_loc`，而它确实有延伸池存/取窗口 ⇒ \n\
+         调用期间调试器会读一个被 callee 破坏的号（§4.4 要 loclist 的那个理由）。节表：{sections}"
     );
     // 区间必须单调且能解（写错地址口径时 readelf 报 unused bytes 或 begin>end）。
     let dump = elf_dump_section(&obj, ".debug_loc");

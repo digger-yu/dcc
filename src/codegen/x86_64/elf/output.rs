@@ -676,6 +676,31 @@ impl Codegen {
         // are emitted during ELF finalization.
         self.mcount_loc_entries.push(call_pc);
     }
+    /// 把一条指令编进**非可执行** pushsection。
+    ///
+    /// 完全复用可执行 pushsection 那套机制，而不另写一套坐标算式：
+    /// `open_exec_pushsection` → 照常 `emit_asm_line`（写进 `self.code`，.text 坐标）
+    /// → `close_exec_pushsection` 把这段整块按节对齐追到目标节尾部、在 `.text` 里留下洞
+    /// 并登记 `pushsection_code_ranges`。于是重定位搬迁、标号坐标、对齐都与
+    /// `.altinstr_replacement` 走同一条路（`close` 对 size==0 的区间本来就会早退，
+    /// 所以「这一行其实没产生字节」也不会留出一个空洞）。
+    ///
+    /// 逐条 open/close 是故意的：中间出现的标号行走上面的数据分支，它按
+    /// `data.len()` 登记坐标；而 `close` 已经把刚才那段字节追进去了，两边自然对得上。
+    fn encode_insn_into_data_pushsection(
+        &mut self,
+        trimmed: &str,
+        sec_idx: usize,
+        locals: &AsmLocalLabels,
+        line_idx: usize,
+    ) {
+        let subbed = locals.substitute(trimmed, line_idx);
+        self.current_asm_line = line_idx + 1;
+        self.open_exec_pushsection(sec_idx);
+        self.emit_asm_line(&subbed);
+        self.close_exec_pushsection();
+    }
+
     pub(crate) fn emit_pushsection_data(
         &mut self,
         trimmed: &str,
@@ -709,6 +734,16 @@ impl Codegen {
             return;
         }
         if !trimmed.starts_with('.') {
+            // **数据节里出现一条真指令**：GAS 把它的字节发进那个节，而这里以前直接 `return`
+            // —— 静默丢弃。代价不是「少几个字节」而是**整段代码不存在**：实测四族都是
+            // 「运行时 memcpy 模板」用的代码，标号还在、链接与 objtool 都不报错，但模板是空壳：
+            //   * `arch/x86/kernel/callthunks.c:67-73` `skl_call_thunk_template:` + INCREMENT_CALL_DEPTH
+            //   * `arch/x86/kernel/kprobes/opt.c:105` `optprobe_template_entry:` + 一整套 pushq/mov
+            //   * `arch/x86/kernel/uprobes.c:321,883` `uretprobe_trampoline_entry` / `uprobe_trampoline_entry`
+            //   * `arch/x86/kernel/alternative.c:1371,1400,1442` FINEIBT 的 preamble / caller 模板
+            // 丢掉字节后 `end - start` 算成 0（实测 `skl_call_thunk_tail` 与 `_template` 在旧产物
+            // 里都是偏移 0，`.rodata` 副本节 0 字节），于是 `SKL_TMPL_SIZE`/`TPARG_SIZE` 一类全错。
+            self.encode_insn_into_data_pushsection(trimmed, sec_idx, locals, line_idx);
             return;
         }
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
@@ -720,6 +755,19 @@ impl Codegen {
         // 偏移）。`asm_label_coords` 一次把两种坐标折成同一张表。
         let labels_adj: HashMap<String, u64> = self.asm_label_coords();
         match directive {
+            // 数据 pushsection 里的 `.globl` / `.global`：名字必须进 `global_asm_exports`，
+            // 否则 ELF 建表侧根本不知道要给下面那条标号发一条**定义**符号。实测
+            // `arch/x86/kernel/callthunks.c:65-74`（`asm(".pushsection .rodata\n.global
+            // skl_call_thunk_template\nskl_call_thunk_template: …")`）以前只剩一条永远无定义的
+            // `UND skl_call_thunk_template`，链接期就是 `undefined reference`（全树 4 处，
+            // 同形状 `int3_selftest_asm` 3 处）。以前这一支根本进不到下面（本函数开头只处理
+            // 以 `:` 结尾的标号，其余指令交给下面的 `match`，而 `.global` 不在任何臂里 ⇒
+            // 被吞）。`asm/directive_emit.rs` 里同名的那条只覆盖**不切节**的那条路，两边都得有。
+            ".globl" | ".global" => {
+                if let Some(sym) = args_str.split_whitespace().next() {
+                    self.global_asm_exports.insert(Self::asm_symbol_name(sym));
+                }
+            },
             ".byte" => {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
@@ -831,11 +879,23 @@ impl Codegen {
                     );
                     if let Some((sym_name, _rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
+                        // 字段宽 8 字节时不能沿用 `parse_asm_data_expr` 回的形状：它只看
+                        // 表达式、不看宽度，`X - .` 和 `X + N` 都回 PC32。GAS 的口径是：
+                        // 带当前地址项的 `.quad X - .` 发 **R_X86_64_PC64**，纯 `X + N` 才是
+                        // 绝对的 R_X86_64_64。实测内核 `JUMP_TABLE_ENTRY` 的
+                        // `.quad key - .` 被发成 R_X86_64_64，`jump_entry.key` 里存的就不再是
+                        // 「key 相对本条表项」的偏移，运行期 jump_label 会把 static_key 指针
+                        // 算到别处去（切换静态键时砸错地址）。
+                        let rel_type = if Self::asm_expr_has_current_addr(expr.trim()) {
+                            shared_elf::R_X86_64_PC64
+                        } else {
+                            shared_elf::R_X86_64_64
+                        };
                         self.pending_custom_sec_rels.push(CustomSecRel {
                             sec_idx,
                             offset: off,
                             symbol: sym_name,
-                            rel_type: shared_elf::R_X86_64_64,
+                            rel_type,
                             addend,
                         });
                     }

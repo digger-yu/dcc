@@ -3,13 +3,14 @@
 // suckless 准则: 行级处理 #include/#define/#if, 然后 token 级宏展开。
 
 use crate::cli::{Arch, Os, StdMode, TargetTriple};
+// 进程内热表（宏表、include 记录、守卫表）改走 FNV-1a：理由与边界见 `fast_hash` 模块头。
+use crate::fast_hash::{FastStrMap, FastStrSet};
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::strip_int_suffix;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 /// 逻辑行: 反斜杠续接行合并后的文本 + 其覆盖的物理行号范围 (1-based)。
@@ -51,7 +52,7 @@ impl<'a> LineMap<'a> {
 }
 
 pub struct Preprocessor {
-    macros: HashMap<String, MacroDef>,
+    macros: FastStrMap<MacroDef>,
     include_paths: Vec<PathBuf>,
     /// 系统搜索路径 (-isystem, 在用户路径之后、标准路径之前)
     system_paths: Vec<PathBuf>,
@@ -60,7 +61,7 @@ pub struct Preprocessor {
     /// -idirafter 搜索路径: 在所有其他路径之后搜索的目录
     after_paths: Vec<PathBuf>,
     /// #pragma once 文件
-    pragma_once: HashSet<String>,
+    pragma_once: FastStrSet,
     diags: Vec<Diagnostic>,
     /// 条件编译栈: true = 当前分支激活, false = 跳过
     cond_stack: Vec<CondState>,
@@ -114,7 +115,7 @@ pub struct Preprocessor {
     pending_pragmas: RefCell<Vec<(String, u32)>>,
     /// 本轮 expand_macros 实际展开过的宏名 (跨嵌套调用累积),
     /// 供第二轮重扫描作为禁用集延续 paint blue 语义
-    expanded_macros: RefCell<HashSet<String>>,
+    expanded_macros: RefCell<FastStrSet>,
     /// 当前字符集/编码 (C23 #pragma locale)
     /// 支持: "UTF-8" (默认), "ASCII", "ISO-8859-1", "POSIX"
     charset: String,
@@ -131,12 +132,21 @@ pub struct Preprocessor {
     /// 供头文件缓存的传递依赖校验 (include 图缓存): 缓存条目记录其
     /// 依赖闭包, 命中前逐个重读比对, 任一依赖变更即失效重处理。
     dep_hashes: Vec<(String, u64)>,
+    /// 本轮编译内「路径 → 磁盘内容哈希」的记忆。`cache_deps_fresh` 原本对**每个**缓存
+    /// 条目的依赖闭包重读重哈希：一个内核 TU 有 ~1300 个 include，而每个条目的闭包又是
+    /// 几百个文件 ⇒ 上百万次全文件读+哈希（`perf` 在一冷读 `net/core/sock.c` 上量到
+    /// 175 s，libc 的 `memcmp`/`memmove`/`malloc` 合计占一半）。一次编译内源文件不会变，
+    /// 同一个路径只需读一次。
+    dep_fresh_memo: RefCell<FastStrMap<u64>>,
+    /// `deps` / `dep_hashes` 的「已收录」索引：去重原先是线性扫全表（同样是二次方）。
+    deps_seen: RefCell<FastStrSet>,
+    dep_hash_seen: RefCell<FastStrSet>,
     /// include-once 守卫快路径: canonical path -> (content_hash, guard 宏名)。
     /// 守卫宏已定义时整个文件可跳过处理 (等价于 #ifndef 为假)。
-    once_guard: HashMap<String, (u64, Option<String>)>,
+    once_guard: FastStrMap<(u64, Option<String>)>,
     /// 进程内 include 内容缓存: canonical path -> 已读取的 (text, hash, guard)。
     /// 同名头文件二次 include 时跳过 `fs::read`/解码/哈希, 直接复用文本。
-    include_content_cache: HashMap<String, Arc<IncludeCacheEntry>>,
+    include_content_cache: FastStrMap<Arc<IncludeCacheEntry>>,
     /// 宏展开深度上限是否已发出警告 (每 TU 仅警告一次, 避免刷屏)
     depth_limit_warned: RefCell<bool>,
     /// #pragma GCC system_header: 剩余文件视为系统头文件, 抑制警告
@@ -156,7 +166,11 @@ pub struct Preprocessor {
     macro_expand_count: u64,
     /// #pragma GCC poison: 被禁用的标识符集合.
     /// 后续预处理中遇到这些标识符时发出错误 (系统头文件中豁免).
-    poisoned_ids: HashSet<String>,
+    poisoned_ids: FastStrSet,
+    /// 身份宏观察栈：每层一个 `IdentityScope`，`include_resolved_file` 进出时 push/pop，
+    /// 弹出的子层并进父层（所父条目继承了子条目「曾在什么状态下生成」）。
+    /// 栈底是主文件自己（不落盘，只汇合）。
+    identity_scopes: RefCell<Vec<IdentityScope>>,
     /// #line 行号重映射: (触发物理行号, 重映射后的行号, 可选文件名)
     /// 在 __LINE__ 展开时查找最近的映射, 计算偏移后的行号
     line_remapping: Vec<(u32, u32, Option<String>)>,
@@ -240,7 +254,32 @@ type MacroCacheData = (
     Vec<(String, u64)>,
     u32,
     Vec<(u32, String, u32, u32)>,
+    Vec<(String, u64)>,
 );
+
+/// 每个 TU 都不一样、但**只有少数头文件会看**的「身份宏」。
+///
+/// kbuild 给每个内核 TU 递 `-DKBUILD_MODFILE '"net/core/sock"' -DKBUILD_BASENAME '"sock"'
+/// -DKBUILD_MODNAME '"sock"' -D__KBUILD_MODNAME=sock`，而旧版的预处理缓存键把**全部**宏的
+/// 名字+参数+体都烘进键里（`hash_macro_state`）⇒ 每个内核 TU 的键都不同 ⇒ 那 ~1300 个
+/// 头文件的缓存条目全 miss、全重写（实测冷读 `net/core/skbuff.c` 的 `-E` 要 137-170 s，
+/// 而同一 TU 同一宏状态再跑只 2.96 s）——全树 ~1 万个对象因此要 8.5 天。
+///
+/// 现在的口径：这几个名字**不进键**（只参与「定没定义」的判定），但每个缓存条目会记下
+/// 「本次展开真读过哪几个身份宏、当时它们折成什么」（`IDREAD` 段），命中时逐项校；
+/// 子条目的读数并入父条目，所父条目的回放也不会拿着跳 TU 的值。从没读过身份宏的文件
+/// 的条目因此跳 TU 共享，而真读了它的（实测 `include/rdma/ib_verbs.h`、`include/kunit/test.h`、
+/// `include/linux/moduleparam.h`）依旧逐 TU 分存——不是抹掉差异，而是把差异限到真看见它的地方。
+pub const TU_IDENTITY_MACROS: &[&str] =
+    &["KBUILD_MODFILE", "KBUILD_BASENAME", "KBUILD_MODNAME", "__KBUILD_MODNAME"];
+
+/// 一个「文件展开层」内对身份宏的观察记录。用定长小表而不是 map：名单只有 4 个名字，
+/// 而同一个名字在本层里可能被读到不同值（那种记 `conflicted`，该文件就不落缓存）。
+#[derive(Default)]
+struct IdentityScope {
+    reads: Vec<(String, u64)>,
+    conflicted: bool,
+}
 
 /// 进程内 include 内容缓存条目: 同一 TU 内重复 #include 同一文件时, 跳过
 /// `fs::read`/`decode_source`/`hash_content`/`detect_include_guard`。`Arc`
@@ -620,12 +659,12 @@ pub fn preprocess(
     // 解析 Target 以获取类型大小/对齐信息
     let target_resolved = crate::target::Target::resolve(target);
     let mut pp = Preprocessor {
-        macros: HashMap::new(),
+        macros: HashMap::default(),
         include_paths: include_paths.to_vec(),
         system_paths: system_paths.to_vec(),
         quote_paths: quote_paths.to_vec(),
         after_paths: after_paths.to_vec(),
-        pragma_once: HashSet::new(),
+        pragma_once: HashSet::default(),
         diags: vec![],
         cond_stack: vec![],
         out: String::with_capacity(text.len()),
@@ -652,13 +691,16 @@ pub fn preprocess(
         macro_depth_limit,
         counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
-        expanded_macros: RefCell::new(HashSet::new()),
+        expanded_macros: RefCell::new(HashSet::default()),
         charset: "UTF-8".to_string(),
         cur_source_line: None,
         openmp_pragmas: Vec::new(),
         dep_hashes: Vec::new(),
-        once_guard: HashMap::new(),
-        include_content_cache: HashMap::new(),
+        dep_fresh_memo: RefCell::new(HashMap::default()),
+        deps_seen: RefCell::new(HashSet::default()),
+        dep_hash_seen: RefCell::new(HashSet::default()),
+        once_guard: HashMap::default(),
+        include_content_cache: HashMap::default(),
         depth_limit_warned: RefCell::new(false),
         system_header: false,
         visibility_stack: vec!["default".to_string()],
@@ -667,7 +709,8 @@ pub fn preprocess(
         include_level: 0,
         include_count: 0,
         macro_expand_count: 0,
-        poisoned_ids: HashSet::new(),
+        poisoned_ids: HashSet::default(),
+        identity_scopes: RefCell::new(Vec::new()),
         asm_mode: file.ends_with(".S") || file.ends_with(".s"),
         line_remapping: Vec::new(),
         trigraphs,
@@ -694,18 +737,32 @@ pub fn preprocess(
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
     // === 架构相关宏 (根据 target 动态定义) ===
-    let is_lp64 =
-        matches!(target.arch, Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 | Arch::Mips64);
+    // `-m32`/`-m16` 把 x86 的 ABI 换成 ILP32：指针/long 都降到 4 字节，
+    // 且 `__x86_64__` 一族**必须消失**（gcc -m32 就是这样）。
+    let x86_32 = target.is_x86_32_mode();
+    let is_lp64 = !x86_32
+        && matches!(
+            target.arch,
+            Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 | Arch::Mips64
+        );
     let is_big_endian = matches!(target.arch, Arch::Mips | Arch::Mips64);
     // 架构标识宏
     match target.arch {
         Arch::X86_64 => {
-            pp.define_builtin("__x86_64__", "1");
-            pp.define_builtin("__x86_64", "1");
-            pp.define_builtin("__amd64__", "1");
-            pp.define_builtin("__amd64", "1");
-            pp.define_builtin("__k8__", "1");
-            pp.define_builtin("__k8", "1");
+            if x86_32 {
+                // 键为 `#ifndef __x86_64__` 圈住的 32 位专用序列（realmode 的
+                // `verify_cpu.S` 就是这样）：这两个宏一错，整段汇编就没了。
+                pp.define_builtin("__i386__", "1");
+                pp.define_builtin("__i386", "1");
+                pp.define_builtin("__code_model_32__", "1");
+            } else {
+                pp.define_builtin("__x86_64__", "1");
+                pp.define_builtin("__x86_64", "1");
+                pp.define_builtin("__amd64__", "1");
+                pp.define_builtin("__amd64", "1");
+                pp.define_builtin("__k8__", "1");
+                pp.define_builtin("__k8", "1");
+            }
         },
         Arch::AArch64 => {
             pp.define_builtin("__aarch64__", "1");
@@ -785,8 +842,10 @@ pub fn preprocess(
     // 数据模型宏
     if is_lp64 {
         pp.define_builtin("__LP64__", "1");
+        pp.define_builtin("_LP64", "1");
     } else {
         pp.define_builtin("__ILP32__", "1");
+        pp.define_builtin("_ILP32", "1");
     }
     pp.define_builtin("__ELF__", "1");
     pp.define_builtin("__STDC__", "1");
@@ -1170,7 +1229,9 @@ pub fn preprocess(
     // (gcc.dg torture/pr58416 即此: 赋值分支不进 ⇒ union 留 0 ⇒ 校验 abort)。
     pp.define_builtin("__SIZEOF_FLOAT__", "4");
     pp.define_builtin("__SIZEOF_DOUBLE__", "8");
-    pp.define_builtin("__SIZEOF_LONG_DOUBLE__", "16");
+    // x86-32 的 long double 是 80 位（12 字节）——与 gcc -m32/-m16 一致。
+    // dcc 自己的 x86_64 ABI 是 binary128（16 字节），只在 32 位预定义口径上分叉。
+    pp.define_builtin("__SIZEOF_LONG_DOUBLE__", if x86_32 { "12" } else { "16" });
     pp.define_builtin("__WCHAR_TYPE__", if short_wchar { "short unsigned int" } else { "int" });
     pp.define_builtin("__WINT_TYPE__", "unsigned int");
     if short_wchar {
@@ -2118,53 +2179,56 @@ pub fn preprocess(
     }
 }
 
-/// 探测 GCC 内建头文件目录（`gcc -print-file-name=include` 及常见路径）。
-fn host_gcc_include_dirs() -> &'static [PathBuf] {
+/// 探测 GCC 内建头文件目录（`stddef.h`/`stdarg.h` 那一族所在处）。
+///
+/// **不再起 `gcc -print-file-name=include`**：那是 dcc 在编译阶段唯一会拉起
+/// gcc 进程的地方，全链「不起 gcc」的验收口径下它就是一个缺口；更实际的是，
+/// 构建里把 `gcc` 摆成陷阱时这条探针会静默失败，于是 dcc 丢掉内建头路径、
+/// 报 `include file not found: stddef.h`（假失败）。改为直接扫产物目录：
+/// `/usr/lib/gcc/<target>/<version>/include`，版本目录降序（与 gcc 驱动
+/// 默认选最新工具链同口径）。`DCC_GCC_INCLUDE_DIR` 可显式覆盖。
+pub(crate) fn host_gcc_include_dirs() -> &'static [PathBuf] {
     static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     DIRS.get_or_init(|| {
         let mut dirs = Vec::new();
-        if let Ok(out) = Command::new("gcc").arg("-print-file-name=include").output() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() && p != "include" && Path::new(&p).is_dir() {
-                dirs.push(PathBuf::from(p));
+        if let Some(d) = std::env::var_os("DCC_GCC_INCLUDE_DIR") {
+            let p = PathBuf::from(d);
+            if p.is_dir() {
+                dirs.push(p);
             }
         }
-        for pattern in [
-            "/usr/lib/gcc/x86_64-linux-gnu/*/include",
-            "/usr/lib/gcc/aarch64-linux-gnu/*/include",
-        ] {
-            if let Ok(entries) = glob_gcc_include_paths(pattern) {
-                for p in entries {
-                    if p.is_dir() {
-                        dirs.push(p);
+        // base/<target>/<version>/include 三层扫描。版本目录降序，保证
+        // `include` 里的 `stddef.h` 来自最新工具链（与 gcc 默认行为一致）。
+        for base in ["/usr/lib/gcc", "/usr/lib64/gcc", "/usr/local/lib/gcc"] {
+            let Ok(targets) = fs::read_dir(base) else {
+                continue;
+            };
+            let mut target_dirs: Vec<PathBuf> = targets
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            target_dirs.sort();
+            for target in &target_dirs {
+                let Ok(versions) = fs::read_dir(target) else {
+                    continue;
+                };
+                let mut version_dirs: Vec<PathBuf> = versions
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
+                version_dirs.sort();
+                for v in version_dirs.iter().rev() {
+                    let inc = v.join("include");
+                    if inc.is_dir() {
+                        dirs.push(inc);
                     }
                 }
             }
         }
         dirs
     })
-}
-
-fn glob_gcc_include_paths(pattern: &str) -> Result<Vec<PathBuf>, ()> {
-    let mut out = Vec::new();
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() != 2 {
-        return Err(());
-    }
-    let parent = Path::new(parts[0].trim_end_matches('/'));
-    let suffix = parts[1].trim_start_matches('/');
-    if let Ok(entries) = fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                let candidate = p.join(suffix);
-                if candidate.is_dir() {
-                    out.push(candidate);
-                }
-            }
-        }
-    }
-    Ok(out)
 }
 
 thread_local! {
@@ -2248,8 +2312,10 @@ impl Preprocessor {
                 let content = decode_source(&bytes);
                 // 强制包含文件也计入 include 图: -MD 依赖 + 缓存依赖闭包
                 self.deps.push(resolved.display().to_string());
+                self.deps_seen.borrow_mut().insert(resolved.display().to_string());
                 self.dep_hashes
                     .push((resolved.display().to_string(), Self::hash_content(&content)));
+                self.dep_hash_seen.borrow_mut().insert(resolved.display().to_string());
                 self.include_count += 1;
                 let saved_file = self.file.clone();
                 let saved_dir = self.base_dir.clone();
@@ -2630,7 +2696,7 @@ impl Preprocessor {
     }
 
     /// 宏表恢复: Some(d) 重新注册, None 删除 (undo/replay 共用)
-    fn restore_macro(macros: &mut HashMap<String, MacroDef>, name: &str, def: &Option<MacroDef>) {
+    fn restore_macro(macros: &mut FastStrMap<MacroDef>, name: &str, def: &Option<MacroDef>) {
         match def {
             Some(d) => {
                 macros.insert(name.to_string(), d.clone());
@@ -2968,26 +3034,107 @@ impl Preprocessor {
         out
     }
 
-    /// 将物理行合并为逻辑行 (行尾 \ 与下一行拼接, \ 替换为空格),
+    /// 扫一行，返回 (行末是否仍在块注释里, 行末的 `\` 是否是真续行符)。
+    ///
+    /// 字符串/字符字面量里的 `/*` 与 `\` 不算；`//` 行注释吃掉整行尾。
+    /// 为什么需要这个状态：见 [`Self::logical_lines`] 的理由。
+    fn scan_line_comment_state(line: &str, mut in_comment: bool) -> (bool, bool) {
+        let b: Vec<char> = line.chars().collect();
+        let mut i = 0usize;
+        while i < b.len() {
+            let c = b[i];
+            if in_comment {
+                if c == '*' && i + 1 < b.len() && b[i + 1] == '/' {
+                    in_comment = false;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if c == '"' || c == '\'' {
+                let q = c;
+                i += 1;
+                while i < b.len() {
+                    if b[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == q {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && i + 1 < b.len() && b[i + 1] == '*' {
+                in_comment = true;
+                i += 2;
+                continue;
+            }
+            if c == '/' && i + 1 < b.len() && b[i + 1] == '/' {
+                break;
+            }
+            if c == '\\' {
+                // 转义：只看下一步就是（`a\\b` 里的两个反斜杠是一对）。行尾判据
+                // 不看这里，理由见函数末尾的注释。
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        // 【引号里的行尾 `\` 也是续行符】C 的拼接（5.1.1.2p2）在**分词之前**做，
+        // 与此刻是否在字符串/字符常量里无关。上面那趟扫描遇到开引号就整段跳到收引号
+        // 或行尾，未闭合时根本走不到 `c == '\\'` 那一支 ⇒ 返回 false。实测
+        // `limits-stringlit.c` 的 `#define STR2 "0123…\<换行>0123…"`：宏体被截在
+        // 行尾，续行以游离 token 落在文件作用域（`error[E0003]: expected type, got
+        // Number`）。所以行尾判据只看**原始行**，不再看扫描结果；`//` 注释里的行尾
+        // `\` 本来就该继续注释（拼接后注释到下一行为止），一并按拼接处理。
+        (in_comment, line.ends_with('\\'))
+    }
+    
+    /// 将物理行合并为逻辑行 (行尾 `\` 与下一行**直接**拼接，两个字符一起删)，
     /// 同时记录每个逻辑行覆盖的物理行号范围。
+    ///
+    /// 【为什么要跟踪未闭合的块注释】C 只说「行尾不是 `\` 就结束这条directive」，但
+    /// **块注释本身可以吃掉若干物理行**；gcc 就把未闭合的注释当成「逻辑行还没完」。
+    /// 内核大量依赖这个行为，典型是 `include/linux/printk.h` 的 `__printk_index_emit`：
+    /// 宏体里夹了一段跨行注释，注释的中间行**不带** `\`。按「只看行尾 `\`」的旧写法，
+    /// `#define` 会在 `/*` 那行提前结束，后半截宏体就以游离 token 落在文件作用域（症状：
+    /// `error[E0003]: expected type, got RBrace/KwWhile` 指向 `printk.h:441` 的巨列号，
+    /// 同时调用点的展开被挖空），直接卡住 `scripts/mod/devicetable-offsets.s`。
+    /// 对照：`/tmp/itcase/pp2.c` 同形下 gcc 给出完整展开，旧 dcc 泄漏宏体。
     fn logical_lines(text: &str, _asm_mode: bool) -> Vec<LogicalLine> {
         let mut out = Vec::new();
         let mut phys = 1u32;
         let mut continued: Option<(String, u32)> = None; // (累积文本, 起始物理行)
+        let mut in_comment = false;
         for line in text.split('\n') {
             let line = line.strip_suffix('\r').unwrap_or(line);
-            if let Some(prefix) = line.strip_suffix('\\') {
+            let (still_comment, ends_with_bs) = Self::scan_line_comment_state(line, in_comment);
+            in_comment = still_comment;
+            // 摘掉行尾 `\` 的判据只看扫描结果：`ends_with_bs` 已经是「在注释外」的行尾反斜杠
+            // （注释里先遇到 `*/` 闭合后，同一行末尾的 `\` 仍然算真续行符）。
+            // 不按「本行开头在注释里」一律保留，否则 `*/` + `\` 那一行的 `\` 会被留在输出里。
+            let body = if ends_with_bs {
+                line[..line.len() - '\\'.len_utf8()].to_string()
+            } else {
+                line.to_string()
+            };
+            let cont = ends_with_bs || in_comment;
+            if cont {
+                // 拼接时**不补空格**：C 删除的是「反斜杠 + 换行」这两个字符，不是换成
+                // 空白。补空格会把 `#define S "abc\` + `def"` 粘成 `"abc def"`（值多一个
+                // 空格），也会把唯一被折叠的宏体撑胖。行尾本来就有的空格在 `body` 里。
                 match &mut continued {
-                    Some((acc, _)) => {
-                        acc.push_str(prefix);
-                        acc.push(' ');
-                    },
+                    Some((acc, _)) => acc.push_str(&body),
                     None => {
-                        continued = Some((format!("{} ", prefix), phys));
+                        continued = Some((body, phys));
                     },
                 }
             } else if let Some((mut acc, start)) = continued.take() {
-                acc.push_str(line);
+                acc.push_str(&body);
                 out.push(LogicalLine {
                     text: acc,
                     phys_start: start,
@@ -2995,7 +3142,7 @@ impl Preprocessor {
                 });
             } else {
                 out.push(LogicalLine {
-                    text: line.to_string(),
+                    text: body,
                     phys_start: phys,
                     phys_end: phys,
                 });
@@ -3052,6 +3199,7 @@ impl Preprocessor {
             }
         } else if let Some(rest) = directive.strip_prefix("ifdef") {
             let name = rest.trim();
+            self.note_identity_read(name);
             let active = self.is_active() && self.macros.contains_key(name);
             self.cond_stack.push(CondState {
                 any_true: active,
@@ -3060,6 +3208,7 @@ impl Preprocessor {
             });
         } else if let Some(rest) = directive.strip_prefix("ifndef") {
             let name = rest.trim();
+            self.note_identity_read(name);
             let active = self.is_active() && !self.macros.contains_key(name);
             self.cond_stack.push(CondState {
                 any_true: active,
@@ -3137,6 +3286,7 @@ impl Preprocessor {
                 if any_true {
                     state.active = false;
                 } else {
+                    self.note_identity_read(name);
                     let val = parent_active && self.macros.contains_key(name);
                     let state = &mut self.cond_stack[len - 1];
                     if val {
@@ -3168,6 +3318,7 @@ impl Preprocessor {
                 if any_true {
                     state.active = false;
                 } else {
+                    self.note_identity_read(name);
                     let val = parent_active && !self.macros.contains_key(name);
                     let state = &mut self.cond_stack[len - 1];
                     if val {
@@ -3746,6 +3897,33 @@ impl Preprocessor {
     /// include 同一文件时跳过 `fs::read`/`decode_source`/`hash_content`/
     /// `detect_include_guard`, 文本以 `Arc<IncludeCacheEntry>` 零成本共享。
     fn include_resolved_file(&mut self, full_path: PathBuf, path: &str, line_no: u32) {
+        // 每个被包含的文件开一层身份宏记录；弹出时并进父层，所以父条目也知道自己嵌进了
+        // 哪些身份宏的值——「本条目能不能被下一个 TU 复用」的判据就在这一条上。
+        self.identity_scopes.borrow_mut().push(IdentityScope::default());
+        self.include_resolved_file_inner(full_path, path, line_no);
+        let popped = self.identity_scopes.borrow_mut().pop();
+        let mine = match popped {
+            Some(scope) => scope,
+            None => return,
+        };
+        if let Some(top) = self.identity_scopes.borrow_mut().last_mut() {
+            for (name, hash) in mine.reads {
+                match top.reads.iter_mut().find(|(n, _)| *n == name) {
+                    Some(slot) => {
+                        if slot.1 != hash {
+                            top.conflicted = true;
+                        }
+                    },
+                    None => top.reads.push((name, hash)),
+                }
+            }
+            if mine.conflicted {
+                top.conflicted = true;
+            }
+        }
+    }
+
+    fn include_resolved_file_inner(&mut self, full_path: PathBuf, path: &str, line_no: u32) {
         self.include_count += 1;
         let canonical = full_path.canonicalize().unwrap_or(full_path.clone());
         let key = canonical.to_string_lossy().to_string();
@@ -3753,6 +3931,7 @@ impl Preprocessor {
             return;
         }
         self.deps.push(full_path.to_string_lossy().into_owned());
+        self.deps_seen.borrow_mut().insert(full_path.to_string_lossy().into_owned());
 
         // 进程内 include 内容缓存: 命中时复用 (text, content_hash, guard),
         // 未命中时读取磁盘并填充缓存。Arc 包裹允许多处 include 共享同一份
@@ -3790,6 +3969,7 @@ impl Preprocessor {
         // 记录自身依赖 (含后续守卫/缓存命中路径): 父文件的依赖闭包
         // 必须包含子文件本身, 否则子文件变更时父条目无法失效
         self.dep_hashes.push((key.clone(), content_hash));
+        self.dep_hash_seen.borrow_mut().insert(key.clone());
 
         // include-once 守卫快路径: 记住 (content_hash, 守卫宏名),
         // hash 匹配才有效; 守卫宏已定义时跳过全部预处理。
@@ -3810,14 +3990,25 @@ impl Preprocessor {
         }
 
         // 全局类型注册表: 检查缓存
-        let macro_hash = self.hash_macro_state();
-        let cache_path = self.get_cache_path(&canonical, content_hash, macro_hash);
-
+        //
+        // 【只对主文件直接 include 的那一层建条目】。一个条目的内容是「该文件连同全部
+        // 嵌套 include 的展开结果」，逐层都写的话写盘量是 O(文件大小 × 嵌套深度)：实测
+        // 冷读 `net/core/skbuff.c`（输出 7.3 MB）新增 5964 个条目、缓存一次涨 **408 MB**
+        // （58 倍放大），而这些深层条目基本没人读：回放深度 1 的条目时嵌套部分已经内嵌
+        // 在里面，而 include guard 又保证同一文件一个 TU 内只展开一次。顺带省下的是
+        // `hash_macro_state()`（每次 include 都要排序+哈希全部宏）与整张宏表的 clone。
+        let owner_level = self.include_level;
         let bool_fixup = Self::needs_linux_stddef_bool_fixup(path);
         // linux/stddef.h 定义 enum { false = 0, true = 1 }；若 stdbool.h
         // 已将 false/true 宏化，预处理会把它变成非法的 0 = 0。
         let skip_cache =
             bool_fixup && (self.macros.contains_key("false") || self.macros.contains_key("true"));
+        let cache_path = if owner_level == 0 && !skip_cache {
+            let macro_hash = self.hash_macro_state();
+            self.get_cache_path(&canonical, content_hash, macro_hash)
+        } else {
+            None
+        };
 
         if let Some(ref cp) = cache_path {
             if !skip_cache {
@@ -3828,19 +4019,25 @@ impl Preprocessor {
                     cached_deps,
                     counter_delta,
                     cached_line_spans,
+                    cached_identity,
                 )) = self.load_from_cache(cp)
                 {
                     // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
-                    if Self::cache_deps_fresh(&cached_deps) {
+                    // 身份宏读数校：条目记的几条读数必须仍等于本轮定义指纹——跳 TU 复用
+                    // 能不能用就判在这里（没记任何读数的条目自然总是可复用）。
+                    if self.cache_deps_fresh(&cached_deps)
+                        && self.identity_reads_match(&cached_identity)
+                    {
                         // 缓存命中: 直接使用缓存的预处理输出和宏
                         self.push_out(&format!("/* #include \"{}\" (cached) */\n", path));
                         self.deps.push(full_path.to_string_lossy().into_owned());
+                        self.deps_seen.borrow_mut().insert(full_path.to_string_lossy().into_owned());
                         // 回填传递依赖: 父条目依赖闭包完整 + -MD 依赖更完整
                         for (dpath, dhash) in &cached_deps {
-                            if !self.dep_hashes.iter().any(|(p, _)| p == dpath) {
+                            if self.dep_hash_seen.borrow_mut().insert(dpath.clone()) {
                                 self.dep_hashes.push((dpath.clone(), *dhash));
                             }
-                            if !self.deps.iter().any(|d| d == dpath) {
+                            if self.deps_seen.borrow_mut().insert(dpath.clone()) {
                                 self.deps.push(dpath.clone());
                             }
                         }
@@ -3886,6 +4083,8 @@ impl Preprocessor {
                         for (name, def) in cached_macros {
                             self.macros.insert(name, def);
                         }
+                        // 本条输出嵌进了哪些身份宏的值：并入本层，让父条目也继承这条依赖。
+                        self.adopt_identity_reads(&cached_identity);
                         // 缓存输出内嵌了创建时的 __COUNTER__ 值;
                         // 回放消耗量, 使后续展开的计数器与冷缓存运行一致
                         self.counter = self.counter.wrapping_add(counter_delta);
@@ -3913,7 +4112,11 @@ impl Preprocessor {
         // 丢失覆盖定义 — 如 stddef.h 把内置 NULL 重新定义为内核
         // 版, 热缓存运行若不回放, 后续展开仍用内置版本, 输出与
         // 冷运行不一致。
-        let saved_macros: HashMap<String, MacroDef> = self.macros.clone();
+        let saved_macros: Option<FastStrMap<MacroDef>> = if cache_path.is_some() {
+            Some(self.macros.clone())
+        } else {
+            None
+        };
         // 记录处理前 __COUNTER__ 值, 用于计算本头文件的计数器消耗量
         let counter_before = self.counter;
         let saved_false = if bool_fixup { self.macros.remove("false") } else { None };
@@ -3941,9 +4144,12 @@ impl Preprocessor {
         // 产生诊断的头文件不落缓存, 下次运行重新处理并重新报诊断
         if let Some(ref cp) = cache_path {
             if !skip_cache && self.diags.len() == diags_before {
+                let Some(saved_macros) = saved_macros.as_ref() else {
+                    return;
+                };
                 let new_output = self.out[saved_out_len..].to_string();
                 // 变更集: 值被改变或新增的宏 (新增 + 重新定义)
-                let header_macros: HashMap<String, MacroDef> = self
+                let header_macros: FastStrMap<MacroDef> = self
                     .macros
                     .iter()
                     .filter(|(k, v)| {
@@ -3980,6 +4186,10 @@ impl Preprocessor {
                         )
                     })
                     .collect();
+                // 本层的身份宏读数； conflicted（同一名字读到过两个值）时不落缓存。
+                let Some(identity_reads) = self.take_identity_for_save() else {
+                    return;
+                };
                 self.save_to_cache(
                     cp,
                     &new_output,
@@ -3988,6 +4198,7 @@ impl Preprocessor {
                     &dep_closure,
                     counter_delta,
                     &cached_line_spans,
+                    &identity_reads,
                 );
             }
         }
@@ -5301,6 +5512,7 @@ impl Preprocessor {
                 }
 
                 if let Some(def) = self.macros.get(ident).cloned() {
+                    self.note_identity_read(ident);
                     if std::env::var("DCC_PP_DEBUG").is_ok() && ident == "asm_inline" {
                         let d = EXPAND_DEPTH.with(|c| c.get());
                         eprintln!("[pp-debug] EXPAND asm_inline depth={} file={} dis_len={} dis_has_gen={} text={:?}", d, self.file, disabled.len(), disabled.contains("GEN_BINARY_RMWcc"), &text[..text.len().min(100)]);
@@ -5582,11 +5794,25 @@ impl Preprocessor {
                             );
                             // 后续文本不带 disabled 集, 正常展开; 行号从当前
                             // 行继续 (Scalar 映射, 递归层级用不到物理表)
-                            format!(
-                                "{}{}",
-                                head,
-                                self.expand_macros_map(after_call, LineMap::Scalar(map.line(nl)))
-                            )
+                            //
+                            // **深度不进**：tail_call 是同一层的**顺序续接**，
+                            // 不是嵌套。若让 `after_call` 在下一层深度上展开，
+                            // 一个块里每遇到一个「简单标识符别名」宏就 +1；
+                            // policydb.c 尾部有上百个这种调用，深度爬过 128 后
+                            // 后续展开全部静默返回原文（见上面的 DEPTH_LIMIT 分支）。
+                            // 实测后果：`instrumentation_begin()` 的参数 `__COUNTER__`
+                            // 留在原地，`__ASM_BREF` 的 ## 把它拼成未定义符号
+                            // `__COUNTER__b`，objtool 报
+                            // `bad .discard.annotate_insn entry: 1 of type 3`。
+                            let depth_now = EXPAND_DEPTH.with(|d| {
+                                let v = d.get();
+                                d.set(v.saturating_sub(1));
+                                v
+                            });
+                            let tail =
+                                self.expand_macros_map(after_call, LineMap::Scalar(map.line(nl)));
+                            EXPAND_DEPTH.with(|d| d.set(depth_now));
+                            format!("{}{}", head, tail)
                         } else {
                             self.expand_with_disabled(
                                 &def.body,
@@ -6145,14 +6371,82 @@ impl Preprocessor {
         result
     }
 
-    /// 将参数值转为字符串字面量 (转义 " 和 \；换行/连续空白折叠为单空格，符合 C # 规则)
+    /// 将参数值转为字符串字面量 (换行/连续空白折叠为单空格，符合 C11 6.10.3.2p2)
+    ///
+    /// 只在**字符串字面量/字符常量内部**把 `"` 与 `\` 各自前置一个 `\`；
+    /// 字面量外面的反斜杠保持原样 —— 内核 `.S` 里的 GAS 参数引用（`\reg`）
+    /// 经 `__stringify` 后必须仍是单反斜杠。
+    ///
+    /// 缺陷现场：`include/drm/drm_print.h` 的 `drm_WARN_ON()` 用
+    /// `"drm_WARN_ON(" __stringify(x) ")"` 打印条件，而 `x` 展开后带着
+    /// `BUILD_BUG_ON_ZERO(...)` 的消息字符串。只给 `"` 补 `\`、不给 `\` 双写，
+    /// 会把内层已经转义好的 `\"` 变成 `\\"`；重新词法分析时那个 `"` 提前
+    /// 闭合字符串，剩下的 `is true\"` 变成游离 token（`\` 记 Invalid），于是
+    /// 紧随其后的函数定义报出一串 E0001/E0006（`intel_cdclk.c` 43 条）。
     fn stringify_arg(arg: &str) -> String {
         let collapsed: String = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        // 与 GCC 一致: # 操作符只转义 `"`, 不转义 `\`.
-        // GCC 的 # 不会对 \ 做双写, 这对内核 .S 文件中 GAS 参数引用 (如 \reg)
-        // 经 __stringify 展开后保持单反斜杠至关重要.
-        let escaped = collapsed.replace('"', "\\\"");
-        format!("\"{}\"", escaped)
+        let chars: Vec<char> = collapsed.chars().collect();
+        let mut out = String::with_capacity(collapsed.len() + 2);
+        out.push('"');
+        let mut in_str = false;
+        let mut in_chr = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            if in_str {
+                match ch {
+                    '\\' => {
+                        // 字面量里的转义对 `\X`: 反斜杠双写, 引号再前置一个反斜杠
+                        out.push_str("\\\\");
+                        if i + 1 < chars.len() {
+                            let next = chars[i + 1];
+                            if next == '"' {
+                                out.push_str("\\\"");
+                            } else {
+                                out.push(next);
+                            }
+                            i += 1;
+                        }
+                    },
+                    '"' => {
+                        out.push_str("\\\"");
+                        in_str = false;
+                    },
+                    _ => out.push(ch),
+                }
+            } else if in_chr {
+                match ch {
+                    '\\' => {
+                        out.push_str("\\\\");
+                        if i + 1 < chars.len() {
+                            out.push(chars[i + 1]);
+                            i += 1;
+                        }
+                    },
+                    // GCC 对字符常量只双写 `\`, 不转义 `'`
+                    '\'' => {
+                        out.push('\'');
+                        in_chr = false;
+                    },
+                    _ => out.push(ch),
+                }
+            } else {
+                match ch {
+                    '"' => {
+                        in_str = true;
+                        out.push_str("\\\"");
+                    },
+                    '\'' => {
+                        in_chr = true;
+                        out.push('\'');
+                    },
+                    _ => out.push(ch),
+                }
+            }
+            i += 1;
+        }
+        out.push('"');
+        out
     }
 
     /// 替换文本中的独立标识符（跳过字符串/字符常量，避免 ENTRY 类宏破坏字面量）
@@ -6250,6 +6544,7 @@ impl Preprocessor {
             if after.starts_with('(') {
                 let end = after.find(')').unwrap_or(0);
                 let name = after[1..end].trim();
+                self.note_identity_read(name);
                 let val = if self.macros.contains_key(name) { "1" } else { "0" };
                 result = format!("{}{}{}", &result[..pos], val, &after[end + 1..]);
             } else {
@@ -6257,6 +6552,7 @@ impl Preprocessor {
                     .find(|c: char| !c.is_alphanumeric() && c != '_')
                     .unwrap_or(after.len());
                 let name = &after[..name_end];
+                self.note_identity_read(name);
                 let val = if self.macros.contains_key(name) { "1" } else { "0" };
                 result = format!("{}{}{}", &result[..pos], val, &after[name_end..]);
             }
@@ -6623,6 +6919,11 @@ impl Preprocessor {
 
     fn eval_int_expr(&mut self, expr: &str) -> i64 {
         let expr = expr.trim();
+        // 【短路】先按顶层连接符切一刀，被跳过的那一侧**完全不求值**（见
+        // [`Self::eval_lazy_top`] 的头注）。切不开时下面这条路径与历史行为逐字相同。
+        if let Some(v) = self.eval_lazy_top(expr) {
+            return v;
+        }
         // 替换未知标识符为 0，可能发出 -Wundef 警告
         let expr = self.replace_unknown_idents(expr);
         // 递归下降求值
@@ -6631,6 +6932,194 @@ impl Preprocessor {
 
         // 调用方只做 `!= 0` 判定，所以这里把位模式截回 i64 无影响。
         Self::parse_ternary(bytes, &mut pos).to_i64()
+    }
+
+    /// 在**顶层**（括号深度 0、不在字符/字符串字面量里）按 C 的结合强度从最松的开始
+    /// 找 `,` → `?:` → `||` → `&&`，找到一个就把式子拆成两逐半求值，并且**短路**：
+    /// `A || B` 在 A 非零时不算 B，`A && B` 在 A 为零时不算 B，
+    /// `C ? A : B` 只算 `C` 选中那一支。
+    ///
+    /// 为什么必须短路而不是整式一次评完：`-Wundef` 只该警告「真正被读到」的未定义
+    /// 宏，而原先 `replace_unknown_idents` 先把**整行**里的未知标识符一律换成 `0`
+    /// 并逐个警告，然后才求值 —— 于是永远读不到的那一侧也刷了警告。实测
+    /// （localmodconfig 全树 2 536 条 `W0202: "__GLIBC__"`，gcc 同旗标 0 条）就来自
+    /// 这两个形状：
+    /// ```c
+    /// /* include/uapi/linux/stat.h:7 —— __KERNEL__ 已在命令行定义 */
+    /// #if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
+    /// /* include/uapi/linux/coda.h:100 —— 前半截已为真 */
+    /// #if !defined(_UQUAD_T_) && (!defined(__GLIBC__) || __GLIBC__ < 2)
+    /// ```
+    /// 只在顶层切。`?:` 也必须切，否则内核里那一族字节序判据全线误报（实测
+    /// localmodconfig 全树 656 条，gcc 同旗标 0 条）：
+    /// ```c
+    /// /* include/uapi/sound/asound.h:561 —— cond 为假，`==` 那一支根本不该被读到 */
+    /// #if defined(__BYTE_ORDER) ? __BYTE_ORDER == __BIG_ENDIAN : defined(__BIG_ENDIAN)
+    /// ```
+    /// 切点顺序按结合强度排：`?:` 比 `||`/`&&` 松、比 `,` 紧，所以
+    /// `A || B ? C : D` 会在 `?` 处切成 `cond = A || B`（cond 内部再递归走 `||` 那
+    /// 条），而不是先在 `||` 处切错结合。GNU 的 `C ?: D`（省略中间目）不在这里处理，
+    /// 直接回落整行路径，保持历史取值不变。
+    fn eval_lazy_top(&mut self, s: &str) -> Option<i64> {
+        // 整式被一尾括号包住时先把这层括号摘掉再看能不能切：
+        // `!defined(_UQUAD_T_) && (!defined(__GLIBC__) || __GLIBC__ < 2)` 的后半截坐在括号里，
+        // 不摘就切不到那个 `||`，而 gcc 在括号内一样短路（实测本形 gcc 不警告）。
+        let mut s = s;
+        loop {
+            let t = s.trim();
+            if t.len() < 2 || !t.starts_with('(') || !t.ends_with(')') {
+                break;
+            }
+            // 必须确认开头的 `(` 的配对 `)` 就是最后一字符，否则 `(a) || (b)` 会被错剔。
+            let bytes = t.as_bytes();
+            let mut d = 0_i32;
+            let mut closed_at_end = false;
+            for (i, ch) in bytes.iter().enumerate() {
+                match ch {
+                    b'(' => d += 1,
+                    b')' => {
+                        d -= 1;
+                        if d == 0 {
+                            closed_at_end = i == bytes.len() - 1;
+                            break;
+                        }
+                    },
+                    _ => {},
+                }
+            }
+            if !closed_at_end {
+                break;
+            }
+            s = &t[1..t.len() - 1];
+        }
+        let b = s.as_bytes();
+        let mut depth = 0_i32;
+        let mut i = 0_usize;
+        let mut q_at: Option<usize> = None;
+        let mut comma_at: Option<usize> = None;
+        let mut or_at: Option<usize> = None;
+        let mut and_at: Option<usize> = None;
+        while i < b.len() {
+            match b[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                },
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                },
+                b'?' if depth == 0 => {
+                    if q_at.is_none() {
+                        q_at = Some(i);
+                    }
+                },
+                b',' if depth == 0 => {
+                    if comma_at.is_none() {
+                        comma_at = Some(i);
+                    }
+                },
+                b'|' if depth == 0 && i + 1 < b.len() && b[i + 1] == b'|' => {
+                    if or_at.is_none() {
+                        or_at = Some(i);
+                    }
+                    i += 1;
+                },
+                b'&' if depth == 0 && i + 1 < b.len() && b[i + 1] == b'&' => {
+                    if and_at.is_none() {
+                        and_at = Some(i);
+                    }
+                    i += 1;
+                },
+                _ => {},
+            }
+            i += 1;
+        }
+        // 优先级：逗号比 `?:` 松，`?:` 比 `||` 松，`||` 比 `&&` 松 —— 必须先在**最松**
+        // 的那个切。
+        if let Some(p) = comma_at {
+            let lv = self.eval_int_expr(&s[..p]);
+            let _ = lv;
+            return Some(self.eval_int_expr(s[p + 1..].trim()));
+        }
+        if let Some(q) = q_at {
+            // 找与这个 `?` 配对的 `:`：嵌套的 `?`/`:` 用计数抵消，括号/字面量内部的
+            // 一律不看（深度 != 0）。
+            let mut nest = 1_usize;
+            let mut d2 = 0_i32;
+            let mut j = q + 1;
+            let mut col_at: Option<usize> = None;
+            while j < b.len() {
+                match b[j] {
+                    b'(' => d2 += 1,
+                    b')' => d2 -= 1,
+                    b'\'' => {
+                        j += 1;
+                        while j < b.len() && b[j] != b'\'' {
+                            if b[j] == b'\\' {
+                                j += 1;
+                            }
+                            j += 1;
+                        }
+                    },
+                    b'"' => {
+                        j += 1;
+                        while j < b.len() && b[j] != b'"' {
+                            if b[j] == b'\\' {
+                                j += 1;
+                            }
+                            j += 1;
+                        }
+                    },
+                    b'?' if d2 == 0 => nest += 1,
+                    b':' if d2 == 0 => {
+                        nest -= 1;
+                        if nest == 0 {
+                            col_at = Some(j);
+                            break;
+                        }
+                    },
+                    _ => {},
+                }
+                j += 1;
+            }
+            let Some(c) = col_at else {
+                // `?:` 配不上对：这行本来就读不通，留给整行路径按历史行为处理。
+                return None;
+            };
+            let then_txt = s[q + 1..c].trim();
+            if then_txt.is_empty() {
+                // GNU `C ?: D`，取值等价于 `C || D`；这里不展开，回落整行路径。
+                return None;
+            }
+            let cond = self.eval_int_expr(&s[..q]);
+            return Some(if cond != 0 {
+                self.eval_int_expr(then_txt)
+            } else {
+                self.eval_int_expr(s[c + 1..].trim())
+            });
+        }
+        if let Some(p) = or_at {
+            let lv = self.eval_int_expr(&s[..p]);
+            return Some(if lv != 0 { 1 } else { self.eval_int_expr(s[p + 2..].trim()) });
+        }
+        if let Some(p) = and_at {
+            let lv = self.eval_int_expr(&s[..p]);
+            return Some(if lv == 0 { 0 } else { self.eval_int_expr(s[p + 2..].trim()) });
+        }
+        None
     }
 
     fn replace_unknown_idents(&mut self, expr: &str) -> String {
@@ -7568,6 +8057,16 @@ impl Preprocessor {
     }
 
     fn is_known_attribute(attr: &str) -> bool {
+        // GCC 的「保留标识符」写法：`__fallthrough__` 与 `fallthrough` 是同一个属性
+        // （手册明说两侧下划线形式等价），所以 `__has_attribute(…)` 的查询名必须先
+        // 归一化再比。这一步必须在**唯一入口**上做：早先只比裸名时，内核
+        // `include/linux/compiler_attributes.h:214` 的
+        //     `#if __has_attribute(__fallthrough__)`
+        // 被 dcc 答成 0 ⇒ 内核退到 `#else` 支 `do {} while (0)  /* fallthrough */`，
+        // 而那条只能靠注释识别（dcc 不做）⇒ 实测 localmodconfig 全树刷出 44 185 条
+        // W0501（gcc 同配置只有个位数）。两条路径（展开时的 5441 行与整行替换的
+        // `replace_has_attr_like`）都走本函数，改这一处就同时罩住。
+        let attr = attr.trim().trim_matches('_');
         matches!(
             attr,
             "packed"
@@ -8071,6 +8570,18 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
+        // V15: 「身份宏」（kbuild 逐 TU 不样的 KBUILD_*）不再把**值**烘进键里，只留
+        //      「定没定义」——谁真读了它由条目自带的 IDREAD 读数逐项校（见
+        //      `TU_IDENTITY_MACROS`）。旧版每个内核 TU 都带着不同的 -DKBUILD_BASENAME，
+        //      于是每个 TU 的键都不同、~1300 个头部条目全 miss（实测冷读一个内核
+        //      TU 的 -E 要 137-170 s）。这一版改了键的含义，旧条目必然 miss（名字里含
+        //      版本号字符串，自动作废），无需手工清缓存。
+        // V14: 把「当前编译器二进制的身份」也混进来（与 compile 缓存共用
+        //      `incremental::hash_compiler_binary`）。本版改了 `logical_lines`：
+        //      未闭合的块注释不再提前结束一directive（宏体内跨行注释），而旧缓存里
+        //      存着按旧规则切出来的预处理输出 —— 真树实测：修好后重跑仍报同一个
+        //      `expected type`，因为 12 GB 旧缓存在回放。光靠版本号 bump 仍要求
+        //      “记得改常量”，进指纹才是机制。
         // V13: 将 include_level 纳入缓存键, 使同一头文件在不同嵌套
         //     深度被 include 时拥有独立的缓存条目, 避免
         //     __INCLUDE_LEVEL__ 值被固化错误。
@@ -8078,7 +8589,12 @@ impl Preprocessor {
         //     命中时先删后插回放; 旧版只回放新增宏, 丢失对已存在宏的
         //     覆盖 (如 stddef.h 重新定义内置 NULL), 导致冷/热缓存运行
         //     输出不一致。
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V13");
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V15");
+        // 编译器身份：换dcc 就必须作废（见上面 V14 的理由）
+        let mut id_hasher = std::collections::hash_map::DefaultHasher::new();
+        crate::incremental::hash_compiler_binary(&mut id_hasher);
+        hash ^= std::hash::Hasher::finish(&id_hasher);
+        hash = hash.wrapping_mul(0x100000001b3);
         // __INCLUDE_LEVEL__: 不同嵌套深度必须独立缓存
         hash ^= self.include_level as u64;
         hash = hash.wrapping_mul(0x100000001b3);
@@ -8086,6 +8602,14 @@ impl Preprocessor {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
             hash = hash.wrapping_mul(0x100000001b3);
+            // 身份宏：只烘「定没定义」，不烘值。它们的值逐 TU 不同，而真会读到它们的
+            // 文件只有几个（读数存进条目的 IDREAD 段，命中时逐项校；一个条目能进回放
+            // 就说明它嵌进去的身份宏值和本轮一致）。
+            if TU_IDENTITY_MACROS.contains(&name.as_str()) {
+                hash ^= u64::from(def.params.is_some());
+                hash = hash.wrapping_mul(0x100000001b3);
+                continue;
+            }
             if let Some(params) = &def.params {
                 for param in params {
                     hash ^= Self::hash_content(param);
@@ -8112,17 +8636,32 @@ impl Preprocessor {
         Some(cache_dir.join(cache_name))
     }
 
-    /// 校验缓存条目的依赖闭包是否新鲜: 逐个重读依赖文件并比对内容哈希。
-    /// 任一文件变更/缺失即失效 (依赖感知失效, 修复传递依赖陈旧问题)。
-    fn cache_deps_fresh(deps: &[(String, u64)]) -> bool {
+    /// 缓存条目的依赖闭包是否新鲜：逐个比对依赖文件的内容哈希（任一文件变更/缺失即失效，
+    /// 这是依赖感知失效，修的是传递依赖陈旧问题）。
+    ///
+    /// **同一个路径本轮只读一次**：一次冷读内核 TU 要回放 ~1300 个缓存条目，每个条目又带
+    /// 几百个依赖，不记忆就是上百万次全文件 `read+hash`（`perf` 实冷读 `net/core/sock.c`
+    /// 量到 175 s，`memcmp`/`memmove`/`malloc` 合计占一半）。记忆的有效期 = 一个
+    /// `Preprocessor` 实例 = 一次编译；单次编译内源文件不会变，与旧实现「读磁盘当前内容
+    /// 比对」在本轮里等价。拿不到内容仍判不新鲜（与旧行为一致）。
+    fn cache_deps_fresh(&self, deps: &[(String, u64)]) -> bool {
+        let mut memo = self.dep_fresh_memo.borrow_mut();
         for (path, hash) in deps {
             // 内置 intrinsics 头为伪路径 (编译期内置, 内容恒定), 跳过实读
             if path.starts_with("<builtin:") {
                 continue;
             }
+            if let Some(&known) = memo.get(path.as_str()) {
+                if known != *hash {
+                    return false;
+                }
+                continue;
+            }
             match fs::read_to_string(path) {
                 Ok(content) => {
-                    if Self::hash_content(&content) != *hash {
+                    let got = Self::hash_content(&content);
+                    memo.insert(path.clone(), got);
+                    if got != *hash {
                         return false;
                     }
                 },
@@ -8232,22 +8771,107 @@ impl Preprocessor {
         a.params == b.params && a.body == b.body && a.variadic == b.variadic
     }
 
+    /// 本轮某个身份宏的定义指纹；未定义记 0（FNV-1a 对真实定义不会出 0，当哨兵用）。
+    fn identity_def_hash(&self, name: &str) -> u64 {
+        let def = match self.macros.get(name) {
+            None => return 0,
+            Some(d) => d,
+        };
+        let mut h = Self::hash_content(name);
+        if let Some(params) = &def.params {
+            for p in params {
+                h ^= Self::hash_content(p);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h ^= Self::hash_content(&def.body);
+        h ^ u64::from(def.variadic)
+    }
+
+    /// 展开/条件求值读到某个名字时调用：只有身份宏才记账。
+    fn note_identity_read(&self, name: &str) {
+        if !TU_IDENTITY_MACROS.contains(&name) {
+            return;
+        }
+        let hash = self.identity_def_hash(name);
+        let mut stack = self.identity_scopes.borrow_mut();
+        if let Some(top) = stack.last_mut() {
+            match top.reads.iter_mut().find(|(n, _)| n == name) {
+                Some(slot) => {
+                    if slot.1 != hash {
+                        // 同一个名字在本层被读到过两个值（文件自己重定义了它）：
+                        // 分不清哪个才是「外来的」，这一份就不落缓存。
+                        top.conflicted = true;
+                    }
+                },
+                None => top.reads.push((name.to_string(), hash)),
+            }
+        }
+    }
+
+    /// 命中前的校：条目记下的每一条读数都必须等于本轮的定义指纹。
+    fn identity_reads_match(&self, recorded: &[(String, u64)]) -> bool {
+        recorded
+            .iter()
+            .all(|(name, hash)| self.identity_def_hash(name) == *hash)
+    }
+
+    /// 回放一个命中条目时，把它记的读数并入本层（父层因此继承子层的依赖）。
+    fn adopt_identity_reads(&self, recorded: &[(String, u64)]) {
+        let mut stack = self.identity_scopes.borrow_mut();
+        if let Some(top) = stack.last_mut() {
+            for (name, hash) in recorded {
+                match top.reads.iter_mut().find(|(n, _)| n == name) {
+                    Some(slot) => {
+                        if slot.1 != *hash {
+                            top.conflicted = true;
+                        }
+                    },
+                    None => top.reads.push((name.clone(), *hash)),
+                }
+            }
+        }
+    }
+
+    /// 本层现在能否落一份缓存：取该写入的读数；本层 conflicted 时返 `None`（不落）。
+    fn take_identity_for_save(&self) -> Option<Vec<(String, u64)>> {
+        let stack = self.identity_scopes.borrow();
+        stack.last().filter(|s| !s.conflicted).map(|s| s.reads.clone())
+    }
+
     fn load_from_cache(&self, cache_path: &Path) -> Option<MacroCacheData> {
         let content = fs::read_to_string(cache_path).ok()?;
         let mut lines = content.lines();
-
-        // 第一行: 标记
-        if lines.next()? != "DCC_CACHE_V7" {
+    
+        // 第一行: 标记（V8：多了 IDREAD 段，旧条目直接当 miss）
+        if lines.next()? != "DCC_CACHE_V8" {
             return None;
         }
-
+    
         // 第二行: COUNTER_DELTA <n> — 本头文件处理期间的 __COUNTER__ 消耗量
         let line = lines.next()?;
         let counter_delta = {
             let rest = line.strip_prefix("COUNTER_DELTA\t")?;
             rest.trim().parse().unwrap_or(0)
         };
-
+    
+        // IDREAD 段: <宏名>\t<当时该宏的定义指纹（未定义记 0）>。空段是常态（绝大多数
+        // 文件从不读身份宏），那时候条目在所有 TU 里都可复用。
+        let mut identity = Vec::new();
+        if lines.next()? != "IDREAD" {
+            return None;
+        }
+        for line in lines.by_ref() {
+            if line == "END_IDREAD" {
+                break;
+            }
+            if let Some((n, h)) = line.split_once('\t') {
+                if let Ok(hash) = u64::from_str_radix(h, 16) {
+                    identity.push((n.to_string(), hash));
+                }
+            }
+        }
+    
         // DEPS 段: <path>\t<hash_hex>
         let mut deps = Vec::new();
         if lines.next()? != "DEPS" {
@@ -8340,7 +8964,15 @@ impl Preprocessor {
             }
         }
 
-        Some((output, macros, removed, deps, counter_delta, line_spans))
+        Some((
+            output,
+            macros,
+            removed,
+            deps,
+            counter_delta,
+            line_spans,
+            identity,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8348,14 +8980,21 @@ impl Preprocessor {
         &self,
         cache_path: &Path,
         output: &str,
-        macros: &HashMap<String, MacroDef>,
+        macros: &FastStrMap<MacroDef>,
         removed: &[String],
         deps: &[(String, u64)],
         counter_delta: u32,
         line_spans: &[(u32, String, u32, u32)],
+        identity: &[(String, u64)],
     ) {
-        let mut content = String::from("DCC_CACHE_V7\n");
+        let mut content = String::from("DCC_CACHE_V8\n");
         content.push_str(&format!("COUNTER_DELTA\t{}\n", counter_delta));
+        // 本条输出真读到过的身份宏（名字 + 当时定义指纹），命中时逐项校。
+        content.push_str("IDREAD\n");
+        for (name, hash) in identity {
+            content.push_str(&format!("{}\t{:x}\n", name, hash));
+        }
+        content.push_str("END_IDREAD\n");
         content.push_str("DEPS\n");
         for (p, h) in deps {
             content.push_str(&format!("{}\t{:x}\n", p, h));
@@ -8427,7 +9066,7 @@ impl Drop for CacheRootGuard {
 #[cfg(test)]
 mod tests {
     use super::preprocess;
-    use super::{set_cache_root, MacroDef, PchBundle, PchOptions};
+    use super::{set_cache_root, MacroDef, PchBundle, PchOptions, Preprocessor};
     use crate::cli::{Abi, Arch, Os, StdMode, TargetTriple};
     use std::path::PathBuf;
 
@@ -8438,6 +9077,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }
     }
 
@@ -8918,6 +9558,19 @@ mod tests {
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("\"malloc(sizeof(int) + 1)\""), "output: {output}");
+    }
+
+    /// `#` 对已转义的字面量必须双写反斜杠: `\"` → `\\\"`.
+    /// 只补引号不补反斜杠会把内层字面量提前截断再重新分词, 余下的字符
+    /// 变成游离 token (`intel_cdclk.c` 的 `drm_WARN_ON()` 嵌套
+    /// `BUILD_BUG_ON_ZERO` 消息, 43 条 E0001/E0006).
+    #[test]
+    fn stringify_escapes_backslash_inside_literals() {
+        assert_eq!(Preprocessor::stringify_arg(r#"a "b\"c" d"#), r#""a \"b\\\"c\" d""#);
+        // 字符常量只双写 `\`, `'` 不转义 (与 GCC 一致)
+        assert_eq!(Preprocessor::stringify_arg(r"'\''"), r#""'\\''""#);
+        // 字面量外面的反斜杠 (`.S` 的 GAS 参数引用) 保持单个
+        assert_eq!(Preprocessor::stringify_arg(r"\reg"), r#""\reg""#);
     }
 
     /// M19: __COUNTER__ 单调递增, 每次访问自增
@@ -10193,11 +10846,17 @@ n\
     }
 
     /// 续接行合并时记录覆盖的物理行范围 (phys_start/phys_end)
+    ///
+    /// 拼接结果必须是 `ab` 而不是 `a b`：C11 5.1.1.2p2 删除的是「反斜杠 + 换行」
+    /// 这两个字符，不是换成空白。旧实现补一个空格，`#define S "abc\` + `def"`
+    /// 因此变成 `"abc def"`（值多一个空格）；更糟的是引号里的续行根本不被识别，
+    /// 宏体截在行尾、续行作为游离 token 落到文件作用域（gcc-torture 的
+    /// `compile/limits-stringlit.c` 报 `E0003: expected type, got Number`）。
     #[test]
     fn logical_lines_track_physical_spans() {
         let lines = super::Preprocessor::logical_lines("a\\\nb\nc\n", false);
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0].text, "a b");
+        assert_eq!(lines[0].text, "ab");
         assert_eq!(lines[0].phys_start, 1);
         assert_eq!(lines[0].phys_end, 2);
         assert_eq!(lines[1].text, "c");
@@ -10207,6 +10866,42 @@ n\
         assert_eq!(lines[2].text, "");
         assert_eq!(lines[2].phys_start, 4);
         assert_eq!(lines[2].phys_end, 4);
+    }
+
+    /// 【未闭合块注释不提前结束 directive】内核 `include/linux/printk.h` 的
+    /// `__printk_index_emit` 在宏体里夹了一段跨行注释，注释中间行**不带**行尾 `\`。
+    /// gcc 把未闭合的注释当成「逻辑行还没完」，于是整段宏体属于同一个 `#define`；
+    /// 旧实现只看行尾 `\`，在 `/*` 那行就结束定义，后半截宏体以游离 token 落到文件
+    /// 作用域（症状：`error[E0003]: expected type, got RBrace` 指向 `printk.h:441` 的
+    /// 巨列号，同时调用点展开被挖空），直接卡住 `scripts/mod/devicetable-offsets.s`。
+    #[test]
+    fn unterminated_block_comment_continues_the_directive() {
+        // printk.h 的原形状：注释中间行不带行尾 `\`，其余每一行（含 `*/` 行与 `}` 行）都带，
+        // 只有最后的 `} while (0)` 不带 —— 它才是这条 directive 的结尾。
+        let lines = super::Preprocessor::logical_lines(
+            "#define M(x) \\\n\tdo { \\\n\t\tif (1) { \\\n\t\t\t/*\n\t\t\t * one\n\t\t\t * two\n\t\t\t */ \\\n\t\t\tstatic const int e = 1; \\\n\t\t} \\\n\t} while (0)\n",
+            false,
+        );
+        // 整段 `#define` 必须是**一条**逻辑行（旧行为：在 `/*` 那行断开，后面泄露成多行）。
+        let def = lines.iter().find(|l| l.text.starts_with("#define")).expect("有 #define 逻辑行");
+        assert!(
+            def.text.contains("static const int e = 1;"),
+            "宏体必须吃进注释之后的那行，实际: {:?}",
+            def.text
+        );
+        assert!(
+            !def.text.contains('\\'),
+            "续行符必须被摘掉（泄露到输出里就是上次真树报同一错的原因），实际: {:?}",
+            def.text
+        );
+        // 注释之后的 `} while (0)` 不属于这条 directive（它在 `}` 行结束），但不能
+        // 以游离 token 的形式单独成为一行。
+        let stray: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.text.trim() == "} while (0)")
+            .map(|l| l.text.as_str())
+            .collect();
+        assert!(stray.is_empty(), "宏体尾巴泄露成了独立逻辑行: {:?}", stray);
     }
 
     /// 续接行后的 #error 必须报物理行号 (bug 2 回归)

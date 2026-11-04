@@ -829,6 +829,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }))
     }
 

@@ -1079,7 +1079,16 @@ mod tests {
         );
         let parsed = parse_object(&obj, "min.o").expect("parse");
         assert_eq!(parsed.machine, 62);
-        assert_eq!(parsed.sections.len(), 11); // 1 null + 6 standard + 1 rela.text + symtab + strtab + shstrtab
+        // 1 null + 6 standard + 1 rela.text + symtab + strtab + shstrtab + .note.GNU-stack。
+        // 最后一条是 GAS/GCC 都会发的那节（缺它 ⇒ `ld` 把产物当「implied executable
+        // stack」，除了刷警告还把 PT_GNU_STACK 标成 RWE），它只能**追加**在固定节表
+        // 末尾 —— `.text`=1 … `.tbss`=6、自定义节从 7 起，`codegen/x86_64/elf/resolve.rs`
+        // 里成片的 `7 + sec_idx` 依赖这套坐标。字段级判据见集成用例
+        // `gnu_stack_note_section_matches_gas`。
+        assert_eq!(parsed.sections.len(), 12);
+        let last = parsed.sections.last().expect("section");
+        assert_eq!(last.name, ".note.GNU-stack");
+        assert_eq!(last.flags, 0, ".note.GNU-stack 不得带任何节标志");
         let answer = parsed
             .symbols
             .iter()

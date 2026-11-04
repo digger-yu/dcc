@@ -45,6 +45,10 @@ pub struct Codegen {
     pub labels: HashMap<String, u64>,
     pub current_asm_line: usize,
     pub current_asm_src_line: u32,
+    /// 正在发射的那条内联汇编行**替换完操作数之后的原文**。
+    /// 只给报障用（`DCC_ASM_TRACE`）：编码器的拒收消息里只有操作数形态，
+    /// 没有锚回源码的线索时只能靠猜测（`%gs:` 前缀 / `%c` 立即数 / 无基址符号……）。
+    pub current_asm_text: String,
     pub diagnostics: Vec<Diagnostic>,
     /// 预处理输出行号 → 源文件位置的映射 (诊断定位用)
     pub line_map: Vec<LineSpan>,
@@ -285,6 +289,13 @@ pub struct Codegen {
     /// 在**规划期**建好（满足 H1：家在发射前定完），内容不随发射变化；每个条目就是一个
     /// 住在 caller-saved 号里的自动绑定变量：它的号、它的槽偏移与它的宽度。
     pub ext_home_saves: Vec<ExtHomeSave>,
+    /// 当前正开着的「内联 asm 体内 `call`」守护层数。
+    ///
+    /// `call_label` 的 E1136 守卫用得上它：那条守卫防的是「延伸池家静默被一次调用毁掉」，
+    /// 而 asm 体内的 call 已由 `asm/emit.rs` 的 push/pop 守护区间（或本条 asm 自己的操作数
+    /// 写回路）接手，不是静默毁。只有每个家都有着落时才计数（见
+    /// `Codegen::asm_call_homes_covered`），否则守卫照常报。
+    pub asm_call_window: usize,
     pub max_expr_depth: u32, // 最大表达式嵌套深度
     pub temp_slots: i32,     // 帧临时槽数量 (用于变量偏移计算)
     /// 已注册固定栈对象占用的 8 字节槽数。
@@ -330,6 +341,30 @@ pub struct Codegen {
     /// MEMORY 聚合), 整体错位 (pr92904: `v.b = f1(4,...)` 的 __int128
     /// 高半读成栈上垃圾)。
     pub stack_shift: i64,
+    /// 单口径的「本函数体内 rsp 比**帧线**低了多少字节」的账（正 = 更低；帧线 =
+    /// 序言分配完帧之后的 rsp，即 `%r13 - frame_size`）。
+    ///
+    /// 为什么不复用 [`Self::stack_shift`]：那张账对 `push` 记 +8、对 `sub rsp,N` 记
+    /// `-N`（见 `rsp_imm_delta` 与上面的字段注释），两个方向是反的。它只被用来判
+    /// 「call 点 rsp 是否 ≡ 0 (mod 16)」，而 8 与 16 的倍数在那个判据下同余，所以符号
+    /// 混着也没出事；这里要判的是**绝对等于零**，符号不能混。
+    /// `None` = 不在记账（序言/尾声期间），或已经证不了（遇到无法归类的发射、
+    /// 或在账不为 0 时跨过标号/跳转 —— 线性累加对跨越窗口的控制流不设防）。
+    pub rsp_below_frame_line: Option<i64>,
+    /// 本编译单元里是否出现过「把方向标志置位」的内联汇编（模板含 `std` 这个词）。
+    /// 判据来自 [`crate::ast_asm::collect_asm_facts`]，在每个函数的发射前钩子里并入。
+    ///
+    /// 它只服务一件事：决定 `rep movs`/`rep stos` 前面那条 `cld` 还要不要发。按
+    /// x86-64 SysV（与内核入口代码）的约定 DF 恒为 0，gcc 就是照这个约定发的
+    /// —— 实测 gcc 参照树 120 个 `.o` 里 266 条 `rep movs/stos`、**0** 条 `cld`，
+    /// 而我们同形状发 126 条 `cld`（objtool 因此报 `redundant CLD`，全树 2 207 条）。
+    /// 所以「本函数体内没有任何 asm 能弄脏 DF」时这条 `cld` 是多余的一条指令。
+    ///
+    /// 为什么是**单调或**而不是每函数重置：嵌套函数的体是在外层体内发射的，覆盖式赋值
+    /// 会把内层的fact漏给外层的后续发射；要么就得在外层重跑一次前置事实。取单调方向
+    /// 只是「该发的照发」，不改变任何正确性判据（一个 TU 里出现一次 `std` 就整体退回
+    /// 旧行为；内核里这种 asm 实测为零）。
+    pub asm_sets_direction: bool,
     /// 向量 binop 操作数物化槽号。嵌套向量 binop 时每层结果槽 R 的
     /// 操作数物化到 R+1 (XMM 快速路径 R+1/R+2), 避免内层子表达式
     /// 结果覆盖外层已写入的结果槽 (pr23135: 链式 k0+k1+k3+...
@@ -413,6 +448,15 @@ pub struct Codegen {
     /// 旧实现混合 8/16/32B 分配时槽位互相重叠, 且随调用次数单调增长
     /// 越过 frame_size 覆盖动态 call outgoing 区。
     pub sret_watermark: i64,
+    /// 诊断专用：本函数内每次 `alloc_sret_slot` 的（分配前水位, 请求字节, 发射站点 file:line）。
+    ///
+    /// 为什么要有它：帧预算的两侧口径不同——规划期 `max_sret_bytes` 是「逐条语句取最大值」，
+    /// 发射期是一个**只增不减的 bump**（只有三处 save/restore）。两者对不上时报的就是
+    /// E1128，而以前只能告诉你「越了帧底」，不能告诉你是**哪个发射站点**没被扫描登记（实测
+    /// `block/blk-mq.o` 的 `blk_mq_extract_queue_requests`：`sret_need=0` 而生成期已分了一个
+    /// 16B 槽，只能猜）。`#[track_caller]` 把调用点变成编译期常量，不产任何产物字节差异；
+    /// `alloc_local` 也标同一个属性，否则日志里只会看到中转函数自己。
+    pub sret_site_log: Vec<(i64, usize, &'static str, u32)>,
     /// sret/物化槽区顶界 (r13 相对偏移, 紧邻变量区底)。槽自该地址
     /// 向下分配, 帧规划保证下界不越过 vec/bf/帧底固定区顶界。
     pub sret_region_base: i64,
@@ -454,6 +498,13 @@ pub struct Codegen {
     pub func_param_types: HashMap<String, Vec<Type>>,
     pub current_func_is_nested: bool, // 当前编译的函数是否是嵌套函数
     pub local_labels: std::collections::HashSet<String>, // 当前函数体内定义的标签名集合
+    /// 嵌套函数里做**非局部 goto** 时，目标标签所在父函数的帧长。
+    ///
+    /// 父函数的尾声是 `add $帧长,%rsp; pop %r13; ret`（objtool 要的形态），
+    /// 从子函数跳进去前必须把 `%rsp` 拉回父帧底，否则那句 `add` 加完就跑到
+    /// 帧外、`pop` 拿到垃圾。父帧长在父函数序言处已解算好，子函数就地编译
+    /// （`functions.rs` 的嵌套声明分派）时把它记在这里。
+    pub nonlocal_parent_frame: Option<i64>,
     /// 当前函数标了 __attribute__((returns_nonnull)): 返回时需检查 rax 非空
     pub current_returns_nonnull: bool,
     /// 当前函数标了 __attribute__((noreturn)) / _Noreturn:
@@ -1112,6 +1163,7 @@ impl Codegen {
             auto_homes: HashMap::new(),
             home_overrides: HashMap::new(),
             ext_home_saves: Vec::new(),
+            asm_call_window: 0,
             max_expr_depth: 0,
             temp_slots: 0,
             var_map_total_slots: 0,
@@ -1123,6 +1175,8 @@ impl Codegen {
             cur_func_is_naked: false,
             bf_rmw_depth: 0,
             stack_shift: 0,
+            rsp_below_frame_line: None,
+            asm_sets_direction: false,
             vector_op_slot: 1,
             cur_func_over_align: 0,
             cur_func_anchor_off: 0,
@@ -1173,6 +1227,7 @@ impl Codegen {
             variadic_reg_save_offset: 0,
             current_sret_offset: None,
             sret_watermark: 0,
+            sret_site_log: Vec::new(),
             sret_region_base: 0,
             nested_funcs: HashMap::new(),
             nested_func_renames: HashMap::new(),
@@ -1190,6 +1245,7 @@ impl Codegen {
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
             local_labels: std::collections::HashSet::new(),
+            nonlocal_parent_frame: None,
             current_returns_nonnull: false,
             current_is_noreturn: false,
             current_no_instrument: false,
@@ -1253,6 +1309,7 @@ impl Codegen {
             asm_line_rejected: false,
             current_asm_line: 0,
             current_asm_src_line: 0,
+            current_asm_text: String::new(),
             diagnostics: Vec::new(),
             line_map: Vec::new(),
             source_name: String::new(),
@@ -2569,7 +2626,10 @@ impl Codegen {
         // 后处理: 将自定义 section 函数的代码从 .text 提取到 extra_sections
         // 记录函数在自定义 section 内的偏移 (用于符号表)
         let mut custom_func_offsets: HashMap<String, (u16, u64)> = HashMap::new(); // func_name → (section_idx+5, symbol_offset)
-        let mut custom_func_ranges: Vec<(u64, u64, usize, u64, u64)> = vec![]; // func_start, emitted_start, emitted_size, sec_idx, sec_off
+        let mut custom_func_ranges: Vec<(u64, u64, usize, u64, u64)> = vec![];
+        // 字段依次是：func_start(u64)、emitted_start(u64)、emitted_size(usize)、
+        // sec_idx(u64)、sec_off(u64)。拿错字段时编译不报错只会静默错值，所以把含义写在
+        // 声明旁边而不是一行行尾注释里。
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() {
@@ -2752,9 +2812,25 @@ impl Codegen {
             }
         }
 
+        // 搬迁区间表的四个字段必须是 `(发射起点, 发射长度, 目标节下标, 目标节内起点)`：
+        // `final_text_loc` 就是按这个含义读它的（`pos >= start && pos < start + size`，
+        // 节号取 `sec_idx + 7`）。以前这里写的是 `(func_start, emitted_start, emitted_size,
+        // sec_idx)` —— 整行往后错了一格：起点用了函数起点、长度用了发射起点、节号用了
+        // **发射长度**、节内偏移用了节号。于是 `final_text_loc` 算出来的「最终节」是一堆
+        // 不存在的节号（探针里看到的 `sec 359`/`sec 353` 就是 `emitted_size + 7`），两边
+        // 又总是「相等」⇒ 跨节的跳转被当成同节而**写死位移**，也不发重定位。链接期表现为
+        // objtool `can't find jump dest instruction`（实测 `arch/x86/kernel/traps.o` 的
+        // `.altinstr_replacement+0x2f/0x34/0x39/0x3e`，与 bugs.o/events core.o/xstate.o 同一根因）。
         let move_ranges: Vec<(u64, u64, usize, u64)> = custom_func_ranges
             .iter()
-            .map(|(fs, s, e, i, _)| (*fs, *s, *e, *i))
+            .map(|(_, emitted_start, emitted_size, sec_idx, sec_off)| {
+                (
+                    *emitted_start,
+                    *emitted_size as u64,
+                    *sec_idx as usize,
+                    *sec_off,
+                )
+            })
             .chain(self.pushsection_code_ranges.iter().copied())
             .collect();
 
@@ -2896,6 +2972,34 @@ impl Codegen {
                 let (src_sec, src_at) = Self::final_text_loc(p.at, move_ranges);
                 let src_next = src_at + (p.next_ip - p.at);
                 let (dst_sec, dst_pos) = Self::final_text_loc(dst, move_ranges);
+                // 报障用的逐跳决策（`DCC_DBG_XJUMP=1`）：每条待回填的本地跳转都打一行，
+                // 重点是「两边命中哪个区间、走了写死位移还是发重定位」。本轮就是靠它
+                // 抓到 `move_ranges` 字段错位的（两边总是被算成同一个不存在的节号，
+                // 于是跨节跳转全被写死位移），靶子是 `arch/x86/kernel/traps.o` 的
+                // `.altinstr_replacement+0x2f/0x34/0x39/0x3e`。只读不改产物字节。
+                if std::env::var_os("DCC_DBG_XJUMP").is_some() {
+                    let in_range = move_ranges
+                        .iter()
+                        .position(|(s, z, _, _)| p.at >= *s && p.at < *s + *z);
+                    let dst_in = move_ranges
+                        .iter()
+                        .position(|(s, z, _, _)| dst >= *s && dst < *s + *z);
+                    eprintln!(
+                        "XJUMP target={} at={:#x} src={:#x}(sec {}) dst={:#x} dst_pos={:#x}(sec {}) disp={:#x} 命中区间={:?}/{:?} 分支={} relocatable={}",
+                        p.target,
+                        p.at,
+                        src_next,
+                        src_sec,
+                        dst,
+                        dst_pos,
+                        dst_sec,
+                        (dst_pos as i64) - (src_next as i64),
+                        in_range,
+                        dst_in,
+                        if src_sec == dst_sec { "写死位移" } else { "发重定位" },
+                        self.relocatable
+                    );
+                }
                 let rel_off = p.disp_offset as usize;
                 if src_sec == dst_sec {
                     let rel = (dst_pos as i64) - (src_next as i64);
@@ -2928,6 +3032,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }))
     }
 

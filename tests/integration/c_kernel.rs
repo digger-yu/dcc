@@ -643,8 +643,26 @@ fn kcov_fuzzer_trace_cmp() {
         "trace-cmp should still emit trace_pc entry calls: {asm_text}"
     );
     assert!(
-        asm_text.contains("__sanitizer_cov_trace_pc_guard"),
-        "trace-cmp should still emit edge guard calls: {asm_text}"
+        !asm_text.contains("__sanitizer_cov_trace_pc_guard"),
+        "trace-cmp 单独不应再发边 guard：guard 数组是往函数体里塞 `static` 声明，会把所有\n       `__always_inline` 助手的体内联否决掉（allmodconfig 的 jump-label 阻塞根因）。\n       发 guard 是 `trace-pc-guard` 的活。实测 asm 产物:\n{asm_text}"
+    );
+    // 反向锁定：显式要 `trace-pc-guard` 时 guard 必须回来（libFuzzer/syzkaller 依赖它）。
+    let asm_path2 = dir.join(format!("dcc-kcov-cmp-guard-{}.s", std::process::id()));
+    let src_path2 = dir.join(format!("dcc-kcov-cmp-guard-{}.c", std::process::id()));
+    fs::write(&src_path2, source).expect("write C fixture");
+    let out2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize-coverage=trace-cmp,trace-pc-guard", "-S", "-o"])
+        .arg(&asm_path2)
+        .arg(&src_path2)
+        .output()
+        .expect("run dcc");
+    let asm2 = fs::read_to_string(&asm_path2).unwrap_or_default();
+    let _ = fs::remove_file(src_path2);
+    let _ = fs::remove_file(asm_path2);
+    assert!(out2.status.success(), "{}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        asm2.contains("__sanitizer_cov_trace_pc_guard"),
+        "trace-pc-guard 应发边 guard 调用，实测没有:\n{asm2}"
     );
 }
 
@@ -1581,4 +1599,2496 @@ void probe_cond(void)
     }
     let _ = fs::remove_file(&sp);
     let _ = fs::remove_file(&op);
+}
+
+/// `&数组[形参]` 里的形参是**下标**，不是「被取址的对象」，不得因此否决表达式内联。
+///
+/// 缺陷现场：`kernel/sched/core.c` 在 `__perf_sw_enabled()` 上炸出
+/// `E0311: ... operand 0 with immediate-only constraint "i" has no compile-time constant
+/// value (expression: __inl9098$_key, in function __perf_sw_enabled)`。
+/// `subst_params_mut` 的 `AddrOf` 把「正在 `&` 下面」一路带进 `Index` 的两个子表达式，
+/// 于是 `return static_key_false(&perf_swevent_enabled[swevt]);` 被判成「形参被取址」
+/// （判决行：`REJECT __perf_sw_enabled (形参被取址 (&p)，表达式内联给不了独立槽位)`）。
+/// `__always_inline` 被拒 ⇒ DCE 保留一份外联副本 ⇒ 副本里 `swevt` 是运行期形参，
+/// `"i"(&perf_swevent_enabled[swevt])` 无从编码。
+///
+/// 判据就是「能编过 + 不留副本」：下标换成实参后 `&keys[3]` 是链接期常量，
+/// `__jump_table` 该照常成立。
+#[test]
+#[cfg(unix)]
+fn array_index_param_under_addressof_still_inlines() {
+    let source = r#"
+struct static_key { int enabled; };
+
+extern struct static_key keys[4];
+
+static __attribute__((always_inline)) _Bool
+arch_static_branch(struct static_key *const key, const _Bool branch)
+{
+	__asm__ goto("1: jmp %l[l_yes]\n\t"
+		     ".pushsection __jump_table, \"aw\"\n\t"
+		     ".balign 8\n\t"
+		     ".long 1b-.\n\t"
+		     ".quad %c0+%c1\n\t"
+		     ".quad %l[l_yes]\n\t"
+		     ".popsection\n\t"
+		     : : "i"(key), "i"(branch) : : l_yes);
+	return 0;
+l_yes:
+	return 1;
+}
+
+static __attribute__((always_inline)) _Bool
+key_false(struct static_key *key)
+{
+	return arch_static_branch(key, 0);
+}
+
+/* 体里有 `&keys[idx]`：idx 只贡献下标值。 */
+static __attribute__((always_inline)) _Bool
+sw_enabled(int idx)
+{
+	return key_false(&keys[idx]);
+}
+
+struct task_struct { int sched_migrated; };
+
+static inline void sched_in(struct task_struct *task)
+{
+	if (sw_enabled(3) && task->sched_migrated)
+		task->sched_migrated = 0;
+}
+
+void caller(struct task_struct *task)
+{
+	sched_in(task);
+}
+"#;
+    let pid = std::process::id();
+    let sp = std::env::temp_dir().join(format!("dcc-idxaddr-{pid}.c"));
+    let op = std::env::temp_dir().join(format!("dcc-idxaddr-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fno-PIE", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "编译失败（下标被误判成取址）: {stderr}");
+    let nm = Command::new("nm").arg(&op).output().expect("nm");
+    let syms = String::from_utf8_lossy(&nm.stdout).to_string();
+    for dead in ["sw_enabled", "key_false", "arch_static_branch"] {
+        assert!(
+            !syms.lines().any(|l| l.split_whitespace().last() == Some(dead)),
+            "{dead} 仍留着 out-of-line 副本（说明 always_inline 没展开）:\n{syms}"
+        );
+    }
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+}
+
+/// `.field = "字符串"` 初始化 char 数组字段（指定初始化器）必须把 `init_idx` 前移。
+///
+/// 缺陷现场：`fs/proc/kcore.c` 的
+/// `struct elf_prpsinfo prpsinfo = { .pr_sname = 'R', .pr_fname = "vmlinux" };`
+/// 让 dcc 直接吃 4.5 GiB 被 OOM 杀掉（`rc=137`）。`gen_init_list_at` 的 struct 分支
+/// 里，`InitItem::Expr` 那条字符串 arm 有 `init_idx += 1`，而**指定初始化器**落到
+/// 的同义 arm 在 `continue` 前漏了它；循环体底部的 `init_idx += 1` 被 `continue` 跳过，
+/// 于是同一个初始化项被无限重放（每圈重发一遍字符串的逐字节 store）——
+/// gdb 抓到的空转点就是那条 `mov_imm`，`(u64, Insn)` 缓冲 1.2 → 2.4 → 4.8 GiB 翻倍。
+///
+/// 判据两条：编译必须在有界时间内返回（死循环会被判 HANG），且产物里真写着
+/// `vmlinux` 的七个字节（漏前移不会报错，只会挂死，所以内容判据用于防「改了就退出但没写对」）。
+#[test]
+#[cfg(unix)]
+fn designated_string_init_of_char_array_field_terminates() {
+    let source = r#"
+struct elf_prpsinfo {
+	char pr_sname;
+	char pr_fname[16];
+	char pr_psargs[8];
+};
+
+int prpsinfo_probe(void)
+{
+	struct elf_prpsinfo p = {
+		.pr_sname = 'R',
+		.pr_fname = "vmlinux",
+	};
+	return p.pr_fname[0] + p.pr_sname;
+}
+"#;
+    let pid = std::process::id();
+    let sp = std::env::temp_dir().join(format!("dcc-dsgstr-{pid}.c"));
+    let op = std::env::temp_dir().join(format!("dcc-dsgstr-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    // 有界编译：本地循环体里的死循环不会自己退出，`Command::output()` 会把整个
+    // `cargo test` 吊死。上限给足（编译本身是毫秒级），超时直接判失败。
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fno-PIE", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dcc");
+    let limit = std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(st) => break st,
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "HANG: 指定初始化器的字符串字段在 {limit:?} 内没编完 \
+                         （`init_idx` 漏前移导致同一项无限重放）"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            },
+        }
+    };
+    let out = child.wait_with_output().expect("collect dcc output");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(status.success(), "编译失败: {stderr}");
+
+    // 内容判据：字符串的每个字节都要作为立即数出现在反汇编里（dcc 逐字节 `mov $imm`）。
+    let dis = Command::new("objdump")
+        .args(["-d", "--no-show-raw-insn"])
+        .arg(&op)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dis.stdout).to_string();
+    for c in "vmlinux".bytes() {
+        let imm = format!("$0x{c:x}");
+        assert!(
+            text.contains(&imm),
+            "`vmlinux` 的字节 {imm} 没进产物（指定初始化器没写内容）:\n{text}"
+        );
+    }
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+}
+
+/// `-fcf-protection=branch`（内核 `arch/x86/Makefile:102` 用 `cc-option` 探测后必传）必须真在
+/// 函数入口发 `endbr64`。dcc 以前「接受但忽略」，所以我方产物里 C 代码的 endbr64 计数是 0、
+/// gcc 参考产物是 2（`arch/x86/mm/fault.o`），而 objtool `--ibt` 只报 WARN 不挡构建，缺陷一直
+/// 藏着；真跑到 IBT 硬件上，任何间接调用都会 `#CP`。
+///
+/// 形态对齐 gcc：`-fpatchable-function-entry=16,16` 的 16 字节 nop 前缀 → 函数符号 → `endbr64`
+/// （`arch/x86/mm/fault.o` 实测正是这个形状，objdump 里 `endbr64` 出现在 `<sym>:` 的下一行）。
+#[test]
+#[cfg(unix)]
+fn cf_protection_emits_endbr64_after_patchable_prefix() {
+    let src = std::env::temp_dir().join(format!("dcc-endbr-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "int f(int x) { return x + 1; }\nint g(void) { return f(2); }\n",
+    )
+    .expect("write endbr fixture");
+    let dir = std::env::temp_dir();
+    let build = |tag: &str, extra: &[&str]| -> String {
+        let obj = dir.join(format!("dcc-endbr-{}-{}.o", std::process::id(), tag));
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-O1"])
+            .args(extra)
+            .arg("-o")
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            out.status.success(),
+            "{tag} 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let dis = Command::new("objdump")
+            .arg("-d")
+            .arg(&obj)
+            .output()
+            .expect("objdump");
+        let text = String::from_utf8_lossy(&dis.stdout).to_string();
+        let _ = fs::remove_file(&obj);
+        text
+    };
+    // 判据一：branch 档下每个函数入口（6 nop 前缀之后）都是 endbr64。
+    let ibt = build("ibt", &["-fcf-protection=branch", "-fpatchable-function-entry=16,16"]);
+    for sym in ["<f>:", "<g>:"] {
+        let at = ibt
+            .find(sym)
+            .unwrap_or_else(|| panic!("产物里没有函数符号 {sym}:\n{ibt}"));
+        let next = ibt[at..].lines().nth(1).unwrap_or("");
+        assert!(
+            next.contains("endbr64"),
+            "{sym} 入口第一条指令不是 endbr64（实际 {next}）:\n{ibt}"
+        );
+    }
+    assert_eq!(
+        ibt.matches("endbr64").count(),
+        2,
+        "endbr64 条数应等于函数个数:\n{ibt}"
+    );
+    // 判据二：没传 -fcf-protection、或显式 none，都不许凭空发 endbr64（否则普通产物字节会变）。
+    let plain = build("plain", &["-fpatchable-function-entry=16,16"]);
+    assert_eq!(plain.matches("endbr64").count(), 0, "未开启 CFI 却发了 endbr64:\n{plain}");
+    let none = build(
+        "none",
+        &["-fcf-protection=none", "-fpatchable-function-entry=16,16"],
+    );
+    assert_eq!(none.matches("endbr64").count(), 0, "none 档却发了 endbr64:\n{none}");
+    let _ = fs::remove_file(&src);
+}
+
+/// `arch/x86/include/asm/irq_stack.h` 的 `call_on_stack` 形状：`register void *tos asm("r11")`
+/// 配 `"+r"(tos)` 输出 + `[tos] "r"(tos)` 输入。
+///
+/// `arch/x86/mm/fault.o` 曾在这里硬失败（`inline asm has more GP operands than free
+/// registers`）：`"r"` 与 `"+r"` 引用同一个变量时，后端把输出/输入各当一个新号去 `alloc_gp`，
+/// 13 个号的池被白吃两倍。修复后已绑定的寄存器名（`register asm`）直接复用其号。
+///
+/// 这里守的是语义底线而不是寄存器号本身：`movq %rsp,(%[tos])` 与 `movq %[tos],%rsp` 必须落在
+/// **同一个** 寄存器上，否则内核改写栈指针的意图就直接失效。
+#[test]
+#[cfg(unix)]
+fn asm_tos_output_and_input_share_one_register() {
+    let src = std::env::temp_dir().join(format!("dcc-call-on-stack-{}.c", std::process::id()));
+    let obj = std::env::temp_dir().join(format!("dcc-call-on-stack-{}.o", std::process::id()));
+    fs::write(
+        &src,
+        r#"#define __always_inline __attribute__((always_inline))
+struct pt_regs { unsigned long a, b, c; };
+extern void target_fn(void);
+register unsigned long gsp asm("rsp");
+#define ASM_CALL_CONSTRAINT "+r" (gsp)
+static __always_inline void
+call_on_stack(unsigned long stack, struct pt_regs *regs, unsigned long vec, unsigned long extra)
+{
+	register void *tos asm("r11");
+	tos = ((void *)(stack));
+	asm volatile(
+		"movq\t%%rsp, (%%[tos])\t\t\n"
+		"movq\t%%[tos], %%rsp\t\t\n"
+		"movq\t%%[arg1], %%rdi\t\t\n"
+		"movq\t%%[arg2], %%rsi\t\t\n"
+		"movq\t%%[arg3], %%rdx\t\t\n"
+		"call\ttarget_fn\t\t\n"
+		"popq\t%%rsp\t\t\t\n"
+		: "+r" (tos), ASM_CALL_CONSTRAINT
+		: [tos] "r" (tos),
+		  [arg1] "r" (regs), [arg2] "r" (vec), [arg3] "r" (extra)
+		: "cc", "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10",
+		  "memory"
+		);
+}
+void foo(struct pt_regs *r) { call_on_stack(0x1000, r, 3, 4); }
+"#,
+    )
+    .expect("write call_on_stack fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-O2", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "call_on_stack 形状编不过（GP 池耗尽）: {stderr}"
+    );
+    let dis = Command::new("objdump")
+        .arg("-d")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dis.stdout).to_string();
+    // 模板里 `%[tos]` 只出现两次、都是「读 tos 值」，所以这两条指令必须肩并肩且用同一个寄存器。
+    // 不能在全文里各取一处比：函数 epilogue 的 `mov %r13,%rsp` 也会被误抓进来。
+    let lines: Vec<&str> = text.lines().collect();
+    let mut checked = false;
+    for (i, line) in lines.iter().enumerate() {
+        let Some(p) = line.find("%rsp,(") else { continue };
+        let rest = &line[p + "%rsp,(".len()..];
+        let Some(q) = rest.find(')') else { continue };
+        let store_reg = &rest[..q];
+        let next = lines.get(i + 1).copied().unwrap_or("");
+        assert!(
+            next.contains(",%rsp"),
+            "`movq %rsp,(%[tos])` 的下一条不是 `movq %[tos],%rsp`（实际 {next}）:\n{text}"
+        );
+        let load_reg = next[..next.find(',').unwrap_or(0)]
+            .split_whitespace()
+            .last()
+            .unwrap_or("");
+        assert_eq!(
+            store_reg, load_reg,
+            "栈切换的两条 mov 没落在同一寄存器（{store_reg} vs {load_reg}）:\n{text}"
+        );
+        checked = true;
+    }
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    assert!(checked, "产物里没找到 `movq %rsp,(%[tos])` 序列:\n{text}");
+}
+
+/// typeof 的操作数里嵌着的块级 `extern` 声明，不得污染外层声明符的存储类。
+///
+/// 内核 `alloc_hooks()` 展开后是
+/// `typeof(kmalloc(..., ({ __auto_type x = ...; do { extern void
+/// __compiletime_assert_N(void); ... } while (0); ... }), ...)) _res;`：
+/// `typeof(...)` 的操作数内部含块级 `extern` 声明。解析器若把那条内层声明的
+/// `decl_storage` 留给外层用，`_res` 就被当成纯 extern 声明 —— 上提成文件作用域的
+/// 全局引用、规划期不占帧槽，发射期再懒注册时撞穿晚分配带预算（E1133），
+/// 且同名变量在多 TU 间变成全局符号，`ld -r vmlinux.o` 会报 multiple definition。
+#[test]
+fn typeof_operand_block_extern_does_not_leak_to_declarator() {
+    let source = r#"
+extern void *kma(unsigned long n);
+
+void *alloc_like(unsigned long n)
+{
+	return ({ typeof(kma(({ extern void __compiletime_assert_1(void);
+				  (void)__compiletime_assert_1; 1; }))) _res;
+		_res = kma(n);
+		_res; });
+}
+"#;
+    let (output, bytes) = run_compile_object_env(
+        "typeof-block-extern",
+        source,
+        "-O2",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("E1133"),
+        "`_res` 被当成 extern 纯声明后会在发射期抢晚分配带预算:\n{stderr}"
+    );
+    assert!(!bytes.is_empty(), "object empty");
+    // `_res` 是栈上局部：符号表里根本不该出现它（出现即为被上提的全局/未定义引用）。
+    let leaked: Vec<(String, u8, u8, u16)> = elf64_syms(&bytes)
+        .into_iter()
+        .filter(|s| s.name == "_res")
+        .map(|s| (s.name, s.bind, s.stype, s.shndx))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "`_res` 必须是普通局部变量，不该进符号表（bind/stype/shndx）: {leaked:?}"
+    );
+    assert!(
+        elf64_func_symbols(&bytes)
+            .iter()
+            .any(|(n, _, sz)| n == "alloc_like" && *sz > 0),
+        "缺少 alloc_like 的函数符号，产物不完整"
+    );
+}
+
+/// 语句表达式里的块作用域 `extern` 对象声明只作全局引用标记，不得占帧槽。
+///
+/// `({ extern int y; y; })` 是内核宏里常见的形状（`__compiletime_assert` 那一族
+/// 把 `extern` 声明包在 `do/while` 与语句表达式里）。语句表达式的发射路径是
+/// `gen_block_item` 的一份副本，副本漏了「extern 声明不分配帧槽」的早返，
+/// 于是把 `y` 当成普通局部懒注册，撞穿晚分配带预算（E1133）。
+#[test]
+fn stmt_expr_block_extern_stays_global() {
+    let source = r#"
+extern int g_ext;
+
+int read_via_stmt_expr(void)
+{
+	int x = ({ extern int y; y + g_ext; });
+	return x;
+}
+"#;
+    let (output, bytes) = run_compile_object_env(
+        "stmt-expr-block-extern",
+        source,
+        "-O0",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("E1133") && !stderr.contains("E1134"),
+        "块作用域 extern 被当成局部对象抢帧槽:\n{stderr}"
+    );
+    let undefined = elf64_undefined_symbols(&bytes);
+    assert!(
+        undefined.iter().any(|n| n == "y") && undefined.iter().any(|n| n == "g_ext"),
+        "`y` 与 `g_ext` 都应是未定义全局引用，实际: {undefined:?}"
+    );
+    let defined_local: Vec<(String, u8, u8)> = elf64_syms(&bytes)
+        .into_iter()
+        .filter(|s| s.name == "y" && s.shndx != 0)
+        .map(|s| (s.name, s.bind, s.stype))
+        .collect();
+    assert!(
+        defined_local.is_empty(),
+        "`y` 不得在本 TU 里有定义（它只是外部全局的声明）: {defined_local:?}"
+    );
+}
+
+/// `__always_inline` 调用点落在**循环条件**里也必须展开。
+///
+/// `opt.rs::inline_calls_in_stmt` 的 `Stmt::While`/`Stmt::Do` 两支以前只往下走 body，
+/// 不看条件；条件里的调用点因此一字未动。调用点没展开，编译器就得为 callee 另发一份
+/// 独立副本，而带 `"i"(形参)` 的副本（内核 `cpufeature.h` 的 `_static_cpu_has`）根本
+/// 编不出来：实测 `arch/x86/kernel/fpu/xstate.o` 与 `arch/x86/events/core.o` 报
+/// `error[E0311]: ... has no compile-time constant value (expression: bit, in function
+/// _static_cpu_has)`。`for (; f(); )` 一直是好的 —— For 支有那条 cond，补的就是这一差距。
+#[test]
+fn forced_inline_in_loop_conditions_expands() {
+    let source = r#"
+typedef unsigned short u16;
+static int n_calls;
+/* 体不是「一条 return 表达式」且带只能接立即数的 `"i"(形参)`：与内核
+   `cpufeature.h` 的 `_static_cpu_has` 同形，留在体外就编不出来 */
+static __inline__ __attribute__((always_inline)) int tick(u16 bit)
+{
+	int r = 0;
+	__asm__ volatile("nop" : : "i" (1 << (bit & 7)) : "memory");
+	n_calls++;
+	if (r || n_calls >= 4) return 0;
+	return 1;
+}
+int loop_cond(void)
+{
+	int i = 0;
+	while (tick(93)) i++;
+	do { i++; } while (tick(94) && i < 9);
+	return i + n_calls;
+}
+int main(void) { return loop_cond(); }
+"#;
+    // 结构判据：-O2 能编过，且不得为 tick 另发一份独立副本
+    let (output, bytes) = run_compile_object_env(
+        "forced-inline-loop-cond",
+        source,
+        "-O2",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("E0311"),
+        "条件里的调用点没展开就会为 callee 另发副本，而那份副本编不出来:\n{stderr}"
+    );
+    let dup: Vec<String> = elf64_func_symbols(&bytes)
+        .into_iter()
+        .map(|(n, _, _)| n)
+        .filter(|n| n == "tick")
+        .collect();
+    assert!(dup.is_empty(), "tick 被发成了独立副本（调用点未展开）: {dup:?}");
+    // 运行判据：展开必须**每轮都执行**，不能被提到循环外（那就成了只评一次）。
+    // 两侧同跑 -O2：`"i"(形参)` 这一族在 gcc -O0 下连参照侧自己就报错。
+    let code = run_gcc_cross_check_both_opts("forced-inline-loop-cond", source, &["-O2"], &["-O2"]);
+    assert_eq!(code, 9, "while/do-while 条件里的展开必须逐轮求值");
+}
+
+/// `__always_inline` 调用点藏在**语句表达式** `({...})` 里也必须展开。
+///
+/// `opt.rs::inline_expr` 以前没有 `Expr::StmtExpr` 这一臂（落进 `other => other`），
+/// 里面的调用点没有任何一条通道看过。内核的 `WARN*()`、`__get_user_x()` 这一族宏
+/// 把求值全包在 `({...})` 里，于是 `cpu_feature_enabled(...)` 就死在里层；实测
+/// `arch/x86/kernel/ldt.o` 与 `xstate.o` 都有靠这一形报 E0311 的调用点。
+#[test]
+fn forced_inline_inside_stmt_expr_expands() {
+    let source = r#"
+typedef unsigned short u16;
+static int n_calls;
+static __inline__ __attribute__((always_inline)) int check(u16 bit)
+{
+	int r = 0;
+	__asm__ volatile("nop" : : "i" (1 << (bit & 7)) : "memory");
+	n_calls++;
+	return (n_calls & 1) ? r : 1;
+}
+int stmt_expr_sites(void)
+{
+	int i = 0;
+	if (({ int t = check(93); t; })) i += 5;
+	int x = ({ int a = check(95); a + n_calls; });
+	i += ({ check(96); n_calls; });
+	return i + x;
+}
+int main(void) { return stmt_expr_sites(); }
+"#;
+    let (output, bytes) = run_compile_object_env(
+        "forced-inline-stmt-expr",
+        source,
+        "-O2",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("E0311"),
+        "语句表达式里的调用点没人下探就会留下 callee 副本:\n{stderr}"
+    );
+    let dup: Vec<String> = elf64_func_symbols(&bytes)
+        .into_iter()
+        .map(|(n, _, _)| n)
+        .filter(|n| n == "check")
+        .collect();
+    assert!(dup.is_empty(), "check 被发成了独立副本（里层调用点未展开）: {dup:?}");
+    // if 条件 / 声明初值 / 表达式位置三处都走同一条下探，值必须与 gcc 一致（两侧同 -O2）
+    let code =
+        run_gcc_cross_check_both_opts("forced-inline-stmt-expr", source, &["-O2"], &["-O2"]);
+    assert_eq!(code, 6, "语句表达式里的展开在三种位置上都必须与 gcc 同值");
+}
+
+/// 内联 asm 体内的 `call` 必须保住延伸池家，而且不得拿 E1136 顶住编译。
+///
+/// 内核跳进另一个 C 函数的 `asm volatile`（`call write_ibpb`、`call rep_stos_alternative`）
+/// 只写 `ASM_CALL_CONSTRAINT`，那份 clobber 名单里没有寄存器号；而按 ABI，这次调用毁掉的
+/// 正是全部 caller-saved GP。本端的延伸池把变量当家放在 r8/r9 里，所以必须在 asm 语句
+/// 外面插 push/pop 守护区间（守护名单与 clobber 那一份同口径，只把 `call` 的 ABI 事实并
+/// 进去）。实测 `arch/x86/kernel/cpu/bugs.o` 与 `mm/mm_init.o` 在守护接上之前报
+/// `error[E1136]: call 到 'write_ibpb' 不经过 caller-saved 家的保存窗口`。
+#[test]
+fn asm_body_call_guards_ext_homes() {
+    let source = r#"
+typedef unsigned long ul;
+/* 被调方像 write_ibpb / rep_stos_alternative 那样扫掉全部 caller-saved */
+void clob_all(void)
+{
+	__asm__ volatile("" : : : "rax","rcx","rdx","rsi","rdi","r8","r9","r10","r11","cc");
+}
+int asm_call_guard(int n, ul p)
+{
+	ul v1 = p + 1, v2 = p + 2, v3 = p + 3, v4 = p + 4;
+	for (int i = 0; i < n; i++) {
+		v1 += i;
+		v2 += i * 2;
+		v3 += i * 3;
+		v4 += i * 4;
+		__asm__ volatile("call clob_all" : : : "memory", "cc");
+		v1 ^= (v1 >> 3);
+		v2 ^= (v2 >> 3);
+		v3 ^= (v3 >> 3);
+		v4 ^= (v4 >> 3);
+	}
+	return (int)(v1 + v2 + v3 + v4);
+}
+int main(void) { return asm_call_guard(7, 1000); }
+"#;
+    let name = "asm-call-ext-home-guard";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-{name}-{pid}.c"));
+    let obj = dir.join(format!("dcc-{name}-{pid}.o"));
+    fs::write(&src, source).expect("write asm-call fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .env("DCC_NO_PARALLEL", "1")
+        .args(["-std=gnu23", "-O2", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("E1136"),
+        "asm 体内的 call 必须走守护窗口，不该再把家静默毁掉:\n{stderr}"
+    );
+    let dis = Command::new("objdump")
+        .arg("-d")
+        .arg("--no-show-raw-insn")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dis.stdout).to_string();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    // 守护真的到了产物：`call` 那一层外面有一对 push/pop（r8/r9 两个号 = 2 push + 2 pop）。
+    // 逐行取助记符而不是拿子串 `call` 去定位：函数名 `asm_call_guard` 里就含 `call`，
+    // 子串定位会把区间切在函数入口之前，本来有的 push 也会被当成没插。
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("<asm_call_guard>:"))
+        .unwrap_or_else(|| panic!("产物里没有 asm_call_guard 这个函数"));
+    let mut pushed = 0usize;
+    let mut popped = 0usize;
+    let mut seen_call = false;
+    for l in lines[start + 1..].iter().take_while(|l| !l.trim().is_empty()) {
+        let m = l.split_whitespace().nth(1).unwrap_or("");
+        if m == "call" || m == "callq" {
+            seen_call = true;
+            continue;
+        }
+        if !seen_call {
+            if m.starts_with("push") {
+                pushed += 1;
+            }
+        } else if m.starts_with("pop") {
+            popped += 1;
+        }
+    }
+    assert!(
+        seen_call,
+        "asm_call_guard 里没发出 call（asm 模板没被编出来）:\n{text}"
+    );
+    assert!(
+        pushed >= 1 && popped >= 1,
+        "call 前没插守护（push={pushed} pop={popped}），延伸池家会被这次调用毁掉"
+    );
+    // 行为判据：与 gcc 同值（家被毁时的典型现象就是后续几轮算错）
+    let code = run_gcc_cross_check_both_opts(name, source, &["-O2"], &["-O2"]);
+    assert_eq!(code, 31, "asm 体内的 call 跨轮必须保住变量的值");
+}
+
+/// `.section X,"a"` + `.previous` 必须把当前节**退回切换前那一个**，不得把新节原样压回去。
+///
+/// 内核的 `EXPORT_SYMBOL`（`include/linux/export.h` 的 `___EXPORT_SYMBOL`）就是这个形状。
+/// 以前 `.section` 把**即将进入的节**同时压进 `section_stack` 与 `pushsection_stack`，
+/// 而 `.previous` 先弹出它、又把它同一个下标压回去 ⇒ `pushsection_stack` 永远留着那个
+/// 早已退出的数据节。之后同一函数里每条 asm 都按「在一个非执行 pushsection 里」处理，
+/// 数字标号就按那个数据节的坐标登记（实测 `mm/mm_init.o`：`ANNOTATE_REACHABLE(1b)` 的 5 个
+/// 标号全被记成 `.export_symbol` + 0x80，链接期 objtool 报
+/// `bad .discard.annotate_insn entry: 0 of type 8` ⇒ `vmlinux.o` 做不出来）。
+#[test]
+fn section_previous_restores_prior_section() {
+    let source = r#"
+int foo(void) { return 1; }
+void bar(void)
+{
+	__asm__ volatile(".section \".export_symbol\",\"a\";\n\t.quad foo;\n\t.previous;\n" ::: "memory");
+	__asm__ volatile(
+		"1: nop\n\t"
+		"911: .pushsection .discard.annotate_insn, \"M\", @progbits, 8; .long 911b - ., 8; .popsection\n"
+		::: "memory");
+}
+"#;
+    let (_output, bytes) =
+        run_compile_object_env("section-previous", source, "-O2", &[("DCC_NO_PARALLEL", "1")]);
+    // 标号所在节：`section == 1` 就是 `.text`（标号自己发在代码里）。
+    // 回归时会看到它变成 `.export_symbol` 的下标（>1）且 value = 那个节的长度。
+    let data_shndx: Vec<u16> = elf64_syms(&bytes)
+        .into_iter()
+        .filter(|s| s.name.starts_with(".export_symbol"))
+        .map(|s| s.shndx)
+        .collect();
+    let ann: Vec<(String, u64, u16)> = elf64_syms(&bytes)
+        .into_iter()
+        .filter(|s| s.name.starts_with(".Lasm_local"))
+        .map(|s| (s.name.clone(), s.value, s.shndx))
+        .collect();
+    assert!(!ann.is_empty(), "产物里没有 asm 数字标号的本地符号：标号根本没登记");
+    for (name, value, shndx) in &ann {
+        assert_eq!(
+            *shndx, 1,
+            "标号 `{name}` 应归 `.text`（shndx=1），实际 shndx={shndx}（data 节符号: {data_shndx:?}）",
+        );
+        assert!(
+            *value > 0 && *value < 0x400,
+            "标号 `{name}` 的 `.text` 内偏移不像真位置: {value:#x}",
+        );
+    }
+    // `.previous` 之后 `.quad foo` 的那条导出项仍必须在 `.export_symbol` 里
+    let export_rela: Vec<String> = elf64_syms(&bytes)
+        .into_iter()
+        .filter(|s| s.name == "foo")
+        .map(|s| s.name)
+        .collect();
+    assert!(!export_rela.is_empty(), "EXPORT 引用的 `foo` 符号不得丢");
+}
+
+/// 内核 `asm/shared/io.h` 的 BUILDIO：端口是编译期常量时，`%w1` 必须**原样**代成立即数。
+///
+/// GAS 对非寄存器操作数的 `%b/%w/%k/%q` 不改宽度（宽度由助记符后缀承担），而
+/// `asm_reg_modifier_subst` 以前先 `parse_asm_reg(val)?` 一刀切：不是寄存器就直接不给结果
+/// ⇒ `%w1` 留在模板文本里，操作数解析成 `None`，报 `unsupported in/out port operand`
+/// （实测 `arch/x86/kernel/i8259.o`、`arch/x86/kernel/x86_init.o` 整 TU 失败）。
+#[test]
+fn port_io_immediate_operand_keeps_immediate_text() {
+    let source = r#"
+typedef unsigned char u8; typedef unsigned short u16;
+void outb_lit(u8 val) { __asm__ volatile("outb %b0, %w1" : : "a"(val), "Nd"(0x21) : "memory"); }
+u8 inb_lit(void) { u8 v; __asm__ volatile("inb %w1, %b0" : "=a"(v) : "Nd"(0x21)); return v; }
+u16 inw_lit(void) { u16 v; __asm__ volatile("inw %w1, %w0" : "=a"(v) : "Nd"(0x43)); return v; }
+"#;
+    let name = "port-io-imm";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-{name}-{pid}.c"));
+    let obj = dir.join(format!("dcc-{name}-{pid}.o"));
+    fs::write(&src, source).expect("write port-io fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .env("DCC_NO_PARALLEL", "1")
+        .args(["-std=gnu23", "-O2", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "端口常量 + `%wN` 必须能编，stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("port operand"),
+        "`in`/`out` 的立即端口又被拒了:\n{stderr}"
+    );
+    let dis = Command::new("objdump")
+        .arg("-d")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dis.stdout).to_string();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    // 与 GAS/gcc 逐字节同口径：`out %al,$0x21` = e6 21，`in $0x21,%al` = e4 21，
+    // `in $0x43,%ax` = 66 e5 43（16 位带 0x66 前缀）。
+    for needle in ["e6 21", "e4 21", "66 e5 43"] {
+        assert!(
+            text.contains(needle),
+            "产物里缺 {needle} 这条编码，objdump 实际:\n{text}"
+        );
+    }
+}
+
+/// `__builtin_constant_p(形参/内联临时量)` 作三元条件时必须当场定下来。
+///
+/// parser 与 `fold_expr` 的 `Call` 臂对这种调用都采取「不急切折 0」（把机会留给
+/// SCCP/modref），于是条件永远不是 `Int`；而 `fold_expr` 的 `Expr::Cond` 臂以前只认
+/// `Expr::Int` ⇒ 整个三元留在运行时，**两个分支都被编**，而非常量的那一支里
+/// `"i"(形参)` 的 asm 根本编不出（实测 `kernel/ptrace.o`：`include/linux/wait_bit.h` 的
+/// `wait_on_bit` 报 `impossible constraint in 'asm' … (1 << (__inl$_nr & 7))`）。
+#[test]
+fn builtin_constant_p_ternary_condition_is_decided_at_compile_time() {
+    let source = r#"
+typedef unsigned long ul;
+static __inline__ __attribute__((always_inline)) int ctba(long nr, const volatile unsigned long *addr)
+{
+	int oldbit;
+	__asm__ volatile("testb %2,%1"
+		     : "=@ccnz" (oldbit)
+		     : "m" (((unsigned char *)addr)[nr >> 3]),
+		       "i" (1 << (nr & 7))
+		     : "memory");
+	return oldbit;
+}
+static __inline__ __attribute__((always_inline)) int vtb(long nr, const volatile unsigned long *addr)
+{
+	int oldbit;
+	__asm__ volatile("btq %2,%1"
+		     : "=@cccz" (oldbit)
+		     : "m" (*(unsigned long *)addr), "Ir" (nr)
+		     : "memory");
+	return oldbit;
+}
+static __inline__ __attribute__((always_inline)) int ta(long nr, const volatile unsigned long *addr)
+{
+	return __builtin_constant_p(nr) ? ctba(nr, addr) : vtb(nr, addr);
+}
+/* 形参是运行时的：常量分支必须整个消失，不能被编出来 */
+int use_rt(long nr, const ul *a) { if (ta(nr, a)) return 1; return 0; }
+/* 常量经过一层内联临时量传进来（ptrace 的 wait_on_bit 就是这一形）*/
+static inline int wrap(long bit, const volatile ul *w) { return ta(bit, w); }
+int use_lit(const ul *a) { return wrap(5, a); }
+"#;
+    let (output, bytes) = run_compile_object_env(
+        "constant-p-ternary",
+        source,
+        "-O2",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("impossible constraint"),
+        "`__builtin_constant_p` 的非常量分支又被当活代码编了:\n{stderr}"
+    );
+    assert!(!bytes.is_empty(), "object empty");
+    // 运行时那一支用的是 `bt`，常数那一支才是 `testb $imm, sym(%rip)`（F6 05）。
+    // `use_rt` 里必须只剩 `bt`；两边都编出来就会出现 `testb`。
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-constant-p-ternary-{}.o", std::process::id()));
+    fs::write(&obj, &bytes).expect("write object back for objdump");
+    let dis = Command::new("objdump")
+        .arg("-d")
+        .arg("--no-show-raw-insn")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dis.stdout).to_string();
+    let _ = fs::remove_file(&obj);
+    let at = text
+        .find("<use_rt>:")
+        .unwrap_or_else(|| panic!("产物里没有 use_rt:\n{text}"));
+    let body: String = text[at..]
+        .lines()
+        .skip(1)
+        .take_while(|l| !l.starts_with("0000"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("bt"),
+        "`use_rt` 该走运行时 `bt` 那一支，实际:\n{body}"
+    );
+    assert!(
+        !body.contains("testb"),
+        "`use_rt` 里出现了只有常量分支才有的 `testb $imm`:\n{body}"
+    );
+}
+
+/// `__builtin_constant_p(内联形参)` 在「声明初值」这一调用位置的答案必须是 1。
+///
+/// 现场是 `include/linux/rhashtable.h` 的 `__rhashtable_lookup()`（体内有 `restart:` 标号）：
+/// 调用点写作 `p = rhashtable_lookup_fast(...)`，内联把体包成
+/// `int *p = ({ …; __inl$_freq = <字面量>; … });` —— 形参临时量声明在那个**语句表达式**里，
+/// 而 `__builtin_constant_p(形参)` 的答案只能从 ipa 的「已证常量局部」表来。
+/// `collect_vars_in_block` 旧写法只收 `Decl::Var` 本身、不下探 `v.init`，于是那张表里
+/// 根本没有临时量名 ⇒ constp 一律答 0 ⇒ `BUILD_BUG_ON` 的 `__compiletime_assert_NNN`
+/// 变成真引用（实测 `fs/xattr.o`/`fs/pidfs.o`/`kernel/events/hw_breakpoint.o` 各 2–4 条
+/// 473/487，链接期 undefined reference）。夹具 `.work_tmp/cp3.c` 是同一形的最小复现。
+#[test]
+fn builtin_constant_p_param_across_decl_init_inline_is_one() {
+    let source = r#"
+enum freq { F_NORMAL, F_LIKELY };
+extern void trap_473(void);
+static inline __attribute__((always_inline)) int *rht_ptr(int *const *bkt, const enum freq freq)
+{
+	do {
+		if (!(!(!__builtin_constant_p(freq))))
+			trap_473();
+	} while (0);
+	if (freq == F_LIKELY)
+		return *bkt;
+restart:
+	if (!*bkt)
+		goto restart;
+	return *bkt;
+}
+int probe(int *const *bkt)
+{
+	int *p = rht_ptr(bkt, F_NORMAL);
+	return p != 0;
+}
+"#;
+    let (output, bytes) = run_compile_object_env(
+        "constp-declinit-inline",
+        source,
+        "-O2",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!bytes.is_empty(), "object empty");
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-constp-declinit-{}.o", std::process::id()));
+    fs::write(&obj, &bytes).expect("write object back for nm");
+    let und = Command::new("nm").arg("-u").arg(&obj).output().expect("nm");
+    let _ = fs::remove_file(&obj);
+    let und = String::from_utf8_lossy(&und.stdout).to_string();
+    assert!(
+        !und.contains("trap_473"),
+        "constp(内联形参) 被判成 0，`BUILD_BUG_ON` 的断言调用留在了产物里:\n{und}"
+    );
+}
+
+/// 从可执行 pushsection 里跳回 `.text` 的 `jmp` 必须带重定位，不能写死位移。
+///
+/// `final_text_loc` 用的那张搬迁区间表 `(发射起点, 发射长度, 目标节下标, 目标节内起点)`
+/// 以前在 `codegen.rs` 里被整行拿错一格（起点用了函数起点、长度用了发射起点、节号用了
+/// **发射长度**），于是两边总是被算成同一个不存在的节号 ⇒ 「同节」成立 ⇒ 跨节跳转被写死
+/// 位移也不发重定位。链接期表现为 objtool `can't find jump dest instruction`（实测
+/// `arch/x86/kernel/traps.o`、`arch/x86/kernel/cpu/bugs.o`、`arch/x86/events/core.o`、
+/// `arch/x86/kernel/fpu/xstate.o`），运行期则是 `apply_alternatives` 换上去的替换代码
+/// 跳到指令中段。两边对比的基准就是 gcc：它在这种位置发的是 `R_X86_64_PC32 .text + N`。
+///
+/// 对本用例的诚实定位：它钉的是「跨节跳转必须带 PC32」这条不变式本身；单独拿它去过
+/// 旧二进制不会变红（要触发那次字段错位需要「目标在自定义函数节里」的嵌套形状，
+/// traps.c 里是 `noinstr` + asm goto 那一族）。真正的撤修即变红证据是四个内核 TU
+/// （traps / bugs / events core / xstate）在 `objtool --link --ibt/--noinstr/--unret/--orc` 下
+/// 从报错变 ok，以及它们 `ld -r` 后的合并对象同样全 ok（脚本：`bash .work_tmp/kwobjtool.sh <对象>...`）。
+#[test]
+fn cross_section_jump_out_of_exec_pushsection_carries_reloc() {
+    let source = r#"
+void f(void)
+{
+	__asm__ __volatile__(
+		"771: .byte 0x90\n"
+		"   .pushsection .altinstr_replacement, \"ax\"\n"
+		"774: jmp 6f\n"
+		"775: .byte 0x90\n"
+		"   .popsection\n"
+		"6: .byte 0x90\n"
+		::: "memory");
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let name = "xsec-jump";
+    let src = dir.join(format!("dcc-{name}-{pid}.c"));
+    let obj = dir.join(format!("dcc-{name}-{pid}.o"));
+    fs::write(&src, source).expect("write xsec-jump fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .env("DCC_NO_PARALLEL", "1")
+        .args(["-std=gnu23", "-O2", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rels = Command::new("readelf")
+        .args(["-rW", "--wide"])
+        .arg(&obj)
+        .output()
+        .expect("readelf");
+    let text = String::from_utf8_lossy(&rels.stdout).to_string();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    // 替换节里那条 `jmp` 的目标在 `.text`，必须在**它自己那张重定位表里**留下一条 PC32；
+    // 回归时的形状是「`.rela.altinstr_replacement` 整张表不存在」，所以判据要卡在
+    // 「表头之后的行里能找到 R_X86_64_PC32」，不能全文件扫（那里哪里都有 PC32）。
+    let after = text
+        .find(".rela.altinstr_replacement")
+        .unwrap_or_else(|| panic!("产物里没有 .rela.altinstr_replacement，跨节跳转被写死了位移:\n{text}"));
+    let sec_relocs = &text[after..];
+    assert!(
+        sec_relocs
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.trim().is_empty() && !l.starts_with("重定位节")
+                && !l.starts_with("Relocation section"))
+            .any(|l| l.contains("R_X86_64_PC32")),
+        "`.rela.altinstr_replacement` 里没有 PC32 重定位（跳转被写死）:\n{text}"
+    );
+}
+
+/// `_ASM_EXTABLE` 留下的括号不能把数字标签引用变成「未定义符号」。
+///
+/// 内核 `_ASM_EXTABLE(from, to)` 展开就是 `.long (1b) - .` 与 `.long (2b) - .`（参数被
+/// 宏括起来）。GAS 把括号当分组照样解析，而 `parse_asm_data_expr`/`resolve_asm_data_symbol`
+/// 以前先拿整串分类：`(1b)` 因为带括号认不出数字标签，于是发一个名叫 `(1b)` 的
+/// UND GLOBAL 符号去接那条重定位 —— `__ex_table` 每一条都指向不存在的位置（实测
+/// `arch/x86/kernel/ldt.o`：链接期 objtool 报 `special: can't find orig instruction`，
+/// 而真正严重的是运行期异常表整个是错的）。修后两条都指回 `.text` 里的标号，
+/// 同一个对象的 `objtool --link --ibt/--noinstr/--unret --noabs` 全部 rc=0。
+#[test]
+fn extable_parenthesized_numeric_labels_resolve() {
+    let source = r#"
+void f(void)
+{
+	__asm__ __volatile__(
+		"1: nop\n"
+		"2: nop\n"
+		"   .pushsection __ex_table, \"a\"\n"
+		"   .long (1b) - ., (2b) - .\n"
+		"   .popsection\n"
+		::: "memory");
+}
+"#;
+    let (output, bytes) = run_compile_object_env(
+        "extable-paren-label",
+        source,
+        "-O2",
+        &[("DCC_NO_PARALLEL", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!bytes.is_empty(), "object empty");
+    // 判据一：未定义符号里不能出现括号包起来的标签引用，也不能有裸的 `Nb`/`Nf`。
+    let und = elf64_undefined_symbols(&bytes);
+    let bogus: Vec<&String> = und
+        .iter()
+        .filter(|n| n.starts_with('(') || n.ends_with(')') || regex_like_numeric_ref(n))
+        .collect();
+    assert!(
+        bogus.is_empty(),
+        "数字标签引用被当成未定义符号发出去了（__ex_table 会指向不存在的位置）: {bogus:?}"
+    );
+    // 判据二：标签真的被解析成了「已定义在某个节里的标号」。`elf64_syms` 里
+    // shndx != 0 即「有定义」；标号自己的名字带 `_1_0`/`_2_0` 后缀。
+    let defined: Vec<(String, u64, u16)> = elf64_syms(&bytes)
+        .into_iter()
+        .filter(|s| s.name.starts_with(".Lasm_local") && s.shndx != 0)
+        .map(|s| (s.name, s.value, s.shndx))
+        .collect();
+    assert!(
+        defined.len() >= 2,
+        "本条 asm 里的两个数字标号没被登记成有定义的符号，实际: {defined:?}"
+    );
+    assert!(
+        defined.iter().all(|(_, v, _)| *v > 0),
+        "标号的节内偏移不该是 0（那意味着它没跟着任何代码），实际: {defined:?}"
+    );
+}
+
+/// 判一个未定义符号名是不是「没解开的数字标签引用」（`1b`、`771f` 这种）。
+/// 写在这里而不是拉一个 regex 依赖：判据就是一条字符规则，要一眼能看完。
+fn regex_like_numeric_ref(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.len() < 2 {
+        return false;
+    }
+    let last = bytes[bytes.len() - 1];
+    (last == b'b' || last == b'f') && bytes[..bytes.len() - 1].iter().all(|c| c.is_ascii_digit())
+}
+
+/// `sizeof`/`_Alignof` 的结果类型必须是 `size_t`（LP64 上 = `unsigned long`），不是 `int`。
+///
+/// 为什么不是「少一个优化」而是错值：`typeof(表达式)` 与 `__auto_type` 的推导直接吃
+/// `Expr::ty()`，写死 `Type::Int` 就把局部变量的**类型**推错了。现场后果：内核 `min()/max()`
+/// 的符号性检查 `count = min(count, sizeof(buf) - 1);` 里，`sizeof(buf) - 1` 被推成有符号
+/// int ⇒ `is_signed_type(typeof(...))` 选错臂 ⇒ 「故意不存在」的 `__compiletime_assert_NNN`
+/// 留在产物里，链接期就是 `undefined reference`（实测 `lib/kstrtox.o` 11 条 → 修后 0 条）。
+///
+/// 夹具里每个形状的期望值都是 **gcc -O2 实测**的（同一个编译器跑不出这个矛盾），
+/// 并带一条有符号 `int` 的反向对照（14），所以判据不是「一律期望 8」。
+#[test]
+#[cfg(unix)]
+fn sizeof_result_type_is_size_t_matches_gcc() {
+    let src = include_str!("../fixtures/c/sizeof_result_type_is_size_t.c");
+    for flag in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("sizeof-type", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(
+            rc,
+            0,
+            "{flag}: 有一条形状的 sizeof/alignof 结果类型与 gcc 实测不一致（退出码就是第一条不匹配的形状编号，1..8）"
+        );
+    }
+}
+
+/// 同一件事的产物级判据：`min()` 的符号性检查在四种临时量写法下都不能留下陷阱引用。
+///
+/// 与上一条互补：那条量的是「类型推错」，这条量「推错了会真的留下链接错误」。
+/// 保留 v3/v4 两条本来就得绿的形，是为了让「只检坏的那两条」这种改法瞒不过去。
+#[test]
+#[cfg(unix)]
+fn min_signedness_assert_with_auto_type_leaves_no_trap_reloc() {
+    let src = include_str!("../fixtures/c/min_auto_type_trap.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("min-auto-trap", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let syms = elf64_syms_by_type(&bytes);
+        let traps: Vec<String> = elf64_rela(&bytes, ".rela.text")
+            .iter()
+            .filter_map(|(_, idx, _, _)| syms.get(*idx as usize))
+            .filter(|s| s.name.starts_with("trap_v"))
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(
+            traps.is_empty(),
+            "{flag}: `min()` 的常量符号性检查没折掉，产物里留下 {} 条指向陷阱函数的引用：{:?}\
+             （就是链接期那条 `undefined reference to '__compiletime_assert_NNN'`）",
+            traps.len(),
+            traps
+        );
+    }
+}
+
+/// `__builtin_strcmp(字面量, 字面量)` 必须折成常量，否则内核 `vruntime_cmp()` 那一族
+/// 死臂折不掉（现场后果：`kernel/sched/fair.o` 里 7 条指向故意不存在的
+/// `__BUILD_BUG_vruntime_cmp` 的引用，最终链接 `undefined reference`）。
+///
+/// 两层判据同一个夹具（`fixtures/c/vruntime_strcmp_trap.c`）：
+///   * 产物级：`.rela.text` 里不得留任何 `trap_vruntime_cmp` 引用（-O2/-O3）；
+///   * 运行级：`main` 返回第一条不匹配的形状编号，逐条对 **gcc -O2/-O0 实测**（符号，
+///     不是大小：C 只规定 `strcmp` 返回值的符号，gcc 折叠给 ±1、glibc 运行给 ±99）。
+#[test]
+#[cfg(unix)]
+fn vruntime_strcmp_shape_leaves_no_trap_reloc_and_folds_to_gcc_signs() {
+    let src = include_str!("../fixtures/c/vruntime_strcmp_trap.c");
+    for flag in ["-O0", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("vruntime-strcmp", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(
+            rc, 0,
+            "{flag}: 折叠结果的符号与 gcc/glibc 不一致（退出码 = 夹具里第一条不匹配的形状编号，1..12）"
+        );
+    }
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("vruntime-strcmp-obj", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let syms = elf64_syms_by_type(&bytes);
+        let traps: Vec<String> = elf64_rela(&bytes, ".rela.text")
+            .iter()
+            .filter_map(|(_, idx, _, _)| syms.get(*idx as usize))
+            .filter(|s| s.name.starts_with("trap_"))
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(
+            traps.is_empty(),
+            "{flag}: `__builtin_strcmp` 的字面量比较没折，产物里留下 {} 条指向陷阱函数的引用：{:?}\
+             （就是链接期那条 `undefined reference to '__BUILD_BUG_vruntime_cmp'`）",
+            traps.len(),
+            traps
+        );
+    }
+}
+
+/// 恒返回常量的 `static` 桩：调用点必须换成那个常量，它下面的死循环才能真被消掉。
+///
+/// 现场形状（`mm/shmem.c:1917` THP 关闭时的 `shmem_suitable_orders` 桩 +
+/// `while (suitable_orders)` 里包着 `HPAGE_PMD_*` 的 `BUILD_BUG()` 陷阱）：不折桩返回值
+/// 就是 `undefined reference to '__compiletime_assert_NNN'`（实测 `mm/shmem.o` 5 条）。
+///
+/// 两层判据（夹具 `fixtures/c/const_return_stub_dead_loop.c`）：
+///   * 产物级：`.rela.text` 里不得出现指向 `trap_in_dead_loop*` 的重定位（-O2/-O3）；
+///     其中形状 4（常量先存进局部、循环条件读那个局部）靠
+///     `propagate_const_locals_in_conditions`，它是全树剩下那 253 行未定义引用的主机制；
+///   * 运行级：实参副作用必须保留、恒非 0 的桩对应的循环必须照跑、依赖形参的桩不得被折
+///     （退出码不是 0 就是哪一条语义被改坏了）。
+#[test]
+#[cfg(unix)]
+fn const_return_static_stub_folds_and_kills_the_dead_loop() {
+    let src = include_str!("../fixtures/c/const_return_stub_dead_loop.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("const-return-stub", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(
+            rc, 0,
+            "{flag}: 常量桩/条件代回改坏了语义（rc=11 实参副作用丢了 / 12 死臂被执行 / \
+             13 恒非 0 的桩循环被删 / 14 依赖形参的桩被误折 / 15 常量存局部那一形没代回条件 / \
+             16 实参副作用次数不对），实际 rc={rc}"
+        );
+        let (out, obj) = run_object_test_flags("const-return-stub-obj", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let syms = elf64_syms_by_type(&bytes);
+        let hits: Vec<String> = elf64_rela(&bytes, ".rela.text")
+            .iter()
+            .filter_map(|(_, idx, _, _)| syms.get(*idx as usize))
+            .filter(|s| s.name.starts_with("trap_in_dead_loop"))
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "{flag}: 恒 0 桩的调用没换成常量、或常量没代回到循环条件 ⇒ 死循环没被删，\
+             产物里还留着 {} 条指向陷阱的引用：{:?}",
+            hits.len(),
+            hits
+        );
+    }
+}
+
+/// `if (!IS_ENABLED(CONFIG_X)) return;` 守住的整段代码必须被删干净（夹具
+/// `is_enabled_early_return_tail.c`）。
+///
+/// 缺陷现场：`arch/x86/mm/ioremap.c:130` 在 `CONFIG_EFI=n` 时是
+///     if (!IS_ENABLED(CONFIG_EFI))
+///             return;
+///     if (efi_mem_type(addr) == EFI_RUNTIME_SERVICES_DATA || …)
+/// 而 `efi_mem_type`/`efi_mem_attributes` 在 CONFIG_EFI=n 的全树都**没有定义**
+///（gcc 侧名字根本不进任何 .o）。`__ioremap_check_other` 是 `static`、被内联进调用方，
+/// 被调方的 `return;` 到了调用方就变成 `goto __inl<N>__l__inl<N>__end;` —— 不是 `Return`
+/// ⇒ `eliminate_unreachable` 里只认 `Return` 的终止判据对这一整族完全无效，死尾段照发，
+/// 最终链接 7 行 `undefined reference`（实测 `arch/x86/mm/ioremap.o`）。
+///
+/// 双向钉（期望名单是拿 `gcc -O1/-O2/-O3` 实测出来的）：死尾段里的 `efi_mem_attributes`
+/// 必须不见；活路（调用在 `return` 之前）、配置真开着、`goto` 跳进嵌套块标号这三种形状
+/// 里的 `efi_mem_type`/`live_touch` **必须还在**（后面三条才是防「一律删尾段」的拦网）。
+#[test]
+#[cfg(unix)]
+fn is_enabled_false_early_return_drops_the_guarded_tail() {
+    let src = include_str!("../fixtures/c/is_enabled_early_return_tail.c");
+    for flag in ["-O1", "-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("is-enabled-tail", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und: Vec<String> = elf64_syms_by_type(&bytes)
+            .iter()
+            .filter(|s| s.shndx == 0)
+            .map(|s| s.name.clone())
+            .collect();
+        let has = |n: &str| und.iter().any(|s| s == n);
+        // 死尾段（形状 1 的内联版与形状 4 的 goto 版）里的引用必须不见。
+        assert!(
+            !has("efi_mem_attributes"),
+            "{flag}: `if (!IS_ENABLED(CONFIG_EFI)) return;` 之后的死尾段没被删掉，产物里仍有 \
+             `efi_mem_attributes`（= 链接期 undefined reference）；完整未定义名单：{:?}",
+            und
+        );
+        // 活路与拦网：这三条是防过修的那一半。
+        for kept in ["efi_mem_type", "live_touch"] {
+            assert!(
+                has(kept),
+                "{flag}: 本该留下的引用被一并抹掉了（`{kept}` 不在 {:?}）——死尾段截断不能\
+                 连「return 之前的调用」或「配置真开着」的那几条一起删",
+                und
+            );
+        }
+    }
+}
+
+/// 常量桩折叠的**产物级双向判据**（夹具 `const_return_stub_trap_refs.c`）。
+///
+/// 为什么单独一个夹具：把陷阱/被守函数定义在同一个 TU 里时，本地 `call` 不发重定位，
+/// 「没有指向它的条目」这条断言就永远成立（已实测）。这里一律用 `extern` 只声明不定义，
+/// 才是内核 `fs_bio_integrity_free` / `__compiletime_assert_NNN` 的真实形状。
+/// 一半形状要求引用消失（含指针常量桩那一形，以及 `static inline` 整型零桩坐在 `if`
+/// 条件里那一形 —— 后者钉住「桩代回必须排在内联之前」这条调度次序），另一半要求引用
+/// **必须在**（防「一律删」）。期望名单是拿 `gcc -O2` 实测出来的，不是推的：
+/// 只剩 `fs_guarded_keep` / `sme_kept_ref` / `trap_dep_loop` / `trap_live_loop` 四条。
+#[test]
+#[cfg(unix)]
+fn const_return_stub_guards_only_kill_the_dead_references() {
+    let src = include_str!("../fixtures/c/const_return_stub_trap_refs.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("const-return-refs", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und: Vec<String> = elf64_syms_by_type(&bytes)
+            .iter()
+            .filter(|s| s.shndx == 0)
+            .map(|s| s.name.clone())
+            .collect();
+        let has = |n: &str| und.iter().any(|s| s == n);
+        // 死路上的：必须不见
+        for gone in [
+            "trap_direct",
+            "trap_via_local",
+            "trap_nested_local",
+            "fs_guarded_free",
+            // 形状 8：`static inline` 的零桩坐在 `if` 条件里（`sme_get_me_mask()` 形）。
+            // 内联先跑时它已被换成读 `__inl0$rv` 临时量，桩折叠看不见 ⇒ 快照二进制实测留 1 条。
+            "sme_guarded_ref",
+            // 形状 10：死分支里坐一次 `always_inline` 调用，内联留下的**自造出口标签**
+            // `__inlN__end` 把「分支内有 Label 就不删」这条拦网触发了（`gdt_idt.o` 的
+            // `vc_no_ghcb` 就是这个形状）。真正的 `goto` 拦网只该认源码标签。
+            "lab_guarded_ref",
+        ] {
+            assert!(
+                !has(gone),
+                "{flag}: 死路上的引用没被消掉，产物里仍有 `{gone}`（= 链接期 \
+                 `undefined reference to '{gone}'`）；完整未定义名单：{:?}",
+                und
+            );
+        }
+        // 活路 / 拒接的：必须在
+        for kept in [
+            "trap_live_loop",
+            "trap_dep_loop",
+            "fs_guarded_keep",
+            "sme_kept_ref",
+            // 形状 11：同样的 `always_inline` 调用坐在**真分支**里 ⇒ 地址引用不能一并抹掉。
+            "lab_alive_ref",
+        ] {
+            assert!(
+                has(kept),
+                "{flag}: 本该留下的引用被一并抹掉了（`{kept}` 不在 {:?}）——\
+                 判据不是「越少越好」，这一半才是防过修的那一半",
+                und
+            );
+        }
+    }
+}
+
+/// 「常量存进局部 → 后面拿它当条件读」的**产物级双向判据**（夹具
+/// `const_store_forward_trap.c`，§3.51）。
+///
+/// 为什么需要这一条：内核先把常量存进局部、后面才读它当条件（`mm/shmem.c` 的
+/// `if (!IS_ENABLED(...)) orders = 0;` 后面接 `if (orders > 0) { … BUILD_BUG() … }`），
+/// 而这条路上的常量代回原来一个都没有 —— AST 层的 cprop 只认**声明初值**，SSA 层
+/// 对含 `goto` 的函数只做 analysis-only（不重建、不跑 SCCP），而内核错误路径全是
+/// `goto out;`。于是死块里的 `BUILD_BUG()`（恒真的无条件调用）留在产物里，变成
+/// 链接期 `undefined reference to '__compiletime_assert_NNN'`（`mm/shmem.o` 实测 5 条）。
+///
+/// 期望名单先拿 `gcc -O2` 校准过，不是推的：dead 三个 0 条，keep 五个 5 条都在。
+/// 后半那一半才是防过修的那一半 —— 判据不是「越少越好」。
+#[test]
+#[cfg(unix)]
+fn const_store_forward_kills_dead_decl_uses_only() {
+    let src = include_str!("../fixtures/c/const_store_forward_trap.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("const-store-forward", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und: Vec<String> = elf64_syms_by_type(&bytes)
+            .iter()
+            .filter(|s| s.shndx == 0)
+            .map(|s| s.name.clone())
+            .collect();
+        let has = |n: &str| und.iter().any(|s| s == n);
+        // 死路上的三条：必须不见
+        for gone in [
+            // P1 形参被常量钉死
+            "trap_p1",
+            // P2 shmem 全形（`goto allocated;` + `else { pages = 1; }`）：两跳不动点才收敛
+            "trap_p2_a",
+            "trap_p2_b",
+            // P3 局部显式补一条与初值相同的存储
+            "trap_p3",
+        ] {
+            assert!(
+                !has(gone),
+                "{flag}: 死路上的引用没被消掉，产物里仍有 `{gone}`（= 链接期 \
+                 `undefined reference to '{gone}'`）；完整未定义名单：{:?}",
+                und
+            );
+        }
+        // 拒接的五条：必须在（地址逃逸 / 自增 / 有 goto 指向的标号 / 可能不执行的
+        // 嵌套存储 / 后面被别的常量写过 —— 每一条都是「代回不安全」的独立理由）
+        for kept in [
+            "trap_keep_label",
+            "trap_keep_reassign",
+            "trap_keep_addr",
+            "trap_keep_inc",
+            "trap_keep_nested",
+        ] {
+            assert!(
+                has(kept),
+                "{flag}: 本该留下的引用被一并抹掉了（`{kept}` 不在 {:?}）——\
+                 判据不是「越少越好」，这一半才是防过修的那一半",
+                und
+            );
+        }
+    }
+}
+
+/// 值被丢弃的纯读不得留下任何引用 —— 内核 context-analysis 的 token 变量形状。
+///
+/// 缺陷现场：`include/linux/compiler-context-analysis.h:242` 的 `token_context_lock()`
+/// 造出 `extern const struct __ctx_lock_RCU *RCU;`，注释明写「not backed by a real
+/// data structure (linker error if accidentally referenced)」—— 这类名字**天生没有
+/// 定义**。而 `rcupdate.h:456` 把 `lockdep_assert_in_rcu_read_lock()` 定义成
+/// `__assume_shared_ctx_lock(RCU)`，也就是 `do { (void)(RCU); } while (0)`。gcc 对丢弃值
+/// 的纯读不发一条指令；dcc 以前在 `Expr::Cast` 的 void 臂里只筛字面量 ⇒ 发成
+/// `mov RCU(%rip),%rax`，产物里多出 `R_X86_64_PC32 RCU` 与 `UND RCU`，最终链接报
+/// `undefined reference to 'RCU'`（实测 `io_uring/tw.o` 的 `io_ctx_mark_taskrun()`）。
+///
+/// 判据双向钉（夹具逐项说明见 `tests/fixtures/c/token_ctx_lock_discarded_read.c`）：
+/// 陷阱引用必须为 0，而 call / volatile 读 / 真取地址三条**绝不能被一并抹掉**（后者
+/// 证明修复不是「凡是叫 RCU 就删」）。规则住在 AST 层的 `prune_dead_stores`（`level >= 2`），
+/// 所以跑 -O2/-O3；发射器侧故意不管丢弃值的纯读（它拿不到声明，判不了 volatile），
+/// 因此 -O0 仍然会发那一条 —— 内核不用 -O0 编。
+#[test]
+#[cfg(unix)]
+fn discarded_pure_read_leaves_no_reference_while_effectful_arms_do() {
+    let src = include_str!("../fixtures/c/token_ctx_lock_discarded_read.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("tokctxlock", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let syms = elf64_syms_by_type(&bytes);
+        let rela_refs = |n: &str| {
+            elf64_rela(&bytes, ".rela.text")
+                .iter()
+                .filter_map(|(_, idx, _, _)| syms.get(*idx as usize))
+                .filter(|s| s.name == n)
+                .count()
+        };
+        let und_count = |n: &str| syms.iter().filter(|s| s.name == n && s.shndx == 0).count();
+        assert_eq!(
+            rela_refs("RCU"),
+            0,
+            "{flag}: `(void)(RCU)` 留下了 {} 条指向 token 变量的调用重定位（就是链接期那条 \
+             `undefined reference to 'RCU'`）",
+            rela_refs("RCU")
+        );
+        assert_eq!(
+            und_count("RCU"),
+            0,
+            "{flag}: 没被真引用的 token 变量仍登了 UND 符号（`elf/rel_symbols.rs` 的「只发被引用的 \
+             UND」判据被绕开了）"
+        );
+        // 反向护栏：三条真有效果的路径必须照旧发码。
+        assert_eq!(
+            rela_refs("trap_call"),
+            1,
+            "{flag}: `(void)f()` 的 call 被误删（void 丢弃不等于无副作用）"
+        );
+        assert_eq!(
+            rela_refs("vglob_token"),
+            1,
+            "{flag}: `(void)v` 里对 volatile 全局的读被误删（C11 6.7.3p6：该读本身可观察）"
+        );
+        assert!(
+            rela_refs("rcu_token_used") >= 1,
+            "{flag}: 真被取用的同名 token 变量引用丢了（过修）"
+        );
+    }
+}
+
+/// C11 6.5.3.2p3: `&*E` 与 `E` 等价（`*`/`&` 相消，不取对象）。内核
+/// `drivers/tty/sysrq.c` 的 `sysrq_key_table[]` 里，配置关闭的条目被定义成
+/// `(*(const struct sysrq_key_op *)((void *)0))`，数组元素于是写成 `&*NULL`。
+/// 缺陷现场：`const_eval` 的 `AddrOf` 臂只认 Ident/Index/Cast/Member/String，
+/// 这个形状落到 `NotConstant`，整张表被 E1006 拒掉（`drivers/tty/sysrq.o 错误 1`）。
+#[test]
+#[cfg(unix)]
+fn global_init_addr_of_null_deref_is_constant() {
+    let source = "\
+struct op { int x; };\n\
+extern const struct op real_a;\n\
+extern const struct op real_c;\n\
+#define NULL_OP (*(const struct op *)((void *)0))\n\
+const struct op *tab[3] = { &real_a, &NULL_OP, &real_c };\n";
+    let (output, obj) = run_object_test("addr-of-null-deref", source);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "`&*NULL` 是合法的地址常量: {stderr}");
+    // 中间槽是空指针常量：不发重定位（写 0）；两侧真符号各留一条 64 位重定位。
+    let rel = Command::new("objdump")
+        .arg("-r")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&rel.stdout).to_string();
+    let _ = fs::remove_file(&obj);
+    assert_eq!(
+        text.matches("R_X86_64_64").count(),
+        2,
+        "`&*NULL` 槽不应发重定位（应只有两条 `&real_*`）:\n{text}"
+    );
+    assert_eq!(text.matches("real_a").count(), 1, "`&real_a` 重定位丢了:\n{text}");
+    assert_eq!(text.matches("real_c").count(), 1, "`&real_c` 重定位丢了:\n{text}");
+}
+
+/// 字符串字面量作条件恒真（C11 6.3.2.1p3 退化为非空指针）。内核
+/// `include/linux/netfilter/nf_conntrack_sip.h` 的
+/// `__SIP_HDR()` 里 `.clen = (__cname) ? sizeof(__cname) - 1 : 0`
+/// 就是这种形状（`__cname` 为 `"v"` 或 `NULL`）；只认整数条件时
+/// `ct_sip_hdrs[]`/`ct_sdp_hdrs_v4[]` 被 E1006 拒掉
+/// （`net/netfilter/nf_conntrack_sip.o 错误 1`）。
+#[test]
+#[cfg(unix)]
+fn global_init_string_literal_cond_is_truthy() {
+    let source = "\
+struct s { const char *name; unsigned int clen; };\n\
+static const struct s t[] = {\n\
+    { .name = \"v\", .clen = (\"v\") ? sizeof(\"v\") - 1 : 0 },\n\
+    { .name = \"TCP \", .clen = (\"TCP \") ? sizeof(\"TCP \") - 1 : 0 },\n\
+    { .name = 0, .clen = ((const char *)0) ? 7 : 0 },\n\
+};\n\
+int use(void) { return (int)(t[0].clen + t[1].clen + t[2].clen); }\n";
+    let (output, obj) = run_object_test("string-cond-truthy", source);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "非空地址常量作条件必须能折: {stderr}");
+    let dump = Command::new("objdump")
+        .args(["-s", "-j", ".data"])
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&dump.stdout).to_string();
+    let _ = fs::remove_file(&obj);
+    // 三个元素的 clen: 1, 4, 0（空指针常量条件为假）。
+    assert!(text.contains("01000000 00000000"), "`sizeof(\"v\") - 1` 应为 1:\n{text}");
+    assert!(text.contains("04000000 00000000"), "`sizeof(\"TCP \") - 1` 应为 4:\n{text}");
+}
+
+/// `.rodata` 内 compound literal 的字段引用外部符号：重定位必须走 `.rela.rodata`。
+/// 缺陷现场：`drivers/iommu/amd/iommu.c` 编到 rc=134（abort），
+/// `panicked at elf/resolve.rs: index out of bounds: the len is 7 but the index is
+/// 18446744073709551615` —— `usize::MAX` 是「槽在 .rodata 内」的哨兵，却被当成了
+/// `extra_sections` 的下标。
+#[test]
+#[cfg(unix)]
+fn rodata_compound_literal_symbol_ref_emits_rela_rodata() {
+    let source = "\
+struct inner { const int *p; };\n\
+struct outer { const struct inner *in; };\n\
+extern const int real;\n\
+const struct outer o = { .in = &(struct inner){ .p = &real } };\n";
+    let (output, obj) = run_object_test("rodata-compound-sym", source);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "rodata 内 compound literal 引用符号必须能编: {stderr}");
+    assert!(!stderr.contains("panicked"), "不允许以 panic 结束: {stderr}");
+    let rel = Command::new("objdump")
+        .arg("-r")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&rel.stdout).to_string();
+    let _ = fs::remove_file(&obj);
+    let rodata_part = text.split("RELOCATION RECORDS FOR [.rodata]").nth(1).unwrap_or("");
+    let rodata_part = rodata_part
+        .split("RELOCATION RECORDS FOR [")
+        .next()
+        .unwrap_or(rodata_part);
+    assert!(
+        rodata_part.contains("real"),
+        "`&real` 必须落在 `.rela.rodata`（不是 `.rela.data` 或越界）:\n{text}"
+    );
+}
+
+/// `&((T[]){…})[0].f1.f2`：取址目标不是复合字面量本体，而是数组成员的成员。
+/// 缺陷现场：`drivers/gpu/drm/i915/i915_pmu.c` 的 `I915_PMU_FORMAT_ATTR()`
+/// 展开成 `&((struct i915_str_attribute[]){…})[0].attr.attr`；`eval_const_expr`
+/// 的 AddrOf 臂只认「& 直接套 CompoundLit」，这条链落到通用路径被写成 0
+/// ⇒ `i915_pmu_format_attrs[0]` 是 NULL（`readelf -sW` 有符号、`.rela.data` 无重定位），
+/// 内核起来后 sysfs 的 format 属性全是空指针。
+#[test]
+#[cfg(unix)]
+fn global_init_addr_of_compound_array_member_chain() {
+    let source = "\
+struct attr { const char *name; unsigned short mode; };\n\
+struct dev_attr { struct attr attr; void *show; void *store; };\n\
+struct str_attr { int pad; struct dev_attr attr; const char *str; };\n\
+extern void show_fn(void);\n\
+static struct attr *tab[] = {\n\
+    (&((struct str_attr[]){ {\n\
+        .attr = { .attr = { .name = \"e\", .mode = 0444 }, .show = (void *)show_fn },\n\
+        .str = \"v\",\n\
+    } })[0].attr.attr),\n\
+};\n\
+int use(void) { return tab[0] != 0; }\n";
+    let (output, obj) = run_object_test("compound-array-member-chain", source);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "复合字面量数组成员取址必须能编: {stderr}");
+    let rel = Command::new("objdump")
+        .arg("-r")
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&rel.stdout).to_string();
+    let _ = fs::remove_file(&obj);
+    let data_part = text.split("RELOCATION RECORDS FOR [.data]").nth(1).unwrap_or("");
+    let data_part = data_part
+        .split("RELOCATION RECORDS FOR [")
+        .next()
+        .unwrap_or(data_part);
+    assert!(
+        data_part.contains(".L.compound"),
+        "`tab[0]` 必须重定位到匿名的复合字面量（现在被写成 NULL）:\n{text}"
+    );
+    // `.attr` 前面有 int pad：成员链偏移必须是编译期常量 8，不能丢成 +0。
+    assert!(
+        data_part
+            .lines()
+            .any(|l| l.contains(".L.compound") && l.contains("+0x0000000000000008")),
+        "`&(…)[0].attr.attr` 的加数应为 8（int pad 之后）:\n{text}"
+    );
+}
+
+/// `drm_WARN_ON()` 的 `__stringify(x)` 套在 `REG_FIELD_PREP()` 上面：
+/// 条件展开后带着内层 `GENMASK_INPUT_CHECK()` 的 `_Static_assert` 消息字符串，
+/// 而 `BUILD_BUG_ON_ZERO(!__is_constexpr(mask))` 又先把它转义了一遍。
+/// `#` 必须把已经转义过的 `\"` 双写成 `\\\"`。只给 `"` 补 `\`、不给 `\` 双写时，
+/// 那个 `"` 重新词法分析会提前闭合字符串，剩下的 `is true\"` 变成游离 token
+/// （`\` 记 Invalid），紧接的语句报 E0001
+/// （`drivers/gpu/drm/i915/display/intel_cdclk.c:1979` 实测 43 条）。
+#[test]
+#[cfg(unix)]
+fn kernel_stringify_escapes_inner_literal_quotes() {
+    let source = "\
+#define __stringify_1(x...) #x\n\
+#define __stringify(x...) __stringify_1(x)\n\
+#define __is_constexpr(x) (sizeof(int) == sizeof(*(8 ? ((void *)((long)(x) * 0l)) : (int *)8)))\n\
+#define __BUILD_BUG_ON_ZERO_MSG(e, msg, ...) ((int)sizeof(struct { _Static_assert(!(e), ##__VA_ARGS__, msg); }))\n\
+#define BUILD_BUG_ON_ZERO(e, ...) __BUILD_BUG_ON_ZERO_MSG(e, ##__VA_ARGS__, #e \" is true\")\n\
+#define const_true(x) __builtin_choose_expr(__is_constexpr(x), x, (0))\n\
+#define GENMASK_INPUT_CHECK(h, l) BUILD_BUG_ON_ZERO(const_true((l) > (h)))\n\
+#define GENMASK_U32(h, l) ((unsigned)(GENMASK_INPUT_CHECK(h, l) + (((~0u) << (l)) & (~0u >> (31 - (h))))))\n\
+#define __bf_shf(x) (__builtin_ffsll(x) - 1)\n\
+#define REG_FIELD_PREP(m, v) ((unsigned)((((typeof(m))(v) << __bf_shf(m)) & (m)) + BUILD_BUG_ON_ZERO(!__is_constexpr(m))))\n\
+#define DIV_SEL_MASK GENMASK_U32(23, 22)\n\
+#define DIV_SEL_1 REG_FIELD_PREP(DIV_SEL_MASK, 0)\n\
+extern void drm_report(const char *fmt, ...);\n\
+#define drm_WARN_ON(x) do { if (x) drm_report(\"%s\", \"drm_WARN_ON(\" __stringify(x) \")\"); } while (0)\n\
+int cdclk_pipe(int ret) { drm_WARN_ON(ret != DIV_SEL_1); return ret; }\n";
+    let (output, obj) = run_object_test("kernel-stringify-inner-quotes", source);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "`#` 转义内层字面量失败会让后续 token 游离（E0001/E0006）: {stderr}"
+    );
+    let text = Command::new("strings").arg(&obj).output().expect("strings");
+    let _ = fs::remove_file(&obj);
+    let strs = String::from_utf8_lossy(&text.stdout).to_string();
+    assert!(
+        strs.contains("drm_WARN_ON(") && strs.contains("const_true((22) > (23))"),
+        "警告消息应完整包含 `drm_WARN_ON(` 与内层字面量（字符串被提前截断时会拼不出来）:\n{strs}"
+    );
+}
+
+/// 括号化函数指针声明符把属性写在 `*` **前面**：
+/// `(__attribute__((ms_abi)) *fn_t)`。内核用 `__efiapi` 铺满了 EFI 回调原型
+/// （`drivers/firmware/efi/libstub/efistub.h:184/216`）——
+///
+/// 三条声明符路径都必须在「基类型的 `*` 已吃完」之后才看到这个 `(`：
+///   * typedef：`typedef void (__efiapi *fn_t)(...)` 会先被「(name) 函数 typedef」
+///     分支当成名字，随后 `expect(')')` 报 E0001；
+///   * 字段：`efi_char16_t *(__efiapi *cb)(...)` 的基类型自带 `*`，属性探测若放在
+///     `parse_ptr_suffix` 之前，cur 还停在 `*` 上，永远看不到 `(`；
+///   * 全局变量：同上。
+/// 旧实现三个形状全报 E0001/E0003/E0009（build6 里 alignedmem.o 一个 TU 35 条）。
+/// 除了能编，还得证声明符结合顺序没错：多包一层 `*`（`void **(*f)(int)`）
+/// 在 x86_64 上尺寸一样，只有真调用才暴露，所以这里跑运行时。
+#[test]
+#[cfg(unix)]
+fn kernel_paren_funcptr_attr_declarator() {
+    let source = "\
+#define __efiapi __attribute__((ms_abi))\n\
+static void *ret_ptr(int x) { return (void *)(long)(x + 41); }\n\
+typedef void (__efiapi *notify_t)(int, void *);\n\
+typedef void *(*plain_t)(int);\n\
+struct s { void *(__efiapi *f)(int); };\n\
+static void (*gp)(int, void *);\n\
+static void *(__efiapi *gp2)(int);\n\
+int main(void) {\n\
+\tnotify_t t = (notify_t)0;\n\
+\tplain_t f = ret_ptr;\n\
+\tstruct s s1 = { ret_ptr };\n\
+\tgp = (void (*)(int, void *))ret_ptr;\n\
+\tgp2 = ret_ptr;\n\
+\tt = (notify_t)f;\n\
+\tif (f(1) != (void *)42) return 1;\n\
+\tif (s1.f(1) != (void *)42) return 2;\n\
+\tif (gp2(1) != (void *)42) return 3;\n\
+\tif (t != (notify_t)f) return 4;\n\
+\tif (sizeof(struct s) != 8) return 5;\n\
+\tif (gp == 0) return 6;\n\
+\treturn 0;\n\
+}\n";
+    let (out, exe) = run_compile_and_run("paren-funcptr-attr", source);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "括号内属性在 `*` 前的函数指针声明符应能编: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    // 运行时能过 ⇒ 声明符结合顺序对（多包一层指针时调用会读错返回类型）。
+    assert_eq!(rc, 0, "属性函数指针声明符的运行时行为不对（rc={rc}）");
+}
+
+/// 数据节里**只定义、不被引用**的 asm 标号必须进 symtab（GAS 口径）。
+///
+/// `include/linux/export.h` 的导出条目是
+///     .section ".export_symbol","a"
+///     __export_symbol_##sym:
+///         .asciz <license> / .ascii <ns> "\0" / .quad sym
+/// —— 标号只定义、从没被任何重定位引用，也没有 `.globl`。modpost 的
+/// `check_export_symbol` 靠 `find_fromsym(faddr, .export_symbol)` 找条目所在的
+/// 那条标号（取「≤ faddr 的最近符号」），所以 `.o` 里没这条符号时它会错配到
+/// 前一个导出名下：build8 的 vmlinux.symvers 阶段满屏
+/// “references 'x', but it does not seem to be an export symbol”后 SIGSEGV。
+#[test]
+#[cfg(unix)]
+fn asm_label_in_data_section_emitted_to_symtab() {
+    let source = "\
+int exported_fn(int x) { return x + 1; }
+\
+asm(\".section \\\".export_symbol\\\",\\\"a\\\"\\n\
+\
+__export_symbol_exported_fn:\\n\
+\
+\\t.asciz \\\"GPL\\\"\\n\
+\
+\\t.ascii \\\"\\\" \\\"\\\\0\\\"\\n\
+\
+\\t.balign 8\\n\
+\
+\\t.quad exported_fn\\n\
+\
+.previous\\n\");\n";
+    let (out, obj) = run_object_test("asm-label-symtab", source);
+    assert!(
+        out.status.success(),
+        "导出条目夹具应能编: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let secs = Command::new("readelf").arg("-SW").arg(&obj).output().expect("readelf -SW");
+    let secs_text = String::from_utf8_lossy(&secs.stdout).to_string();
+    // `.export_symbol` 的节号：符号条目的 Ndx 列必须是它，不能落到 .text。
+    let sec_index = secs_text
+        .lines()
+        .find_map(|l| {
+            // 行首是 `[ 7]` / `[10]` 这种带空格的节号。
+            let t = l.trim_start().trim_start_matches('[');
+            let mut f = t.split_whitespace();
+            let idx = f.next()?.trim_end_matches(']');
+            (f.next()? == ".export_symbol").then(|| idx.parse::<u32>().ok())?
+        })
+        .expect("`.export_symbol` 节应存在");
+    let syms = Command::new("readelf").arg("-sW").arg(&obj).output().expect("readelf -sW");
+    let syms_text = String::from_utf8_lossy(&syms.stdout).to_string();
+    let line = syms_text
+        .lines()
+        .find(|l| l.contains("__export_symbol_exported_fn"))
+        .unwrap_or_else(|| panic!("只定义不引用的 asm 标号不进 symtab，modpost 认不出导出条目:\n{syms_text}"));
+    let f: Vec<&str> = line.split_whitespace().collect();
+    // Num: Value Size Type Bind Vis Ndx Name → 这条链上字段下标固定。
+    assert!(
+        f.len() >= 8 && f[3] == "NOTYPE" && f[4] == "LOCAL",
+        "标号应为 LOCAL/NOTYPE（与 GAS 对未 .globl 标号的口径一致）: {line}"
+    );
+    assert_eq!(f[5], "DEFAULT", "可见性应为 DEFAULT: {line}");
+    assert_eq!(
+        f[6].parse::<u32>().ok(),
+        Some(sec_index),
+        "符号必须坐在 .export_symbol 里（不是 .text）: {line}"
+    );
+    assert_eq!(f[1], "0000000000000000", "标号应在条目起点（license 字符串前）: {line}");
+    let _ = fs::remove_file(&obj);
+}
+
+/// `-fPIC` 必须关掉稠密 switch 的跳表降级（`ssa::structure`）。
+///
+/// 跳表是「静态 `const void *const` 表 + `goto *`」，表项发成 `.quad 标号`，
+/// 也就是 `.data` 里的 **绝对** 64 位地址 `R_X86_64_64`。EFI stub 用 `-fPIC`
+/// 编，`drivers/firmware/efi/libstub/Makefile` 的 STUBCPY 检查直接把这种重定位
+/// 当作错误（build7 卡在 `vsprintf.stub.o: absolute symbol references not allowed
+/// in the EFI stub`，33 条 R_X86_64_64）；PIC 的本意也不允许地址固化进数据段。
+///
+/// 夹具必须是**非结构化**函数（有 goto/label）才会走到跳表降级那条路，
+/// 只放一个稠密 switch 是编不出表的（普通函数走 if 链降级 + SSA 重建）。
+/// 两条断言互为对照：非 PIC 有表（证明夹具真触发了降级，PIC 侧的空集不是
+/// 因为根本没上表），PIC 无表。
+#[test]
+#[cfg(unix)]
+fn switch_jumptable_gated_by_pic() {
+    let source = "\
+static int dense(int x)
+{
+\tint r = 0;
+\tif (x < 0)
+\t\tgoto done;
+\tswitch (x % 12) {
+\tcase 0: r += 1; break;
+\tcase 1: r += 2; break;
+\tcase 2: r += 3; break;
+\tcase 3: r += 4; break;
+\tcase 4: r += 5; break;
+\tcase 5: r += 6; break;
+\tcase 6: r += 7; break;
+\tcase 7: r += 8; break;
+\tcase 8: r += 9; break;
+\tcase 9: r += 10; break;
+\tcase 10: r += 11; break;
+\tdefault: r = -1; break;
+\t}
+done:
+\treturn r;
+}
+int dense_call(int x) { return dense(x); }
+";
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-picgate-{}.c", temp_tag()));
+    fs::write(&src, source).expect("write C fixture");
+    // DCC_SWITCHTABLE=1 显式钉住：否则外部环境里 `DCC_SWITCHTABLE=0`（归因用的
+    // 反向闸）会让非 PIC 侧也不上表，对照断言变假阳性。
+    let build = |obj: &std::path::Path, extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .arg("-c")
+            .arg("-O2")
+            .args(extra)
+            .env("DCC_SWITCHTABLE", "1")
+            .arg("-o")
+            .arg(obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(out.status.success(), "编译失败({extra:?}): {}", String::from_utf8_lossy(&out.stderr));
+        let rel = Command::new("objdump")
+            .arg("-r")
+            .arg(obj)
+            .output()
+            .expect("objdump -r");
+        assert!(rel.status.success(), "objdump -r failed");
+        String::from_utf8_lossy(&rel.stdout).to_string()
+    };
+    let plain_obj = dir.join(format!("dcc-picgate-plain-{}.o", temp_tag()));
+    let pic_obj = dir.join(format!("dcc-picgate-pic-{}.o", temp_tag()));
+    let plain_rel = build(&plain_obj, &[]);
+    let pic_rel = build(&pic_obj, &["-fPIC"]);
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&plain_obj);
+    let _ = fs::remove_file(&pic_obj);
+    assert!(
+        plain_rel.contains("R_X86_64_64"),
+        "非 PIC 下非结构化函数的稠密 switch 应上跳表（夹具没触发降级？）:\n{plain_rel}"
+    );
+    assert!(
+        !pic_rel.contains("R_X86_64_64"),
+        "-fPIC 下不得出现绝对地址表项（EFI stub 的 STUBCPY 会拒收）:\n{pic_rel}"
+    );
+}
+
+/// 内核 `include/linux/bitfield.h` 的常量位域链必须折到底。判据取 gcc -O2 实测：
+/// 三条「常量实装得下」的调用一条 `trap_*` 引用都不留，只有越界那条留 1 条。
+/// 现场后果（修前）：`LD .tmp_vmlinux1` 报 `undefined reference to '__field_overflow'`
+/// 21 条 + `'__bad_mask'` 8 条 + `'__bad_udelay'` 3 条，而 `trap_*` 这类函数在头里
+/// **只有声明、没有定义**，gcc 靠「永远不发出引用」保证链得上。
+#[test]
+#[cfg(unix)]
+fn bitfield_const_encode_folds_traps_away() {
+    let src = include_str!("../fixtures/c/bitfield_const_encode_traps.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("bf-trap", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und = elf64_undefined_symbols(&bytes);
+        let kept: Vec<&String> = und
+            .iter()
+            .filter(|n| n.starts_with("trap_"))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "{flag}: 常量位域检查没折干净（或折过头），产物里留下 {kept:?} 条 trap 引用；\
+             gcc -O2 实测只有 c4_overflow_stays 的 1 条"
+        );
+        assert!(
+            kept[0].starts_with("trap_field_overflow"),
+            "{flag}: 唯一该留下的越界引用错了，实际: {kept:?}"
+        );
+    }
+}
+
+/// 内核 `DO_ONCE()` 的两条必经形状：`"i"` 立即数必须落到函数内 `static` 的
+/// **mangled 名**上，且 `static_key_enabled()` 的类型守卫必须折成假。
+/// 现场后果（修前）：全树 47 个对象 `undefined reference to '___once_key'`
+/// （`__jump_table` 条目发的是源码名，而定义体 `.Lsl<N>.<fn>.___once_key` 明明就在
+/// `.data..do_once` 里），另有 21 条 `____wrong_branch_error`。
+#[test]
+#[cfg(unix)]
+fn once_key_asm_immediate_targets_mangled_static() {
+    let src = include_str!("../fixtures/c/once_key_asm_immediate_symbol.c");
+    for flag in ["-O0", "-O2"] {
+        let (out, obj) = run_object_test_flags("oncekey", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und = elf64_undefined_symbols(&bytes);
+        assert!(
+            !und.iter().any(|n| n == "___once_key"),
+            "{flag}: asm 立即数把符号打成了源码名，产物里有不存在的 `___once_key` 引用：{und:?}"
+        );
+        assert!(
+            !und.iter().any(|n| n.starts_with("trap_")),
+            "{flag}: `__builtin_types_compatible_p` 的守卫没折掉，留下陷阱引用：{und:?}"
+        );
+        let syms = elf64_syms_by_type(&bytes);
+        // `__jump_table` 的那条重定位必须指向一个**本对象已定义**的符号。
+        let rela = elf64_rela(&bytes, ".rela__jump_table");
+        assert_eq!(
+            rela.len(),
+            1,
+            "{flag}: `__jump_table` 条目应当有 1 条重定位，实际 {} 条",
+            rela.len()
+        );
+        let target = syms.get(rela[0].1 as usize).expect("jump_table 重定位的符号存在");
+        assert!(
+            target.name.ends_with("___once_key") && target.shndx != 0,
+            "{flag}: `__jump_table` 条目应指向已定义的 static 键（mangled 名），\
+             实际指向 {:?} shndx={}",
+            target.name,
+            target.shndx
+        );
+    }
+}
+
+/// `-Wimplicit-fallthrough` 必须认 GCC 的双下划线写法。内核的伪关键字 `fallthrough;`
+/// 经 `include/linux/compiler_attributes.h:214` 展开成
+/// `__attribute__((__fallthrough__))`，只比裸名会全不认 —— 实测 localmodconfig 全树
+/// 44 185 条 W0501，主体来自 `include/linux/signal.h` 的 `_SIG_SET_OP` 与
+/// `include/linux/mm.h` 的位图宏，每个含它的 TU 刷一遍。
+/// 判据取 gcc 同旗标实测：整份夹具只报 1 条（那个真的没标记的）。
+#[test]
+#[cfg(unix)]
+fn fallthrough_gnu_attr_double_underscore_is_recognized() {
+    let src = include_str!("../fixtures/c/fallthrough_gnu_attr_double_underscore.c");
+    let (out, obj) = run_object_test_flags("ftattr", src, &["-O2", "-Wall", "-Wimplicit-fallthrough"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(&obj);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    let n = err.matches("W0501").count();
+    assert_eq!(
+        n, 1,
+        "四种 fallthrough 标记形态里还有没被认出的（W0501 应当只剩 f_real_bug 那 1 条），\n实际 {n} 条:\n{err}"
+    );
+    // 诊断给的是「文件:行:列」而不带函数名，所以拿行号定位：唯一那条必须落在
+    // f_real_bug（夹具里最后一个函数，也是唯一没标记的那个）起算的位置之后。
+    let bug_line = src
+        .lines()
+        .position(|l| l.starts_with("int f_real_bug("))
+        .expect("夹具里应有 f_real_bug")
+        + 1;
+    let reported: Vec<usize> = err
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("--> "))
+        // 形式是 `…/<名>.c:行:列`：从右往左第三段才是行号（rsplitn(3) 的 [1]）。
+        .filter_map(|l| l.rsplitn(3, ':').nth(1)?.parse().ok())
+        .collect();
+    assert_eq!(
+        reported.len(),
+        1,
+        "W0501 的位置行应当只有一条，实际: {reported:?}\n{err}"
+    );
+    assert!(
+        reported[0] >= bug_line,
+        "唯一那条 W0501 指向第 {} 行，不在没标记的 f_real_bug（自第 {bug_line} 行起）里 —— \
+         说明某个已标记形态被误报了:\n{err}",
+        reported[0]
+    );
+}
+
+/// `#if` 的**短路求值**与内核常用内建的诊断静默。判据取 gcc -Wundef 实测：
+/// `include/uapi/linux/stat.h:7` 与 `coda.h:100` 那两形 gcc 一条不报（未参与运算的
+/// 操作数不警告），只有真被读到的裸标识符报 1 条；`__builtin_unreachable`/
+/// `__builtin_prefetch` 不该报「返回类型未知」（全树 39 235 条 W1015）。
+/// 顶层 `?:` 走同一条判据（`include/uapi/sound/asound.h:561` 那族字节序宏，
+/// 全树 656 条 W0202 而 gcc 0 条）。
+/// 同时钉住分支选择：短路只是求值策略，不是语义。
+#[test]
+#[cfg(unix)]
+fn pp_if_short_circuit_matches_gcc_undef() {
+    let src = include_str!("../fixtures/c/pp_short_circuit_undef_and_builtins.c");
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-ppsc-{}.c", std::process::id()));
+    fs::write(&sp, src).expect("write pp fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-Wundef", "-E"])
+        .arg(&sp)
+        .output()
+        .expect("run dcc -Wundef -E");
+    let _ = fs::remove_file(&sp);
+    assert!(
+        output.status.success(),
+        "预处理失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let err = String::from_utf8_lossy(&output.stderr).to_string();
+    let outtxt = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        !err.contains("__GLIBC__") && !err.contains("__GLIBC2__"),
+        "短路后不该被读到的宏仍被警告了（gcc 同输入 0 条）:\n{err}"
+    );
+    // 顶层 `?:` 也要短路：内核那一族字节序判据（实测 localmodconfig 全树 656 条
+    // W0202，gcc 同旗标 0 条）就是只不切 `?:` 造成的。
+    assert!(
+        !err.contains("__BYTE_ORDER")
+            && !err.contains("__BIG_ENDIAN")
+            && !err.contains("UNREAD_IN_ELSE")
+            && !err.contains("UNREAD_IN_THEN"),
+        "三元没短路，未参与的支也刷了 -Wundef（gcc 同输入 0 条）:\n{err}"
+    );
+    assert!(
+        err.contains("READING_UNDEF_MACRO"),
+        "真被读到的裸标识符必须照报（gcc 也报这一条）:\n{err}"
+    );
+    assert!(
+        !err.contains("W1015"),
+        "`__builtin_unreachable`/`__builtin_prefetch` 不该报返回类型未知:\n{err}"
+    );
+    assert!(
+        outtxt.contains("int short_circuit_true;") && outtxt.contains("int paren_short_true;"),
+        "短路改变了分支选择（语义被改坏）:\n{outtxt}"
+    );
+    // 三元的分支选择：判据取 gcc -Wundef -E 实测（be_not_taken / one_taken / three_taken）。
+    assert!(
+        outtxt.contains("int endian_be_not_taken;")
+            && outtxt.contains("int cond_true_taken;")
+            && outtxt.contains("int cond_false_taken;"),
+        "三元的分支选择与 gcc 不一致:\n{outtxt}"
+    );
+    assert!(
+        !outtxt.contains("int endian_be_taken;")
+            && !outtxt.contains("int cond_true_not_taken;")
+            && !outtxt.contains("int cond_false_not_taken;"),
+        "三元取了不该取的那一支:\n{outtxt}"
+    );
+    assert!(
+        !outtxt.contains("short_circuit_false") && !outtxt.contains("paren_short_false"),
+        "分支选择与修前不一致（不该取的 else 支被取了）:\n{outtxt}"
+    );
+}
+
+/// `__has_attribute(__fallthrough__)` 必须答 1（GCC 的保留标识符写法与裸名等价）。
+/// 答 0 的后果不是少个宏，而是整个内核退到
+/// `include/linux/compiler_attributes.h:216` 的注释后备支 `do {} while (0)  /* fallthrough */`
+/// —— 那条只能靠注释识别，于是实测 localmodconfig 全树刷出 44 185 条 W0501。
+/// 判据取 gcc -E 实测：yes_us 在、no_us 与 mismatch 都不在；再带一次真正的
+/// `fallthrough;`（宏体里，内核 `_SIG_SET_OP` 的形状）确认属性被认下。
+#[test]
+#[cfg(unix)]
+fn has_attribute_accepts_reserved_identifier_spelling() {
+    let src = include_str!("../fixtures/c/has_attribute_double_underscore.c");
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-hattr-{}.c", std::process::id()));
+    fs::write(&sp, src).expect("write has_attribute fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-E")
+        .arg(&sp)
+        .output()
+        .expect("run dcc -E");
+    assert!(
+        output.status.success(),
+        "-E 失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pp = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        pp.contains("int yes_us;"),
+        "`__has_attribute(__fallthrough__)` 被判成不支持，内核会退到注释后备支:\n{pp}"
+    );
+    assert!(
+        !pp.contains("int no_us;"),
+        "取错了 #if 分支（该走属性支）:\n{pp}"
+    );
+    assert!(
+        !pp.contains("int mismatch;"),
+        "裸名与两侧下划线名答案不一致（同一属性的两种写法）:\n{pp}"
+    );
+    let (out, obj) = run_object_test_flags(
+        "hattr",
+        src,
+        &["-O2", "-std=gnu11", "-Wall", "-Wimplicit-fallthrough"],
+    );
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&sp);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).matches("W0501").count(),
+        0,
+        "宏体里的 `fallthrough;`（展开成 __attribute((__fallthrough__))）没被认出:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// 同 TU 内「空体 void 函数」的调用必须被就地吸收。现场（`arch/x86/kernel/alternative.c:2439`）：
+/// 声明 `extern s32 __ibt_endbr_seal[]` 与调用都是**无条件**的，而 `!CONFIG_X86_KERNEL_IBT`
+/// 时选中的定义体是 `{ }`，链接脚本又把 `.ibt_endbr_seal` 整个节包在
+/// `#ifdef CONFIG_X86_KERNEL_IBT` 里 ⇒ 只要调用还在就报
+/// `undefined reference to '__ibt_endbr_seal'`（实测本树 2 条）。gcc/clang 靠吸收空体调用
+/// 把实参的地址一起消掉，`fold_const_return_calls` 只认 `static` 常量桩，看不见这一族。
+///
+/// 判据只量这条规则本身，不借 gcc 的其它 DCE 当等式（gcc 在这份小夹具上还顺手删了
+/// 两处未用返回值的纯调用，那是另一件事）：
+///   * `probe_only_declared_end` **只**出现在被吸收的那次调用里 ⇒ 它必须 0 条重定位；
+///   * 两处不该被吸收的调用点（被调者有真实体 / 实参本身是一次真调用）各自引用
+///     `probe_only_declared` ⇒ 必须留着 2 条，证明规则没有过头。
+#[test]
+#[cfg(unix)]
+fn same_tu_empty_void_call_is_absorbed_but_not_over_absorbed() {
+    let src = include_str!("../fixtures/c/empty_void_call_absorbed.c");
+    for flag in ["-O1", "-O2"] {
+        let (out, obj) = run_object_test_flags("emptyvoid", src, &[flag, "-std=gnu11"]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        // 把每条重定位的符号索引换成符号名。两处必须用对工具：
+        //   * `elf64_all_rela` 只走 `.rela.dyn/.plt/.iplt`，而这里的引用坐在
+        //     `.rela.text` 里，所以直接点那条节；
+        //   * 名字要用 **全表下标对齐** 的 [`elf64_syms`]，[`elf64_syms_by_type`] 是筛过的，
+        //     拿它的下标去解重定位的 `sym_index` 会整体错位。
+        // 判据拿**全名相等**：`probe_only_declared_end` 包含子串 `probe_only_declared`，
+        // 用 contains 会把两个计数器搅在一起。
+        let syms = elf64_syms(&bytes);
+        let names: Vec<String> = elf64_rela(&bytes, ".rela.text")
+            .iter()
+            .filter_map(|(_, idx, _, _)| syms.get(*idx as usize).map(|s| s.name.clone()))
+            .collect();
+        let n_end = names.iter().filter(|n| *n == "probe_only_declared_end").count();
+        let n_decl = names.iter().filter(|n| *n == "probe_only_declared").count();
+        assert_eq!(
+            n_end,
+            0,
+            "{flag}: 空体调用没被吸收 —— 只有被吸收那次用到 `_end` 数组，它还留着 \
+            {n_end} 条重定位（现场后果就是链接期 undefined reference）"
+        );
+        assert_eq!(
+            n_decl, 2,
+            "{flag}: `probe_only_declared` 的重定位应当是 2 条（两处**不该**吸收的调用点各一条），\
+             实际 {n_decl} 条 —— 说明规则过头，把有副作用/有真实体的调用也吞了"
+        );
+    }
+}
+
+/// 链式 `if / else if / else` 里恒假的 `else if` 支必须被塌缩掉。
+///
+/// 为什么单独立一条：`fold_branches_block` 删「块内一项」的 `if` 是能做的，而第三支坐在
+/// 外层 `if` 的 `else_` 操作数上，不就地塌缩就永远删不掉。现场后果（实测 `mm/rmap.o`
+/// 的 `folio_referenced_one`）：`else if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))` 在
+/// THP 关时是死支，里面调的是 `include/linux/pgtable.h:546` 的 `BUILD_BUG()` 占位实现，
+/// 占位的调用发进 `.text` ⇒ 链接期 `undefined reference to 'pmdp_clear_flush_young'`。
+///
+/// 判据两半：产物级（trap 一条引用都不许留）+ 行为级（恒真的 `else if (1)` 必须**选中**，
+/// 连塌两跳后的值也必须对，否则「一律删第三支」这种假修复能过前者、过不了后者）。
+#[test]
+#[cfg(unix)]
+fn dead_else_if_arm_is_collapsed_and_live_one_is_taken() {
+    let src = include_str!("../fixtures/c/dead_else_if_chain.c");
+    for flag in ["-O1", "-O2"] {
+        let (out, obj) = run_object_test_flags("elseif", src, &[flag, "-std=gnu11"]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und = elf64_undefined_symbols(&bytes);
+        assert!(
+            !und.iter().any(|n| n == "trap_never_called"),
+            "{flag}: 恒假的 `else if` 支没塌掉，产物里留下对 trap 的引用：{und:?}"
+        );
+        // 行为级：反向对照在这里生效（退出码就是第一个不匹配的形状编号）
+        let (cout, exe) = run_compile_and_run_flags("elseif", src, &[flag, "-std=gnu11"]);
+        assert!(
+            cout.status.success(),
+            "{flag}: 链接失败（死支没折掉时 trap 无定义，链接就会报）: {}",
+            String::from_utf8_lossy(&cout.stderr)
+        );
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(
+            rc,
+            0,
+            "{flag}: 分支选择被改坏（退出码 1=恒假 else-if 没塌、2=恒真 else-if 没选中、\
+             3=连塌两跳后的值不对），实际 {rc}"
+        );
+    }
+}
+
+/// `-Wimplicit-fallthrough` 与 gcc **逐条对齐**：报哪几条、不报哪几条都要一样。
+/// 四条形状里 `case A: case B:`（共享体的空 case）与以 `do { … __builtin_unreachable();
+/// } while (0);`（内核 `BUG()` 的包装）收尾的两支 gcc 不报，只有「只有一句声明」与
+/// 「真贯穿」两支报 —— 前者以前被dcc 误报（展开后本支体里剩一条空语句占位，
+/// `last_effective_stmt` 返回 None 却落进「未标注贯穿」分支），后者以前也不报终止
+/// （`do{}while(0)` 被当成循环就不算终止）。期望值取 gcc -O0 -Wall 实测：2 条。
+#[test]
+#[cfg(unix)]
+fn implicit_fallthrough_matches_gcc_shape_by_shape() {
+    let src = include_str!("../fixtures/c/fallthrough_gcc_parity_shapes.c");
+    let (out, obj) =
+        run_object_test_flags("ftshapes", src, &["-O0", "-Wall", "-Wimplicit-fallthrough"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(&obj);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    // 只取紧跟在 W0501 之后的那一行 `--> 路径:行:列`：别的警告也带 `-->`（比如
+    // 内建名单缺项时的 W1015），混进来会把判据脏掉。
+    let mut lines: Vec<usize> = Vec::new();
+    let mut pending = false;
+    for l in err.lines() {
+        if l.starts_with("warning[W0501]") {
+            pending = true;
+            continue;
+        }
+        if pending {
+            if let Some(rest) = l.trim_start().strip_prefix("--> ") {
+                if let Some(ln) = rest.rsplitn(3, ':').nth(1).and_then(|v| v.parse::<usize>().ok())
+                {
+                    lines.push(ln);
+                }
+                pending = false;
+            }
+        }
+    }
+    let nth = |fn_name: &str| -> usize {
+        src.lines()
+            .position(|l| l.starts_with(&format!("int {fn_name}("))
+                || l.starts_with(&format!("void {fn_name}(")))
+            .unwrap_or_else(|| panic!("夹具里应有 {fn_name}"))
+            + 1
+    };
+    let (empty, decl_bare, real_ft, bug_like) = (
+        nth("empty_shared_case"),
+        nth("decl_bare_case"),
+        nth("real_fallthrough"),
+        nth("bug_like_case"),
+    );
+    let inside = |ln: usize, start: usize, next: usize| ln >= start && ln < next;
+    assert_eq!(
+        lines.len(),
+        2,
+        "W0501 应与 gcc 一样只有 2 条（声明-only 与真贯穿），实际落在 {lines:?}:\n{err}"
+    );
+    assert!(
+        lines.iter().all(|ln| inside(*ln, decl_bare, bug_like)),
+        "两条都该落在声明-only / 真贯穿这两个函数里，实际 {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|ln| inside(*ln, empty, decl_bare)),
+        "`case A: case B:` 的空 case 被误报了（gcc 不报：没有语句被跨过）"
+    );
+    assert!(
+        !lines.iter().any(|ln| *ln >= bug_like),
+        "以 `do {{ … }} while (0);`（BUG() 形状）收尾的 case 被误报了（gcc 不报）"
+    );
+    assert!(
+        lines.iter().any(|ln| inside(*ln, decl_bare, real_ft)),
+        "「只有一句声明」的那支必须报（gcc 报）：{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|ln| inside(*ln, real_ft, bug_like)),
+        "真贯穿的那支必须报（gcc 报）：{lines:?}"
+    );
+    assert!(
+        !err.contains("W1015"),
+        "`__builtin_trap()` 不该报「返回类型未知」（它没有声明可写）:\n{err}"
+    );
+    assert!(
+        !err.contains("W0502"),
+        "不该出现 misplaced fallthrough 警告:\n{err}"
+    );
+}
+
+/// 块级 `const` 出块后不得继续遮蔽同名变量。现场（实测 `mm/compaction.c:643`）：函数
+/// 作用域有可变的 `order`，`if (PageCompound(page)) { const unsigned int order = …; }`
+/// 里另有一个块级同名 const，出块之后的 `order = buddy_order(page);` 被 dcc 判成
+/// `E0030: assignment of read-only variable 'order'` 直接拒编（`var_quals` 以前只按
+/// 名字建表、只在换函数时清）。
+/// 判据两半：夹具三个函数都必须**编过且跑对**（退出码就是第一个不匹配的函数编号），
+/// 而真的 const 赋值仍必须是错误 —— 只把检查关掉这种改法过不了第二条。
+#[test]
+#[cfg(unix)]
+fn block_scoped_const_does_not_leak_out_of_its_block() {
+    let src = include_str!("../fixtures/c/const_shadow_scope.c");
+    for flag in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("constshadow", src, &[flag, "-std=gnu11"]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译/链接失败（块级 const 泄漏出块就会走到这里）: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(
+            rc,
+            0,
+            "{flag}: 赋值落错了对象（退出码 1=块内读错, 2=出块后写错, 3=兄弟块串了, \
+             4=嵌套块写错），实际 {rc}"
+        );
+    }
+    // 反向对照：真 const 变量赋值必须仍然是错误
+    let bad = "int f(void) { const int c = 1; c = 2; return c; }\n";
+    let (out, obj) = run_object_test_flags("constshadow-bad", bad, &["-O2", "-std=gnu11"]);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        !out.status.success(),
+        "const 赋值被放过了（E0030 应当仍然报）:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("read-only"),
+        "报错文案不该变（判据要指得出是被 const 拦住）:\n{err}"
+    );
+    // 复合赋值同一条判据
+    let bad2 = "int f(void) { const int c = 1; c += 2; return c; }\n";
+    let (out2, obj2) = run_object_test_flags("constshadow-bad2", bad2, &["-O2", "-std=gnu11"]);
+    let _ = fs::remove_file(&obj2);
+    assert!(
+        !out2.status.success(),
+        "const 的复合赋值被放过了:\n{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+}
+
+/// 具名 `struct`/`union` 之后的标识符是声明符，即使它正好等于一个可见 typedef 名。
+/// 以前 `parse_field_declarator` 里「当前标识符看着像类型名 ⇒ 它属于下一个字段」这条
+/// 启发式不分匿名/具名，于是 `struct mutex rl_t;`（真树：`include/sound/hdaudio.h:93`
+/// 的 `regmap_lock` 与 `include/linux/regmap.h:257` 的 typedef 同名）成员名被吞，
+/// **布局一起错**：gcc 给 size=20/rl=4/after=8，dcc 给 size=32/rl=0（与 head 重叠）。
+/// 反向对照同一条里带上：那条启发式真正服务的匿名内联体仍必须被展平。
+#[test]
+#[cfg(unix)]
+fn named_struct_field_may_share_a_typedef_name() {
+    let src = include_str!("../fixtures/c/named_struct_field_named_like_typedef.c");
+    for flag in ["-O0", "-O2"] {
+        let (out, obj) = run_object_test_flags("namedfield", src, &[flag, "-std=gnu11", "-Wall"]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !err.contains("W1009"),
+            "{flag}: 成员名被判成「未知聚合成员」就是这条缺陷的信号:\n{err}"
+        );
+        let _ = fs::remove_file(&obj);
+        let (cout, exe) = run_compile_and_run_flags("namedfield", src, &[flag, "-std=gnu11"]);
+        assert!(
+            cout.status.success(),
+            "{flag}: 链接失败: {}",
+            String::from_utf8_lossy(&cout.stderr)
+        );
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(
+            rc,
+            0,
+            "{flag}: 偏移/布局与 gcc 实测不一致（退出码 1-8=具名成员的 size/offset/读写, \
+             9-11=匿名内联体的展平对照），实际 {rc}"
+        );
+    }
+}
+
+/// 短路运算符「**不被求值的那一侧**」与「常量跨过有 `goto` 指向的标号代回」的产物级
+/// 双向判据（夹具 `shortcircuit_guard_trap.c`，§5.0o）。
+///
+/// 两条独立机制：
+///   1) `static_key_enabled()` 那族 `if (!A && !B && !C) ____wrong_branch_error();`：
+///      第一个 `!A` 折成 0 之后，按 C11 6.5.13 右侧根本不被求值，而旧的丢弃判据两侧都问
+///      （`Call` 一律答「有副作用」）⇒ 塌缩后的条件又被留成一条语句。`?:` 同一条道理。
+///   2) 代回器 `subst_cprop_into_stmt_exprs` 缺 `Expr::Ident` 叶臂 ⇒ 纯拷贝 `r1 = r2`
+///      从来代不回，恒 0 的条件读不出来（`d_xlabel_dead` 那条形，`iommu_amdv1.o` 的
+///      `__pt_no_sw_bit` 就钉在这条上）。
+/// 期望名单是拿 `gcc -O2`/`-O3` 实测的：`trap_*` 五条 0 引用、`keep_*` 四条全在。
+/// `keep_f_and`（`1 && 调用`）与 `keep_g_or`（`0 || 调用`）是这一族的反向对照 —— 短路位置
+/// 定下来时**被求值**的那一侧仍然要发码，「右侧一律可丢」的改法必挂这两条。
+#[test]
+#[cfg(unix)]
+fn short_circuit_guards_only_kill_the_side_that_is_never_evaluated() {
+    let src = include_str!("../fixtures/c/shortcircuit_guard_trap.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("sc-guard", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und: Vec<String> = elf64_syms_by_type(&bytes)
+            .iter()
+            .filter(|s| s.shndx == 0)
+            .map(|s| s.name.clone())
+            .collect();
+        let has = |n: &str| und.iter().any(|s| s == n);
+        for gone in [
+            "trap_a_and",
+            "trap_b_or",
+            "trap_c_cond",
+            "trap_d_xlabel",
+            "trap_e_nested",
+        ] {
+            assert!(
+                !has(gone),
+                "{flag}: 不被求值那一侧的引用没被消掉，产物里仍有 `{gone}`（= 链接期 \
+                 `undefined reference to '{gone}'`）；完整未定义名单：{und:?}"
+            );
+        }
+        for kept in ["keep_f_and", "keep_g_or", "keep_h_cond", "keep_i_and"] {
+            assert!(
+                has(kept),
+                "{flag}: 本该留下的引用被一并抹掉了（`{kept}` 不在 {und:?}）——\
+                 判据不是「越少越好」，这一半才是防过修的那一半"
+            );
+        }
+    }
+}
+
+/// 「条件位上的**语句表达式**（内联后的早退链）」的产物级双向判据
+/// （夹具 `inlined_se_tail_const_trap.c`，§5.0o）。
+///
+/// `drivers/iommu/generic_pt/fmt/iommu_amdv1.o` 的
+/// `pts_feature(&pts, PT_FEAT_DMA_INCOHERENT) && !pt_test_sw_bit_acquire(&pts, …)`
+/// 内联后左操作数是 `({ unsigned __inl1$_n = n; …; __inl1$rv = 0; goto end; end: 0; })`
+/// —— 尾值已是字面量 0，却有三格各自把它钉住：求值器把「声明初值算不出常量」整块拒
+/// （`__inl1$_n = n` 里的 `n` 是**外层**函数的变量）、`discarded_value_needs_code` 对
+/// `StmtExpr` 一律答「需要代码」、`&&` 的丢弃判据两侧都问。三格一起修完才与 gcc 对齐。
+///
+/// `keep_*` 两条是这一族的反向对照：`trap_se_live` 的早退链尾值是运行期值（右侧一定会被
+/// 求值），`trap_se_outer` 的语句表达式写的是**块外**局部（尾值同样是运行期值，而且求值器
+/// 在这一格必须继续拒绝 —— 放开外部存储会连同那次写一起被 `fold_expr` 的替换抹掉）。
+#[test]
+#[cfg(unix)]
+fn inlined_stmt_expr_in_condition_folds_to_the_gcc_reference() {
+    let src = include_str!("../fixtures/c/inlined_se_tail_const_trap.c");
+    for flag in ["-O2", "-O3"] {
+        let (out, obj) = run_object_test_flags("se-cond", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read .o");
+        let _ = fs::remove_file(&obj);
+        let und: Vec<String> = elf64_syms_by_type(&bytes)
+            .iter()
+            .filter(|s| s.shndx == 0)
+            .map(|s| s.name.clone())
+            .collect();
+        let has = |n: &str| und.iter().any(|s| s == n);
+        for gone in ["trap_se_and", "trap_se_or", "trap_se_pure"] {
+            assert!(
+                !has(gone),
+                "{flag}: 常量早退链的引用没被消掉，产物里仍有 `{gone}`（= 链接期 \
+                 `undefined reference to '{gone}'`）；完整未定义名单：{und:?}"
+            );
+        }
+        for kept in ["trap_se_live", "trap_se_outer"] {
+            assert!(
+                has(kept),
+                "{flag}: 本该留下的引用被一并抹掉了（`{kept}` 不在 {und:?}）——\
+                 判据不是「越少越好」，这一半才是防过修的那一半"
+            );
+        }
+    }
 }

@@ -20,17 +20,36 @@ impl Codegen {
     /// 早就报 E1100, 只有 `-c` 这条 ET_REL 路径不报错 —— 本函数把两条路径拉平:
     /// 归一化只一条路径, 缺失只一个报错点。
     ///
-    /// 返回 `None` 时调用方必须 **跳过这条重定位并让诊断说话** (诊断是
-    /// `Severity::Error`, 会在 `codegen::emit` 的 fatal 检查处终止编译),
-    /// 绝不拿 0 当兼底值继续往下发。
-    fn reloc_sym_index(&mut self, name: &str, site: &str) -> Option<u32> {
-        // 热路径: 先查再说, 不为此分配字符串。
+    /// 返回 `(symtab 索引, 需要并进 addend 的尾部位移)`；返回 `None` 时调用方必须
+    /// **跳过这条重定位并让诊断说话** (诊断是 `Severity::Error`, 会在 `codegen::emit`
+    /// 的 fatal 检查处终止编译), 绝不拿 0 当兼底值继续往下发。
+    ///
+    /// 位移剥解也放在这里 (`sym±N`, 见 [`split_sym_offset`])：内联 asm 的内存操作数与
+    /// `.pushsection` 数据表达式都会把 `boot_cpu_data+114` 这种**整串**当成符号名交下来。
+    /// 此前只有 `pending_data_rels` 和自定义节两条出口自己拆过一次, 而实测这类名字的来源
+    /// 有十一条 pending 列表、出口同样有十来个 —— 漏一条出口就是全树 417 处
+    /// `undefined reference to 'boot_cpu_data+114'`。收进唯一解析路径才不再需要「记住每条
+    /// 出口」；建表侧 (`rel_symbols.rs::referenced_reloc_symbols`) 用同一个函数归一化,
+    /// 保证 symtab 里只有基名那一条。
+    fn reloc_sym_index(&mut self, name: &str, site: &str) -> Option<(u32, i64)> {
+        // 热路径: 先整名查, 不为此分配字符串。
         let hit = match self.asm_label_map.get(name) {
             Some(resolved) => self.sym_index.get(resolved).copied(),
             None => self.sym_index.get(name).copied(),
         };
         if let Some(idx) = hit {
-            return Some(idx);
+            return Some((idx, 0));
+        }
+        // 冷路径: `sym±N` —— 基名命中就把位移交回调用方并进 addend。
+        let (base, off) = split_sym_offset(name);
+        if off != 0 && base != name {
+            let hit = match self.asm_label_map.get(base) {
+                Some(resolved) => self.sym_index.get(resolved).copied(),
+                None => self.sym_index.get(base).copied(),
+            };
+            if let Some(idx) = hit {
+                return Some((idx, off as i64));
+            }
         }
         // 冷路径: 同一缺失符号被多个使用点碰到时会产生完全相同的 msg,
         // 由 `diagnostics::dedup_diags` 在输出端去重。
@@ -324,7 +343,7 @@ impl Codegen {
             if let Some(rodata_off) =
                 Self::lookup_str_const_label_offset(&rel.symbol, &self.string_pool)
             {
-                let Some(rodata_sym) =
+                let Some((rodata_sym, _)) =
                     self.reloc_sym_index(".rodata", ".rela<custom section> (str.const)")
                 else {
                     continue;
@@ -340,7 +359,12 @@ impl Codegen {
                 custom_sec_relas.entry(rel.sec_idx).or_default().push(rela);
                 continue;
             }
-            let Some(sym_idx) = self.reloc_sym_index(&rel.symbol, ".rela<custom section>") else {
+            // 自定义节（`.altinstr_aux`/`.altinstr_replacement`/`__ex_table` …）里的重定位
+            // 同样可能引用 `sym±N` 这种内联 asm 写法（实测全树 417 处
+            // `undefined reference to 'boot_cpu_data+100'`，站点在 `main.o:(.altinstr_aux+0x2)`）。
+            // 剥位移已收进 [`reloc_sym_index`] 本身，这里只需把它返回的位移并进 addend。
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&rel.symbol, ".rela<custom section>")
+            else {
                 continue;
             };
             let abs_offset = rel.offset;
@@ -348,7 +372,7 @@ impl Codegen {
                 offset: abs_offset,
                 sym_index: sym_idx,
                 rel_type: rel.rel_type,
-                addend: rel.addend,
+                addend: rel.addend + sym_off,
             };
             custom_sec_relas.entry(rel.sec_idx).or_default().push(rela);
         }
@@ -383,7 +407,7 @@ impl Codegen {
             .iter()
             .any(|r| r.name == ".rela__mcount_loc")
         {
-            if let Some(text_sym_idx) = self.reloc_sym_index(".text", ".rela__mcount_loc") {
+            if let Some((text_sym_idx, _)) = self.reloc_sym_index(".text", ".rela__mcount_loc") {
                 for rela_sec in &mut self.extra_rela_sections {
                     if rela_sec.name == ".rela__mcount_loc" {
                         for rel in &mut rela_sec.relocations {
@@ -395,7 +419,7 @@ impl Codegen {
         }
 
         for (code_pos, data) in std::mem::take(&mut self.string_refs) {
-            let Some(sym_idx) = self.reloc_sym_index(".rodata", "string literal PC32") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".rodata", "string literal PC32") else {
                 continue;
             };
             let str_off = self.string_pool[&data] as i64;
@@ -414,7 +438,8 @@ impl Codegen {
 
         // 浮点字面量重定位
         for (code_pos, rodata_off) in std::mem::take(&mut self.float_refs) {
-            let Some(sym_idx) = self.reloc_sym_index(".rodata", "SSE float literal PC32") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".rodata", "SSE float literal PC32")
+            else {
                 continue;
             };
             // movsd/movss xmm, [RIP+disp32] 是 8 字节指令, disp32 在 +4。
@@ -431,7 +456,8 @@ impl Codegen {
         }
         // x87 fld 字面量重定位 (6 字节指令, disp32 @ byte 2)
         for (code_pos, rodata_off) in std::mem::take(&mut self.x87_float_refs) {
-            let Some(sym_idx) = self.reloc_sym_index(".rodata", "x87 float literal PC32") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".rodata", "x87 float literal PC32")
+            else {
                 continue;
             };
             self.relocations.push(ElfRela {
@@ -448,7 +474,8 @@ impl Codegen {
         // LEA rdi, [rip+disp32] → PC32 重定位 (指向 .data 内 OutOfBoundsData;
         // libubsan SourceLocation::acquire() 原子写 Column, .rodata 只读会段错误)
         for (code_pos, data_off) in std::mem::take(&mut self.ubsan_lea_refs) {
-            let Some(sym_idx) = self.reloc_sym_index(".data", "ubsan OutOfBoundsData PC32") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".data", "ubsan OutOfBoundsData PC32")
+            else {
                 continue;
             };
             self.relocations.push(ElfRela {
@@ -463,7 +490,8 @@ impl Codegen {
         // data 内绝对指针 (Filename@0, &ArrayType@16, &IndexType@24)
         // → R_X86_64_64 指向 .rodata 内 TypeDescriptor / 文件名字符串
         for (data_off, field_off, target_off) in std::mem::take(&mut self.ubsan_ptr_refs) {
-            let Some(sym_idx) = self.reloc_sym_index(".rodata", "ubsan TypeDescriptor R_64") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".rodata", "ubsan TypeDescriptor R_64")
+            else {
                 continue;
             };
             self.data_relocations.push(ElfRela {
@@ -477,7 +505,8 @@ impl Codegen {
         // 解析函数调用重定位 (本 TU 内的 static/本地函数用 PC32,
         // 跨 TU 外部调用用 PLT32 以兼容 PIE/动态链接).
         for (code_off, func_name) in std::mem::take(&mut self.pending_func_rels) {
-            let Some(sym_idx) = self.reloc_sym_index(&func_name, "call PLT32/PC32") else {
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&func_name, "call PLT32/PC32")
+            else {
                 continue;
             };
             // 检查符号绑定: LOCAL 表示本 TU 定义 (含 static), 用 PC32
@@ -503,18 +532,19 @@ impl Codegen {
                 offset: code_off,
                 sym_index: sym_idx,
                 rel_type,
-                addend: -4,
+                addend: -4 + sym_off,
             });
         }
         for rel in std::mem::take(&mut self.pending_code_rels) {
-            let Some(sym_idx) = self.reloc_sym_index(&rel.symbol, "pending code reloc") else {
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&rel.symbol, "pending code reloc")
+            else {
                 continue;
             };
             self.relocations.push(ElfRela {
                 offset: rel.offset,
                 sym_index: sym_idx,
                 rel_type: rel.rel_type,
-                addend: rel.addend,
+                addend: rel.addend + sym_off,
             });
         }
 
@@ -523,7 +553,7 @@ impl Codegen {
         // - MOV 指令 (外部函数 GOT 间接加载): GOTPCREL
         for (code_off, func_name, is_lea) in std::mem::take(&mut self.pending_func_addr_rels) {
             let site = if is_lea { "func addr PC32" } else { "func addr GOTPCREL" };
-            let Some(sym_idx) = self.reloc_sym_index(&func_name, site) else {
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&func_name, site) else {
                 continue;
             };
             let rel_type = if is_lea { R_X86_64_PC32 } else { R_X86_64_GOTPCREL };
@@ -531,7 +561,7 @@ impl Codegen {
                 offset: code_off,
                 sym_index: sym_idx,
                 rel_type,
-                addend: -4,
+                addend: -4 + sym_off,
             });
         }
 
@@ -540,14 +570,21 @@ impl Codegen {
         // TLS 变量也使用 PC32: 当前指令编码为 RIP-relative,
         // host linker 会正确解析 .tdata/.tbss 节内的 PC-relative 偏移.
         for (disp32_pos, var_name) in std::mem::take(&mut self.pending_data_rels) {
-            let Some(sym_idx) = self.reloc_sym_index(&var_name, "global var PC32") else {
+            // 内联 asm 的内存操作数可以写成 `sym±N(%rip)`（`arch/x86/include/asm/cpufeature.h`
+            // 一类把 `%c[..]` 代入后就成了 `boot_cpu_data+114(%rip)`）。以前这种整串
+            // 被当成一个符号名，链接期就是 `undefined reference to 'boot_cpu_data+114'`。
+            // 剥位移现在由 [`reloc_sym_index`] 统一做（所有出口只剩一条路径），这里拿到的
+            // `sym_off` 直接并进 PC32 的 addend（与下面 `_with_off` 同构：addend = off - 4）。
+            // 不选解析侧：解析侧一旦拆了名字，那十来个 `SymDisp(sym, _)` 发射点全部
+            // 忽略第二个字段 ⇒ 偏移会被悄悄丢掉（比报错更坏）。
+            let Some((sym_idx, off)) = self.reloc_sym_index(&var_name, "global var PC32") else {
                 continue;
             };
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
                 rel_type: R_X86_64_PC32,
-                addend: -4,
+                addend: off - 4,
             });
         }
 
@@ -556,14 +593,15 @@ impl Codegen {
         // (sym + elem_off) - rip 地址.
         for (disp32_pos, var_name, elem_off) in std::mem::take(&mut self.pending_data_rels_with_off)
         {
-            let Some(sym_idx) = self.reloc_sym_index(&var_name, "global var PC32 (elem)") else {
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&var_name, "global var PC32 (elem)")
+            else {
                 continue;
             };
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
                 rel_type: R_X86_64_PC32,
-                addend: elem_off as i64 - 4,
+                addend: elem_off as i64 - 4 + sym_off,
             });
         }
 
@@ -574,7 +612,7 @@ impl Codegen {
         //   local-dynamic/global-dynamic → R_X86_64_TPOFF32 (降级为 LE,
         //     GD/LD 需要运行时 TLS resolver 支持，内核不使用)
         for (disp32_pos, var_name) in std::mem::take(&mut self.pending_tls_rels) {
-            let Some(sym_idx) = self.reloc_sym_index(&var_name, "TLS TPOFF32") else {
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&var_name, "TLS TPOFF32") else {
                 continue;
             };
             let model = self
@@ -591,20 +629,21 @@ impl Codegen {
                 offset: disp32_pos,
                 sym_index: sym_idx,
                 rel_type,
-                addend: 0,
+                addend: sym_off,
             });
         }
 
         // 解析 SIB base=101 全局访问 (disp32 绝对寻址) - 需要 R_X86_64_32S
         for (disp32_pos, var_name) in std::mem::take(&mut self.pending_sib_data_rels) {
-            let Some(sym_idx) = self.reloc_sym_index(&var_name, "global var ABS32S") else {
+            let Some((sym_idx, sym_off)) = self.reloc_sym_index(&var_name, "global var ABS32S")
+            else {
                 continue;
             };
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
                 rel_type: R_X86_64_32S,
-                addend: 0,
+                addend: sym_off,
             });
         }
 
@@ -615,7 +654,8 @@ impl Codegen {
         // 解析 data 节引用 rodata 字符串的重定位:
         // R_X86_64_64, 符号 = .rodata section, addend = 字符串 rodata 偏移
         for (data_off, str_off, custom_sec) in std::mem::take(&mut self.pending_data_rodata_rels) {
-            let Some(sym_idx) = self.reloc_sym_index(".rodata", "data->string literal R_64") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".rodata", "data->string literal R_64")
+            else {
                 continue;
             };
             let relocation = ElfRela {
@@ -638,14 +678,16 @@ impl Codegen {
         for (data_off, var_name, custom_sec, rel_type, addend) in
             std::mem::take(&mut self.pending_data64_rels)
         {
-            let Some(sym_idx) = self.reloc_sym_index(&var_name, "data 64-bit symbol R_64") else {
+            let Some((sym_idx, sym_off)) =
+                self.reloc_sym_index(&var_name, "data 64-bit symbol R_64")
+            else {
                 continue;
             };
             let relocation = ElfRela {
                 offset: data_off,
                 sym_index: sym_idx,
                 rel_type,
-                addend,
+                addend: addend + sym_off,
             };
             if let Some(sec_idx) = custom_sec {
                 custom_data_relas
@@ -663,7 +705,7 @@ impl Codegen {
         for (data_off, label_name, extra_addend) in
             std::mem::take(&mut self.pending_data_textlabel_rels)
         {
-            let Some(sym_idx) = self.reloc_sym_index(".text", "data->text label R_64") else {
+            let Some((sym_idx, _)) = self.reloc_sym_index(".text", "data->text label R_64") else {
                 continue;
             };
             let Some(&label_off) = self.labels.get(&label_name) else {
@@ -677,8 +719,28 @@ impl Codegen {
             });
         }
         for (sec_idx, relocations) in custom_data_relas {
+            // `Some(usize::MAX)` 是「槽就在 .rodata 里」的哨兵，生产侧
+            // （`push_data_symbol_rel` / `emit_string_ptr_slot`）已把它改道到
+            // `pending_rodata_rels`；万一漏网，这里必须先拦住 —— 裸下标
+            // `extra_sections[usize::MAX]` 是直接 panic（rc=134），
+            // 而不是可诊断的编译错误。
+            if sec_idx >= self.extra_sections.len() {
+                self.report_internal_bug(
+                    "E1104",
+                    format!(
+                        "data relocation targets section index {sec_idx}, but this TU has only {} \
+                         extra section(s)",
+                        self.extra_sections.len()
+                    ),
+                    "`Some(usize::MAX)` means \"inside .rodata\": such relocations must be \
+                     emitted as `.rela.rodata` via pending_rodata_rels, not through the \
+                     extra_sections index",
+                );
+                continue;
+            }
+            let name = format!(".rela{}", self.extra_sections[sec_idx].name);
             self.extra_rela_sections.push(ExtraRelaSection {
-                name: format!(".rela{}", self.extra_sections[sec_idx].name),
+                name,
                 relocations,
                 target_sec_index: 7 + sec_idx as u32,
             });
@@ -690,14 +752,16 @@ impl Codegen {
         if !self.pending_rodata_rels.is_empty() {
             let mut rodata_relas = Vec::new();
             for (off, sym_name, rel_type, addend) in std::mem::take(&mut self.pending_rodata_rels) {
-                let Some(sym_idx) = self.reloc_sym_index(&sym_name, ".rodata internal R_64") else {
+                let Some((sym_idx, sym_off)) =
+                    self.reloc_sym_index(&sym_name, ".rodata internal R_64")
+                else {
                     continue;
                 };
                 rodata_relas.push(ElfRela {
                     offset: off,
                     sym_index: sym_idx,
                     rel_type,
-                    addend,
+                    addend: addend + sym_off,
                 });
             }
             if !rodata_relas.is_empty() {
@@ -737,7 +801,8 @@ impl Codegen {
                 for (_prio, func_name) in &constructors {
                     let entry_off = init_data.len() as u64;
                     init_data.extend_from_slice(&[0u8; 8]); // placeholder
-                    let Some(sym_idx) = self.reloc_sym_index(func_name, ".init_array entry") else {
+                    let Some((sym_idx, _)) = self.reloc_sym_index(func_name, ".init_array entry")
+                    else {
                         continue;
                     };
                     init_rels.push(ElfRela {
@@ -771,7 +836,8 @@ impl Codegen {
                 for (_prio, func_name) in &destructors {
                     let entry_off = fini_data.len() as u64;
                     fini_data.extend_from_slice(&[0u8; 8]);
-                    let Some(sym_idx) = self.reloc_sym_index(func_name, ".fini_array entry") else {
+                    let Some((sym_idx, _)) = self.reloc_sym_index(func_name, ".fini_array entry")
+                    else {
                         continue;
                     };
                     fini_rels.push(ElfRela {
@@ -803,27 +869,28 @@ impl Codegen {
         let mut custom_relas: std::collections::BTreeMap<usize, Vec<ElfRela>> =
             std::collections::BTreeMap::new();
         let mut text_relas = vec![];
-        // 待搬迁区间: 自定义函数 + 可执行 pushsection 代码 (text start, end, sec_idx, sec_off)
+        // 待搬迁区间：自定义函数 + 可执行 pushsection 代码。字段含义与
+        // `codegen.rs::compile_rel` 里那张表**同一个**：`(发射起点, 发射长度, 目标节下标,
+        // 目标节内起点)`。以前这里用 `(start, end, ...)` 而那边用 `(start, size, ...)`，
+        // 同一个四元组两套含义 —— `codegen.rs` 那份就是因为照这里错了一格（把
+        // `func_start/emitted_start/emitted_size/sec_idx` 当 `start/size/sec_idx/sec_off` 用），
+        // 跨节跳转被当成同节而写死了位移。含义只留一份，两边只能读成同一个东西。
         let move_ranges: Vec<(u64, u64, usize, u64)> = custom_func_ranges
             .iter()
             .map(|(_, emitted_start, emitted_size, sec_idx, sec_off)| {
                 (
                     *emitted_start,
-                    *emitted_start + *emitted_size as u64,
+                    *emitted_size as u64,
                     *sec_idx as usize,
                     *sec_off,
                 )
             })
-            .chain(
-                self.pushsection_code_ranges
-                    .iter()
-                    .map(|(s, sz, i, o)| (*s, *s + *sz, (*i), *o)),
-            )
+            .chain(self.pushsection_code_ranges.iter().copied())
             .collect();
         for mut rel in self.relocations.drain(..) {
-            if let Some((emitted_start, _emitted_end, sec_idx, sec_off)) = move_ranges
+            if let Some((emitted_start, _emitted_size, sec_idx, sec_off)) = move_ranges
                 .iter()
-                .find(|(s, e, _, _)| rel.offset >= *s && rel.offset < *e)
+                .find(|(s, sz, _, _)| rel.offset >= *s && rel.offset < *s + *sz)
                 .copied()
             {
                 rel.offset = sec_off + (rel.offset - emitted_start);
@@ -896,6 +963,83 @@ impl Codegen {
     }
 }
 
+/// 把 `sym+16` / `sym-8` / `sym + 0x10` 这种「符号名 + 尾部常数偏移」拆成
+/// `(符号名, 偏移)`。没有尾部偏移时原样返回 `(s, 0)`。
+///
+/// 为什么放在重定位发射的出口而不是解析侧：内联 asm 的内存操作数文本（`SymDisp` 的符号部分）
+/// 会直接当名字存进 `pending_data_rels`，而下游那十来个 `SymDisp(sym, _)` 发射点全部
+/// **忽略**偏移字段；在解析侧拆名字就等于默默丢偏移。出口这里只有一个，拿得到 addend。
+pub(crate) fn split_sym_offset(name: &str) -> (&str, i32) {
+    // 【`N+sym` 形态先判】下面那个循环从右往左剥的是 `sym±N`；per-CPU 成员访问那条路给出的
+    // 是**反过来**的 `N+sym`（实测 `arch/x86/kernel/kvm.o` 的
+    // `__raw_callee_save___kvm_vcpu_is_preempted` 报
+    // `undefined reference to '16+steal_time'`，而同一个对象里 `steal_time` 本身是有定义的
+    // `D` 符号）。GAS 两种写法都接受，所以这里也必须剥——而且 ELF 符号名不以数字开头，
+    // 「以数字开头」本身就说明这是一次表达式而不是一个名字。
+    // 必须放在循环**之前**：循环里那个「尾巴不是纯数字就当不是偏移形状」的早退会直接
+    // 把 `16+steal_time` 原样退回，永远轮不到后面的分支。
+    // 偏移仍然交回调用方并进 addend（与下面同构）：发射侧那几个 `SymDisp(sym, _)` 不看
+    // 第二个字段，所以拆分只能做在这里（见 `pending_data_rels` 那条注释）。
+    if let Some(pos) = name.find(['+', '-']) {
+        if pos > 0 {
+            if let Some(v) = asm_number(&name[..pos]) {
+                let tail = name[pos + 1..].trim();
+                if !tail.is_empty() {
+                    let signed = if name.as_bytes()[pos] == b'-' { -v } else { v };
+                    if let Ok(o) = i32::try_from(signed) {
+                        return (tail, o);
+                    }
+                }
+            }
+        }
+    }
+    // 从右往左找第一个不在括号里的 '+'/'-'，右边必须是一串纯数字（十或十六进制），
+    // 否则不是本形状（例如 C++ 模板名、带 `.` 的节名都不该被动）。
+    let bytes = name.as_bytes();
+    let mut depth = 0i32;
+    let mut i = bytes.len();
+    while i > 0 {
+        let prev = i - 1;
+        match bytes[prev] {
+            b')' => depth += 1,
+            b'(' => depth -= 1,
+            b'+' | b'-' if depth == 0 => {
+                let tail = name[prev + 1..].trim();
+                let value = asm_number(tail);
+                if let Some(v) = value {
+                    if prev == 0 {
+                        // 整个名字就是个数：不当偏移处理
+                        return (name, 0);
+                    }
+                    let base = name[..prev].trim_end();
+                    let signed = if bytes[prev] == b'-' { -v } else { v };
+                    // 偏移超出 i32 就不是能发 PC32 的形状，原样交给下面报错
+                    if let Ok(o) = i32::try_from(signed) {
+                        if !base.is_empty() {
+                            return (base, o);
+                        }
+                    }
+                    return (name, 0);
+                }
+                return (name, 0);
+            },
+            _ => {},
+        }
+        i = prev;
+    }
+    (name, 0)
+}
+
+/// 表达式原子的数值解析：十进制或 `0x` 十六进制；不是纯数字就 `None`。
+/// `sym±N` 与 `N+sym` 两条形态共用它（同一个判据只写一处）。
+fn asm_number(s: &str) -> Option<i64> {
+    let t = s.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    t.parse::<i64>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,6 +1053,7 @@ mod tests {
             vendor: "unknown".into(),
             os: Os::Linux,
             abi: Abi::Gnu,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }))
     }
 
@@ -934,7 +1079,7 @@ mod tests {
     fn known_symbol_resolves_without_diagnostic() {
         let mut cg = x86();
         cg.sym_index.insert("g".to_string(), 7);
-        assert_eq!(cg.reloc_sym_index("g", "global var PC32"), Some(7));
+        assert_eq!(cg.reloc_sym_index("g", "global var PC32"), Some((7, 0)));
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
     }
 
@@ -946,7 +1091,7 @@ mod tests {
         cg.asm_label_map
             .insert("c_name".to_string(), "asm_name".to_string());
         cg.sym_index.insert("asm_name".to_string(), 3);
-        assert_eq!(cg.reloc_sym_index("c_name", "call PLT32/PC32"), Some(3));
+        assert_eq!(cg.reloc_sym_index("c_name", "call PLT32/PC32"), Some((3, 0)));
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
     }
 
@@ -968,8 +1113,65 @@ mod tests {
         let mut cg = x86();
         cg.sym_index.insert(".rodata".to_string(), 2);
         cg.sym_index.insert(".data".to_string(), 4);
-        assert_eq!(cg.reloc_sym_index(".rodata", "string literal PC32"), Some(2));
-        assert_eq!(cg.reloc_sym_index(".data", "ubsan OutOfBoundsData PC32"), Some(4));
+        assert_eq!(cg.reloc_sym_index(".rodata", "string literal PC32"), Some((2, 0)));
+        assert_eq!(
+            cg.reloc_sym_index(".data", "ubsan OutOfBoundsData PC32"),
+            Some((4, 0))
+        );
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
     }
+
+    /// `sym±N`（内联 asm 的位移写法）必须在这条**唯一解析路径**上拆出位移。
+    /// 以前只有两条出口自己拆过一次，漏掉的那几条出口就是全树 417 处
+    /// `undefined reference to 'boot_cpu_data+114'`（站点 `.altinstr_aux+0x2`）。
+    /// 基名也查不到时仍得报错（不能静默给 0），且报的是原始整串。
+    #[test]
+    fn trailing_symbol_offset_is_stripped_and_returned_as_addend_delta() {
+        let mut cg = x86();
+        cg.sym_index.insert("boot_cpu_data".to_string(), 11);
+        assert_eq!(
+            cg.reloc_sym_index("boot_cpu_data+114", "global var PC32"),
+            Some((11, 114))
+        );
+        assert_eq!(
+            cg.reloc_sym_index("boot_cpu_data-0x10", "pending code reloc"),
+            Some((11, -16))
+        );
+        // 整名命中优先：即使 symtab 里真有个带位移的名字也不该被拆。
+        cg.sym_index.insert("weird+8".to_string(), 12);
+        assert_eq!(cg.reloc_sym_index("weird+8", "data 64-bit symbol R_64"), Some((12, 0)));
+        assert_eq!(cg.reloc_sym_index("boot_cpu_data", "global var PC32"), Some((11, 0)));
+        assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
+
+        let mut cg2 = x86();
+        assert_eq!(cg2.reloc_sym_index("nope+8", "global var PC32"), None);
+        assert_eq!(error_codes(&cg2), vec!["E1103"]);
+        assert!(cg2.diagnostics[0].msg.contains("nope+8"), "msg = {}", cg2.diagnostics[0].msg);
+    }
+}
+
+/// `split_sym_offset` 的两种形态：`sym±N`（`cpufeature.h` 的 `boot_cpu_data+114`）与
+/// `N+sym`（per-CPU 成员访问，实测 `arch/x86/kernel/kvm.o` 的 `16+steal_time`）。
+/// 反向对照同重要：C++ 模板名/带 `-` 的节名都不该被拆，拆错会把一个本来存在的符号
+/// 变成两个都不存在的碎片。
+#[test]
+fn split_sym_offset_handles_both_operand_orders() {
+    // `sym+N` / `sym-N`
+    assert_eq!(split_sym_offset("boot_cpu_data+114"), ("boot_cpu_data", 114));
+    assert_eq!(split_sym_offset("steal_time+16"), ("steal_time", 16));
+    assert_eq!(split_sym_offset("sym-8"), ("sym", -8));
+    assert_eq!(split_sym_offset("sym+0x10"), ("sym", 16));
+    // `N+sym`：per-CPU 那条路给出的反序写法
+    assert_eq!(split_sym_offset("16+steal_time"), ("steal_time", 16));
+    assert_eq!(split_sym_offset("0x10+per_cpu_base"), ("per_cpu_base", 16));
+    // 不该动的形状
+    assert_eq!(split_sym_offset("plain_symbol"), ("plain_symbol", 0));
+    assert_eq!(split_sym_offset("_ZL3fuf"), ("_ZL3fuf", 0));
+    // 整个名字就是个数：不当偏移处理（原有语义，别退化成 ("", 42)）
+    assert_eq!(split_sym_offset("42"), ("42", 0));
+    // 括号里的加号不参与，而名字主体也不是「数字打头」的表达式 ⇒ 整串原样退回
+    // （循环里那个「尾巴不是纯数字」的早退就是为这类形状准备的）。
+    assert_eq!(split_sym_offset("mod+1(bar+2)"), ("mod+1(bar+2)", 0));
+    // 尾巴不是纯数字 ⇒ 不是偏移形状
+    assert_eq!(split_sym_offset("a+ b"), ("a+ b", 0));
 }

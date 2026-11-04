@@ -11609,7 +11609,10 @@ impl<'a> CppParser<'a> {
                         if self.at_tok(TokKind::Semi) {
                             self.bump();
                         }
-                        if attr_name.trim() == "fallthrough" {
+                        // 与 C 侧同一归一化规则：`__attribute__((__fallthrough__))` 的双侧
+                        // 下划线写法与裸名等价（GCC 保留标识符规则），只比裸名会漏掉
+                        // `include/linux/compiler_attributes.h` 展开出的内核 `fallthrough;`。
+                        if attr_name.trim().trim_matches('_') == "fallthrough" {
                             cur_stmts.push(CppStmt::Fallthrough { span: attr_span });
                         }
                         continue;

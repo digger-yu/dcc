@@ -423,6 +423,28 @@ impl Codegen {
         bits: u8,
         allow_xmm: bool,
     ) {
+        // x86-64 AT&T 里「裸符号」当**内存引用**时就是 RIP-relative：`movq sym, %rax`
+        // 与 `movq sym(%rip), %rax` 逐字节同义（gcc 实测前者发 `48 8b 05 00…` + `R_X86_64_PC32`）。
+        // 归一成 `SymDisp(sym, 0)` 后就能走下面已有的两个 RIP 相对臂，免得同一个语义出现两套实现。
+        //
+        // 现场（本轮唯一一处）：`arch/x86/lib/percpu.h` 的 `this_cpu_read_stable()` 把地址
+        // 当 `"i"` 立即数传进模板（`%a[var]` → 裸符号），展开后是 `movq current_task, %rax`。
+        // 它落在 `get_current()` 里 `#ifdef` 之外的那条尾巴上（前一条 `if (IS_ENABLED(...)) return …`
+        // 恒真，但整条尾巴仍会被发射），于是 15 个内联副本各报一条 E0311，整份 mm/memory.o 编不过。
+        let src_sym;
+        let dst_sym;
+        let src = if let AsmOperand::Sym(s) = src {
+            src_sym = AsmOperand::SymDisp(s.clone(), 0);
+            &src_sym
+        } else {
+            src
+        };
+        let dst = if let AsmOperand::Sym(s) = dst {
+            dst_sym = AsmOperand::SymDisp(s.clone(), 0);
+            &dst_sym
+        } else {
+            dst
+        };
         let w = bits == 64;
         if Self::asm_operands_have_non_gpr_regs(&[src, dst]) {
             let special_mov = matches!(
@@ -847,6 +869,16 @@ impl Codegen {
                 }
             },
             _ => {
+                // 报障用（`DCC_ASM_TRACE`，与 `DCC_INLINE_TRACE` 同一纪律：只读 env、
+                // 不参与任何判据、不进产物字节）。拒收消息只带一句「形态不支持」，
+                // 而同一句对应十几种操作数组合；没这条现场就只能靠猜（实测 mm/memory.o
+                // 的 15 条 `current.h` asm）。
+                if std::env::var_os("DCC_ASM_TRACE").is_some() {
+                    eprintln!(
+                        "ASM-MOV-REJECT bits={bits} src={src:?} dst={dst:?} line=\"{}\"",
+                        self.current_asm_text
+                    );
+                }
                 self.asm_reject("unsupported mov operand pattern");
             },
         }

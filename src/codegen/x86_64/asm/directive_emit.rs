@@ -33,10 +33,19 @@ impl Codegen {
                 continue;
             }
             if let Some((symbol, addend)) = Self::parse_asm_pc_relative_long(expr) {
+                // 宽度决定重定位类型：GAS 对 `.quad X - .` 发 R_X86_64_PC64，只有 4 字节
+                // 才是 PC32。写死 PC32 会把 8 字节字段按 4 字节算，高 4 字节摸空。
+                let rel_type = match size {
+                    8 => R_X86_64_PC64,
+                    4 => R_X86_64_PC32,
+                    2 => R_X86_64_PC16,
+                    1 => R_X86_64_PC8,
+                    _ => R_X86_64_PC32,
+                };
                 self.pending_code_rels.push(PendingCodeRel {
                     offset: off,
                     symbol,
-                    rel_type: R_X86_64_PC32,
+                    rel_type,
                     addend,
                 });
                 self.emit_insn(&Insn::raw(&vec![0u8; size]));
@@ -246,8 +255,24 @@ impl Codegen {
             return true;
         }
         match parts[0] {
+            // **`.globl` / `.global` 不能只当「已消费的不发射指令」丢掉**：名字必须进
+            // `global_asm_exports`，否则 ELF 建表侧根本不知道该给它发一条定义符号。实测
+            // 文件级 `asm(".pushsection .rodata\n.global tmpl\ntmpl:\n.byte …\n")`
+            // （`arch/x86/kernel/callthunks.c:65-74` 的 `skl_call_thunk_template`/`_tail` 就是
+            // 这一形，数据节那一侧走的是本函数而不是 `emit_lines.rs` 里可执行 pushsection
+            // 的那两个分支）：名字被静默吞掉 ⇒ 产物里只有 `UND tmpl`，链接期
+            // `undefined reference to 'skl_call_thunk_template'`（全树 4 处，同形状
+            // `int3_selftest_asm` 3 处），而同一个文件靠 `tail - template` 算的尺寸也拿不到值。
+            // 定义坐标与绑定在 `elf/rel_symbols.rs` 里按 `pushsection_label_offsets` 补齐
+            // （与 gcc 同为 `NOTYPE GLOBAL size=0`）。
+            ".globl" | ".global" => {
+                if let Some(sym) = parts.get(1) {
+                    self.global_asm_exports.insert(Self::asm_symbol_name(sym));
+                }
+                true
+            },
             ".pushsection" | ".popsection" | ".section" | ".previous" | ".type" | ".size"
-            | ".ident" | ".globl" | ".global" | ".weak" | ".hidden" | ".protected" => true,
+            | ".ident" | ".weak" | ".hidden" | ".protected" => true,
             ".balign" | ".p2align" | ".align" => {
                 if let Some(n) = parts
                     .get(1)

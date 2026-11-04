@@ -14,12 +14,22 @@
 #   - .o 的 mtime 早于 dcc 二进制 ⇒ 旧产物，删。
 #   - .o 里带 GCC 的 .comment ⇒ gcc 回退产物，删。
 #
-# 管辖边界：只动内核 TU 的产物。宿主工具目录（scripts/、tools/）
-# 与被有意委托给 gcc 的 realmode（-m16/-m32，dcc 只支持 x86_64）一律不碰。
+# 管辖边界：只动内核 TU 的产物。宿主工具目录（scripts/、tools/）整棵不碰。
+#
+# 「有意交给 gcc」的产物也不能按 dcc 的判据删 —— 它们的 .comment 天然是 GCC、mtime 也可能
+# 早于 dcc 二进制，删了只会每轮重编一遍：
+#   - arch/x86/boot/ 顶层 *.o      ：-m16 的 setup 代码（gcc 代编）
+#   - arch/x86/realmode/rm/*       ：-m16 的 rm 代码（gcc 代编）
+#   - arch/x86/realmode/rmpiggy.o  ：objcopy 产物，没有 .comment
+# 反过来，arch/x86/boot/startup/、arch/x86/boot/compressed/ 与 arch/x86/realmode/init.o 是
+# 普通 64 位 TU、必须由 dcc 编，所以**不能**按目录一刀切排除（那是 dcc 产物，要参与判据）。
 #
 # 用法: bash kernel_purge_stale_objects.sh [--gcc-fallback-only] [KERNEL_DIR] [DCC_BIN]
 #   --gcc-fallback-only 只删「确实由 gcc 回退编出」的 .o（按 .comment 判定），
 #   用于二进制只改了守卫/不改变字节的路径：不想把整树重编一遍。
+#
+#   KERNEL_DIR 缺省是 **$HOME/linux-7.1-dcc**（dcc 树）。参照树 $HOME/linux-7.1 绝对不能
+#   拿本脚本扫（会把 gcc 基线产物删掉），并且脚本会因缺 dcc .cmd 指纹而直接拒绝执行。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -36,11 +46,32 @@ for a in "$@"; do
 done
 set -- "${args[@]:-}"
 
-KERNEL_DIR="${1:-${KERNEL_DIR:-$HOME/linux-7.1}}"
+KERNEL_DIR="${1:-${KERNEL_DIR:-$HOME/linux-7.1-dcc}}"
 DCC_BIN="${2:-${DCC:-$DCC_REPO/target/release/dcc}}"
 
 [[ -d "$KERNEL_DIR" ]] || { echo "内核目录不存在: $KERNEL_DIR" >&2; exit 1; }
 [[ -x "$DCC_BIN" ]] || { echo "dcc 二进制不存在: $DCC_BIN" >&2; exit 1; }
+
+# **防踩 gcc 参照树**（本轮实踩：缺省值曾写的是 `$HOME/linux-7.1`，一次缺省调用把参照树
+# 的 1101 个 .o 全删了）。本脚本的语义是「清掉不是当前 dcc 二进制编的 .o」，只对 dcc 树
+# 成立；拿它扫参照树会把 gcc 基线拆掉，而两边的 .o 外观完全同构，事后看不出区别。
+# 守卫拿二进制级证据：树里必须有 `.cmd` 指纹写着 `dcc-kernel-cc.sh`。全新树（还没编过）
+# 没有指纹可查，确认无误后用 DCC_PURGE_ALLOW_NO_DCC_FINGERPRINT=1 显式放行。
+if [[ "${DCC_PURGE_ALLOW_NO_DCC_FINGERPRINT:-0}" != "1" ]]; then
+    fingerprint=""
+    while IFS= read -r cmdf; do
+        if grep -qs 'dcc-kernel-cc' "$cmdf"; then
+            fingerprint=$cmdf
+            break
+        fi
+    done < <(find "$KERNEL_DIR" -maxdepth 3 -name '.*.o.cmd' 2>/dev/null | head -20)
+    if [[ -z "$fingerprint" ]]; then
+        echo "拒绝执行：$KERNEL_DIR 里找不到任何写有 dcc-kernel-cc.sh 的 .cmd 指纹。" >&2
+        echo "这通常意味着那是 gcc 参照树（不是 dcc 树）—— 本脚本会删它的产物。" >&2
+        echo "确认这就是要清的 dcc 树时，导出 DCC_PURGE_ALLOW_NO_DCC_FINGERPRINT=1 重试。" >&2
+        exit 1
+    fi
+fi
 
 # 先把二进制路径固定成绝对路径：find 的 -newer 与 date -r 都要读它，而下面就要
 # cd 进内核树 —— 晚换算会把相对路径当成内核目录下的路径来解释，找不到文件。
@@ -51,8 +82,13 @@ DCC_BIN_ABS="$(readlink -f "$DCC_BIN")"
 # 否则传绝对路径时 './scripts/*' 一条也匹配不上，宿主工具会被误删。
 cd "$KERNEL_DIR"
 
-# 宿主工具与有意交给 gcc 的目录：整棵排除，不删它们的产物。
-EXCLUDES=(-not -path './scripts/*' -not -path './tools/*' -not -path './arch/x86/realmode/*')
+# 宿主工具目录：整棵排除，不删它们的产物（它们本来就是 HOSTCC=gcc 编的）。
+EXCLUDES=(-not -path './scripts/*' -not -path './tools/*')
+
+# 其余「有意委托 gcc」的产物按路径剔除（不删，也不计入回退清单）。
+filter_delegated() {
+    grep -vE '^(\./arch/x86/realmode/rm/|\./arch/x86/realmode/rmpiggy\.o|\./arch/x86/boot/[^/]+$)' || true
+}
 
 purged=0
 
@@ -63,12 +99,12 @@ while IFS= read -r obj; do
     if readelf -p .comment "$obj" 2>/dev/null | grep -q 'GCC:'; then
         list_gc_fallback+=("$obj")
     fi
-done < <(find . "${EXCLUDES[@]}" -name '*.o' -not -path '*/.tmp_*' -print)
+done < <(find . "${EXCLUDES[@]}" -name '*.o' -not -path '*/.tmp_*' -print | filter_delegated)
 
 list_stale=()
 if [[ "$GCC_ONLY" == 0 ]]; then
     mapfile -t list_stale < <(find . "${EXCLUDES[@]}" -name '*.o' -not -path '*/.tmp_*' \
-        ! -newer "$DCC_BIN_ABS" -print)
+        ! -newer "$DCC_BIN_ABS" -print | filter_delegated)
 fi
 
 declare -A doomed=()

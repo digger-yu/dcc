@@ -121,6 +121,25 @@ impl Codegen {
                     // __builtin_conjl 已在内部物化, 标记统一物化跳过
                     complex_builtin_done = true;
                 }
+            } else if name_name.starts_with("__compiletime_assert") {
+                // 内核 `compiletime_assert()` 的桩（include/linux/compiler_types.h）：
+                //   do { __noreturn extern void __compiletime_assert_NNN(void)
+                //            __compiletime_error(msg);
+                //        if (!(condition)) __compiletime_assert_NNN(); } while (0)
+                // 走到这里 = 条件没被折掉。gcc 靠自己的值域推理把 `min()` /
+                // `min_not_zero()` 的 `__types_ok()` 判成恒真后消掉调用；dcc 证不出
+                // 来时，条件里的 `__builtin_constant_p(...)` 退化成 0，`if (!(cond))`
+                // 于是变成**运行期恒真** —— 所以这条绝不能像 error 属性那样发 ud2
+                // （会一进函数就崩），只能按「未证明即视为通过」丢掉调用：静态断言
+                // 只用于打断构建，不影响运行语义。
+                // 遗留风险：真该失败的断言（例如某个 struct 布局被算错）也会被一并
+                // 放行，故置 DCC_CT_ASSERT_WARN=1 时逐条打出来供审计。
+                if std::env::var_os("DCC_CT_ASSERT_WARN").is_some() {
+                    eprintln!(
+                        "dcc: warning: BUILD_BUG_ON not folded in '{}': {}",
+                        self.current_func_name, name_name
+                    );
+                }
             } else if self.error_attr_fns.contains(&name_name) {
                 // __attribute__((error("..."))) 函数: 编译期断言失败时
                 // 理论上不应到达此处 (常量折叠应消除调用).

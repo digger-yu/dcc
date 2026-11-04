@@ -61,14 +61,19 @@ impl Codegen {
                 .get(name.as_str())
                 .cloned()
                 .unwrap_or_else(|| name.clone());
-            if resolved.is_empty() || Self::is_internal_label(&resolved) {
+            // 剥掉内联 asm 的尾部位移：`boot_cpu_data+114` 与 `boot_cpu_data` 是**同一个**
+            // 符号，symtab 里只该有基名那一条（位移由 `reloc_sym_index` 在发射出口并进
+            // addend）。不剥的话每个 `sym±N` 都会多出一条永远无定义的 UND 条目，链接期就
+            // 是 `undefined reference to 'boot_cpu_data+114'`（实测全树 417 处）。
+            let (base, _off) = super::resolve::split_sym_offset(&resolved);
+            if base.is_empty() || Self::is_internal_label(base) {
                 continue;
             }
-            if resolved.starts_with('.') || resolved.starts_with(".L") {
+            if base.starts_with('.') || base.starts_with(".L") {
                 continue;
             }
-            if seen.insert(resolved.clone()) {
-                out.push(resolved);
+            if seen.insert(base.to_string()) {
+                out.push(base.to_string());
             }
         }
         out
@@ -159,13 +164,20 @@ impl Codegen {
                 // 对象：gcc 发 NOTYPE / size 0 的未定义引用。按对象发会让链接器把
                 // 它当数据符号处理（旧实现还给它分过 .bss，见 parser 同名修复）。
                 let is_func_decl = matches!(v.ty, crate::ast::Type::Func(..));
+                // GAS 对**任何**未定义引用都只给「名字 + bind」：既不给 `STT_OBJECT`/`STT_FUNC`
+                // 也不给 size（实测 gcc 的 `arch/x86/kernel/nmi.o` 24 条 UND 全 NOTYPE、
+                // 五秒夹具 `extern int gdata; extern char gbuf[16];` 两条全 `NOTYPE size 0`）。
+                // 以前这一臂只按「函数声明 / TLS / 对象」三分，未定义的数据声明拿到
+                // `OBJECT` + 声明尺寸（实测全树首批对象 432 条），等于在符号表里凭空描述了
+                // 一个本 TU 并不存在的对象。TLS 也一样：`SHN_UNDEF` 时不发 `STT_TLS`。
+                let is_und = section == SHN_UNDEF;
                 let sym = ElfSym {
                     name: self.resolve_asm_label(&v.name.name).to_string(),
                     section,
-                    value: if is_func_decl { 0 } else { g.offset },
-                    size: if is_func_decl { 0 } else { g.size as u64 },
+                    value: if is_und { 0 } else { g.offset },
+                    size: if is_und { 0 } else { g.size as u64 },
                     bind,
-                    ty: if is_func_decl {
+                    ty: if is_und || is_func_decl {
                         STT_NOTYPE
                     } else if g.is_tls {
                         STT_TLS
@@ -273,7 +285,7 @@ impl Codegen {
                         value: 0,
                         size: 0,
                         bind: if f.is_weak { STB_WEAK } else { STB_GLOBAL },
-                        ty: STT_FUNC,
+                        ty: STT_NOTYPE, // UND 必须是 NOTYPE，与 GAS 同（见下方 implicit_und 处的长注释）
                         visibility: Self::parse_visibility(&f.visibility),
                     });
                 }
@@ -288,7 +300,7 @@ impl Codegen {
                 value: 0,
                 size: 0,
                 bind: STB_GLOBAL,
-                ty: STT_FUNC,
+                ty: STT_NOTYPE, // UND 必须是 NOTYPE，与 GAS 同（见下方 implicit_und 处的长注释）
                 visibility: STV_DEFAULT,
             });
         }
@@ -302,7 +314,7 @@ impl Codegen {
                     value: 0,
                     size: 0,
                     bind: STB_GLOBAL,
-                    ty: STT_FUNC,
+                    ty: STT_NOTYPE, // UND 必须是 NOTYPE，与 GAS 同（见下方 implicit_und 处的长注释）
                     visibility: STV_DEFAULT,
                 });
             },
@@ -313,7 +325,7 @@ impl Codegen {
                     value: 0,
                     size: 0,
                     bind: STB_GLOBAL,
-                    ty: STT_FUNC,
+                    ty: STT_NOTYPE, // UND 必须是 NOTYPE，与 GAS 同（见下方 implicit_und 处的长注释）
                     visibility: STV_DEFAULT,
                 });
             },
@@ -366,6 +378,41 @@ impl Codegen {
             .cloned()
             .collect();
         for name in asm_func_names {
+            // **先查 `pushsection_label_offsets`**：数据 pushsection 里的标号会**同时**留在
+            // `self.labels`（那只是一个发射当时的 `.text` 坐标，见 `elf/output.rs` 标号分支里
+            // 那句 `self.label(label)`）与这张表（搬迁后的「节号 + 节内偏移」）。反过来先查
+            // `labels` 会把一个坐在 `.rodata` 里的模板标号发成 `FUNC@.text+某址`——那是
+            // **静默错地址**，比发不出符号更坏。可执行 pushsection（`.altinstr_replacement` 等）
+            // 不登记这张表，仍走下面那条 `labels` + `pushsection_sym_loc` 的路。
+            //
+            // 为什么要有这一支：`arch/x86/kernel/callthunks.c:65-74` 写的是
+            //     asm(".pushsection .rodata\n.global skl_call_thunk_template\n"
+            //          "skl_call_thunk_template:\n" …);
+            // 即文件级 asm 里的 `.global` + 标号，而上面旧的 `labels` 一路只认 `.text`
+            // 坐标 ⇒ 这种符号从来不进 symtab，链接报 `undefined reference to
+            // 'skl_call_thunk_template'`（全树 4 处，同形状 `int3_selftest_asm` 3 处），
+            // 同文件靠 `tail - template` 算的 `SKL_TMPL_SIZE` 也拿不到值。
+            // 发射形式按 GAS/gcc 口径：它**不是函数**。实测 gcc 同对象是
+            // `26: 0 NOTYPE GLOBAL DEFAULT 5 skl_call_thunk_template` /
+            // `28: 8 NOTYPE GLOBAL DEFAULT 5 skl_call_thunk_tail`（节 `.rodata`，size=0）。
+            if let Some(&(sec_idx, sec_off)) = self.pushsection_label_offsets.get(&name) {
+                let is_exported = self.global_asm_exports.contains(&name);
+                let sym = ElfSym {
+                    name: name.clone(),
+                    section: (sec_idx + 7) as u16,
+                    value: sec_off,
+                    size: 0,
+                    bind: if is_exported { STB_GLOBAL } else { STB_LOCAL },
+                    ty: STT_NOTYPE,
+                    visibility: STV_DEFAULT,
+                };
+                if is_exported {
+                    global_syms.push(sym);
+                } else {
+                    local_syms.push(sym);
+                }
+                continue;
+            }
             if let Some(&off) = self.labels.get(&name) {
                 // 汇编 .type/@function 或 .globl 导出的函数: 计算 size,
                 // 否则 st_size=0 会让 objtool 无法确定函数边界。
@@ -393,6 +440,7 @@ impl Codegen {
                 } else {
                     local_syms.push(sym);
                 }
+                continue;
             }
         }
         for decl in &prog.decls {
@@ -447,10 +495,19 @@ impl Codegen {
                             section: sec_idx,
                             value: sym_value,
                             size: func_size,
-                            bind: if f.is_weak || f.is_inline {
-                                STB_WEAK
-                            } else if f.is_static {
+                            // 链接性按 C 语义定，**`static` 先于 `inline`/`weak`**：
+                            // `static inline`（内核头文件里成百的上万个助手）是内部链接，
+                            // gcc 发 `LOCAL`。旧写法把 `is_weak || is_inline` 判在前面，于是
+                            // 它们全部变成 `GLOBAL+WEAK`：实测首批 424 个对象的合并视图里有
+                            // 785 条 WEAK、gcc 同名单全是 LOCAL；其中 40 个弱名在不同 TU 里
+                            // **体长不同**（`kmalloc_noprof` 折尺寸/类型、`native_save_fl` 折旁路
+                            // 选项），而本 TU 真发重定位调自己那份的有 **296 条**。`ld` 对同名
+                            // WEAK 只留一份 ⇒ 那是**静默换实现**，不只是体积差。
+                            // `__attribute__((weak))`（非 static）仍走 WEAK，那一组用例不受影响。
+                            bind: if f.is_static {
                                 STB_LOCAL
+                            } else if f.is_weak || f.is_inline {
+                                STB_WEAK
                             } else {
                                 STB_GLOBAL
                             },
@@ -771,6 +828,17 @@ impl Codegen {
             }
         }
         let mut implicit_und: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // **未定义引用一律发 `STT_NOTYPE`**，与 GAS 完全一致（实测 gcc 产的
+        // `arch/x86/kernel/nmi.o`：24 条 UND 全是 NOTYPE，包含真函数调用如 `strcmp`、
+        // `synchronize_rcu`；而 dcc 以前同对象发 4394 条 UND FUNC）。不是好看问题：
+        // `__x86_return_thunk`/`retbleed_return_thunk` 在 `arch/x86/lib/retpoline.S` 里用
+        // `SYM_CODE_START*` 定义为 NOTYPE，而 objtool 的 `create_prefix_symbol()` 开头就
+        // `if (!is_func_sym(func)) return 0;` —— 引用发成 FUNC 会让 `ld -r` 把类型带到定义上，
+        // objtool 于是去给「不是指令边界」的标号（retpoline.S 自己就注释了
+        // `retbleed_return_thunk + 1 isn't an instruction boundary`）找起始指令，拿到 NULL 后
+        // `WARN + return -1` → 整个 `make vmlinux.o` 以 255 失败（本轮实跑就死在这一条）。
+        // 收发 UND 的那个地方（下面的 `referenced_reloc_symbols` 与 `pending_code_rels` 两路）
+        // 本来就在发 NOTYPE —— 同一规则三处入口，只能有一个答案。
         // 收集所有需要符号表的函数名
         let mut all_func_names: Vec<&String> =
             self.pending_func_rels.iter().map(|(_, n)| n).collect();
@@ -785,6 +853,10 @@ impl Codegen {
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| name.clone());
+            // 剥 `sym±N` 尾部位移（与下面 `referenced_reloc_symbols` 同一口径）：内联 asm
+            // 写出的 `boot_cpu_data+114` 登记成 UND 就注定是链接期的
+            // `undefined reference`，基名才是真正的那个符号。
+            let resolved = super::resolve::split_sym_offset(&resolved).0.to_string();
             if !known_syms.contains(&resolved) && implicit_und.insert(resolved.clone()) {
                 global_syms.push(ElfSym {
                     name: resolved,
@@ -792,19 +864,24 @@ impl Codegen {
                     value: 0,
                     size: 0,
                     bind: STB_GLOBAL,
-                    ty: STT_FUNC,
+                    ty: STT_NOTYPE,
                     visibility: STV_DEFAULT,
                 });
             }
         }
 
         for rel in &self.pending_code_rels {
-            if self.labels.contains_key(&rel.symbol) {
+            // 同上：`sym±N` 只登记基名（位移在 `reloc_sym_index` 出口并进 addend）。
+            // 这条是实测全树 `boot_cpu_data+114` 的真正来源 —— `.init.text` 里的
+            // `movl boot_cpu_data+114(%rip), ...` 走的是 `pending_code_rels`，而不是
+            // 最早被修的那两条 `pending_data_rels` / 自定义节出口。
+            let sym_name = super::resolve::split_sym_offset(&rel.symbol).0.to_string();
+            if self.labels.contains_key(&sym_name) {
                 continue;
             }
-            if !known_syms.contains(&rel.symbol) && implicit_und.insert(rel.symbol.clone()) {
+            if !known_syms.contains(&sym_name) && implicit_und.insert(sym_name.clone()) {
                 global_syms.push(ElfSym {
-                    name: rel.symbol.clone(),
+                    name: sym_name,
                     section: SHN_UNDEF,
                     value: 0,
                     size: 0,
@@ -892,9 +969,22 @@ impl Codegen {
             });
         }
 
-        // .pushsection 非文本节: 为数字标签引用创建本地符号
+        // .pushsection 非文本节: 为数字标号引用创建本地符号。
+        //
+        // 这里的「已经有了」判据只能用 `known_syms`（上面两路 `pending_code_rels` /
+        // `pending_data64_rels` 补符号用的就是它），**不能用 `self.sym_index`**：`sym_index`
+        // 要到最后「构建最终符号表」那一段才被 `clear()` 后重建，走到这里时它是**上一个阶段
+        // 的陈旧内容**（甚至可能是空的），拿它当去重门等于没门。后果不是多一个无害符号而是
+        // 直接指错地方：函数被搬进自定义节（`__init`/`__noinstr`/…）后，`.text` 里只留 NOP
+        // 填充，而 `labels[函数名]` 记的正是那个搬走前的 `.text` 位置 —— 于是这里会再登记一个
+        // **与函数同名**的 `STT_NOTYPE`/`size=0`/节=`.text` 的残留符号；末尾建表时同名后者覆盖
+        // 前者（`sym_index.insert`），凡按名字发重定位的地方（`.initcall*.init`、`_ASM_EXTABLE`
+        // 里的函数地址、…）都拿到 NOP 填充区的地址而不是函数入口。实测 `arch/x86/events/amd/ibs.o`：
+        // `symtab` 里 `amd_ibs_init` 有两条（FUNC@`.init.text`+0x900 与 NOTYPE@`.text`+0xcbd0），
+        // `.rela.initcall6.init` 指向后者的 0xb8=184 号，即整个 initcall 表项指进了 NOP 填充区。
+        // 跳过去重后，重定位回到真正的 FUNC 上，与 gcc 同构（gcc 那里发的是 `.init.text + 10`）。
         for rel in &self.pending_custom_sec_rels {
-            if !self.sym_index.contains_key(&rel.symbol) {
+            if !known_syms.contains(&rel.symbol) {
                 // 优先从 pushsection_label_offsets 查 (sec_idx, sec_off) —— 这张表在标号
                 // 被登记那一刻就记下「它最终所在节的偏移」：非执行 pushsection 的内容从来不
                 // 进 self.code，可执行 pushsection 的区间首尾相接（内层 `775:` 与外层 `774:`
@@ -909,6 +999,7 @@ impl Codegen {
                         ty: STT_NOTYPE,
                         visibility: STV_DEFAULT,
                     });
+                    known_syms.insert(rel.symbol.clone());
                     continue;
                 }
                 if let Some(&pos) = self.labels.get(&rel.symbol) {
@@ -924,11 +1015,129 @@ impl Codegen {
                         ty: STT_NOTYPE,
                         visibility: STV_DEFAULT,
                     });
+                    known_syms.insert(rel.symbol.clone());
                 }
             }
         }
 
+        // 数据节里**只定义、从不被引用**的 asm 标号也要发符号。
+        //
+        // GAS 对任何非 `.L` 标号都发一条 LOCAL/STT_NOTYPE 符号，不看有没有引用；
+        // 这里以前只有两条路会给标号建条目：`.globl`（`global_asm_exports`）与
+        // 「被某条重定位引用」（上面那段按 `self.labels` 补的循环）。于是
+        // `include/linux/export.h` 的
+        //     .section ".export_symbol","a"
+        //     __export_symbol_##sym:
+        //         .asciz license / .ascii ns "\0" / .quad sym
+        // 这种「只定义、不引用」的标号在 `.o` 里根本没有符号 —— modpost 的
+        // `check_export_symbol` 靠 `find_fromsym(faddr, .export_symbol)` 找条目所在
+        // 标号，找不到就退到**前一个**导出名下，于是 vmlinux.symvers 阶段满屏
+        // “references 'x', but it does not seem to be an export symbol”，随后读越界
+        // 段错误（build8 实测：`.rela.export_symbol` 共 12866 条，其中只有 `.S`
+        // 汇编文件贡献的 88 条能对上符号，其余 12771 条全部错配到前一个导出名）。
+        //
+        // 过滤口径与 GAS 一致：不发行号（数字本地标号）、`.L*`/`.` 开头的内部标号；
+        // 可执行 pushsection 的标号归 `pushsection_code_ranges` 反查那条路，且那边
+        // 常有 `774:` 一类数字标号，一并排除。已在表里的名字不重复发（上面按引用
+        // 补过的那批可能已有条目，重复会让 `sym_index` 后写覆盖先写）。
+        {
+            let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for s in local_syms.iter().chain(global_syms.iter()) {
+                if s.section != SHN_UNDEF {
+                    known.insert(s.name.clone());
+                }
+            }
+            // 排序后再发：`pushsection_label_offsets` 是 HashMap，条目序直接进产物字节。
+            let mut extra: Vec<(usize, u64, String)> = self
+                .pushsection_label_offsets
+                .iter()
+                .filter(|(name, (sec_idx, _))| {
+                    !name.is_empty()
+                        && !name.starts_with('.')
+                        && !name.chars().all(|c| c.is_ascii_digit())
+                        && !Self::is_internal_label(name)
+                        && (self.extra_sections[*sec_idx].flags
+                            & crate::codegen::shared::elf::SHF_EXECINSTR)
+                            == 0
+                })
+                .map(|(name, (sec_idx, off))| (*sec_idx, *off, name.clone()))
+                .collect();
+            extra.sort();
+            for (sec_idx, off, name) in extra {
+                if !known.insert(name.clone()) {
+                    continue;
+                }
+                local_syms.push(ElfSym {
+                    name,
+                    section: (sec_idx + 7) as u16,
+                    value: off,
+                    size: 0,
+                    bind: STB_LOCAL,
+                    ty: STT_NOTYPE,
+                    visibility: STV_DEFAULT,
+                });
+            }
+        }
+
         // 构建最终符号表: STN_UNDEF + locals + globals
+        //
+        // **同名去重：本 TU 已有定义的名字，不得再留一条 UND 条目。**GAS/C 语义里这是同
+        // 一件事：引用能被本文件的定义满足时，根本不会变成未定义引用。
+        //
+        // 为什么必须在这里卡一道：这两类条目来自两个互相看不见的登记路——`extern unsigned
+        // char tmpl[];` 这一类无定义声明按声明发 UND，而 `tmpl` 的定义是**汇编里的标号**
+        // （`asm(".pushsection .rodata\n.global tmpl\ntmpl: …")`，
+        // `arch/x86/kernel/callthunks.c:65-74` 的 `skl_call_thunk_template`）。后果不是「多一行
+        // 条目」而是**指错符号**：下面建表时 `sym_index.insert` 是后写覆盖先写，而 UND 是在
+        // 定义之后 push 的 ⇒ 所有按名字发的重定位全部绑到那条永无定义的条目上，链接期仍报
+        // `undefined reference to 'skl_call_thunk_template'`（实测：定义已正确落在
+        // `NOTYPE GLOBAL .rodata+0`，`.rela.text` 却还指着 UND 那条）。
+        {
+            // 必须存**拥有所有权的** String：借 `&str` 会把 `global_syms` 的不可变借用
+            // 留过下面的 `retain`（E0502）。多几百个名字只在字符串表里多一份拷贝，
+            // 不进产物字节。
+            let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for s in local_syms.iter().chain(global_syms.iter()) {
+                if s.section != SHN_UNDEF {
+                    defined.insert(s.name.clone());
+                }
+            }
+            global_syms.retain(|s| s.section != SHN_UNDEF || !defined.contains(&s.name));
+        }
+        // **没有任何重定位引用的 UND 条目不发**（GAS 就是这个行为：`nm` 只看到真被重定位引到的
+        // 未定义符号）。以前「文件作用域的无定义声明」逐条登 UND：实测
+        // `drivers/char/random.o` 5344 条而 gcc 只有 73 条，`truncate.o` 4605 vs 42。
+        //
+        // 【历史：同一改动为何上一轮收成窄条】那条规则当时在 `-fbuiltin-linker` 路径上拆了
+        // 一个**偶然的安全网**：内置链接器对
+        // 「找不到定义」的调用本应报错，而以前它靠那张满是幽灵 UND 的符号表间接地报了
+        // （`error[E0302]: symbol 'getc_unlocked': undefined reference` 一类）；把幽灵去掉后
+        // `printf` 被绑到地址 0，链出一个**段错误**的静态 ET_EXEC（实测 rc=139）——把响的
+        // 失败变成静默的坏产物，止于测试用例拦截。宽规则另还直接推翻了现有契约用例
+        // `attr_malloc_family_decls_keep_external_linkage`（该夹具 gcc 侧确实只保留
+        // `my_malloc` 一条 UND，所以那部分断言将来要按 gcc 口径改，但不是今天）。
+        //
+        // 而内核那一窄条已被本规则包络（`vdso_u_arch_data` 既无引用也非弱引用 ⇒ 一并去掉）。
+        // ld 对**未定义的隐藏符号**是硬错而非警告：
+        // `ld: .tmp_vmlinux1: hidden symbol 'vdso_u_arch_data' isn't defined`（实测
+        // `/root/kwlogs/full17.log`，与 `.tdata` 那道墙并列）。
+        //
+        // 为什么现在可以拿回宽版（上一轮同样的改动被迫收成窄条）：当时静态 `ET_EXEC` 对
+        // 「找不到的调用目标」不报错（隐式未定义名单不分输出类型），那个响错实际是幽灵 UND 替它
+        // 报的；去掉幽灵就链出一个把 `printf` 绑到地址 0 的段错误产物。那个根因已在
+        // `src/link/resolve.rs` 修掉（隐式名单只对 `PIE/Shared` 生效，报告 §3.26）。
+        // 弱引用不在本规则里：`STB_WEAK` 的未定义条目是「允许缺失」的链接约定，多留不产生
+        // 任何链接要求，少动一分风险。`referenced_reloc_symbols()` 与上面补 UND 的循环同源；
+        // 漏网时 `reloc_sym_index` 会报 E1103（响错），不会静默指错地址。
+        {
+            let referenced: std::collections::HashSet<String> =
+                self.referenced_reloc_symbols().into_iter().collect();
+            global_syms.retain(|s| {
+                s.section != SHN_UNDEF
+                    || s.bind == STB_WEAK
+                    || referenced.contains(&s.name)
+            });
+        }
         self.symbols.clear();
         self.sym_index.clear();
         // [0] STN_UNDEF

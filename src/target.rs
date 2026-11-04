@@ -66,6 +66,8 @@ pub struct Target {
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
     pub patchable_function_entry: Option<(usize, usize)>,
+    /// `-fcf-protection=branch|full`：每个函数入口最先发 `endbr64`（F3 0F 1E FA）。
+    pub cf_protection: bool,
     /// ftrace instrumentation mode
     pub ftrace_mode: crate::cli::FtraceMode,
     /// -finstrument-functions
@@ -217,6 +219,7 @@ impl Target {
             function_return_thunk_extern: false,
             indirect_branch_thunk_extern: false,
             patchable_function_entry: None,
+            cf_protection: false,
             ftrace_mode: crate::cli::FtraceMode::None,
             instrument_functions: false,
             stack_protector_guard_reg: StackGuardReg::Fs,
@@ -642,6 +645,7 @@ mod tests {
             vendor: "unknown".into(),
             os,
             abi,
+            x86_bits: TargetTriple::NATIVE_BITS,
         }
     }
 

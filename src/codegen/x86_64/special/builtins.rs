@@ -3366,17 +3366,22 @@ impl Codegen {
                     _ => {
                         // 函数指针: 加载到 r11 然后 call r11
                         self.gen_expr(&args[0], 11);
-                        // call r11 (typed): FF /2 reg=r11
-                        self.emit_insn(&Insn::new(
-                            crate::codegen::x86_64::opcode::X86_64Opcode::Call {
-                                target: crate::codegen::x86_64::opcode::Operand::Reg(
-                                    11,
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                ),
-                                pending_rel: false,
-                            },
-                            &[],
-                        ));
+                        // call r11 (typed): FF /2 reg=r11 —— 蹦床模式下发
+                        // `call __x86_indirect_thunk_r11`（与 `abi/call.rs` 的间接调用同一判据）。
+                        if let Some(thunk) = self.indirect_thunk_sym(11) {
+                            self.call_label(&thunk);
+                        } else {
+                            self.emit_insn(&Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::Call {
+                                    target: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        11,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                    pending_rel: false,
+                                },
+                                &[],
+                            ));
+                        }
                     },
                 }
                 if stack_off != 0 {
@@ -4401,17 +4406,22 @@ impl Codegen {
                     11,
                     40,
                 )); // mov r9, [r11+40]
-                    // call r10 (typed): FF /2 reg=r10
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Call {
-                        target: crate::codegen::x86_64::opcode::Operand::Reg(
-                            10,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                        pending_rel: false,
-                    },
-                    &[],
-                ));
+                    // call r10 (typed): FF /2 reg=r10 —— 这条也是编译器自己发的间接分支，
+                    // 蹦床模式下同样要走 `__x86_indirect_thunk_r10`（内核为该寄存器有蹦床）。
+                if let Some(thunk) = self.indirect_thunk_sym(10) {
+                    self.call_label(&thunk);
+                } else {
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::Call {
+                            target: crate::codegen::x86_64::opcode::Operand::Reg(
+                                10,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            pending_rel: false,
+                        },
+                        &[],
+                    ));
+                }
                 // 结果块: [0]=rax, [8]=rdx (16 字节整数返回约定)
                 self.emit_insn(&Insn::mov_rm_mem(
                     false,

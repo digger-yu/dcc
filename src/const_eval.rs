@@ -163,6 +163,13 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 },
                 fenv_access,
             ),
+            // C11 6.5.3.2p3: `&*E` 完全等价于 `E`（`*` 与 `&` 相消，既不取对象
+            // 也不求值），所以地址常量的判定与 `E` 自身同一口径。
+            // 内核 `drivers/tty/sysrq.c` 的 `sysrq_key_table[]` 就卡在这里：配置关闭时
+            // `sysrq_showlocks_op` 定义为 `(*(const struct sysrq_key_op *)((void *)0))`，
+            // 数组元素于是成为 `&(*(const struct sysrq_key_op *)((void *)0))`；
+            // 不认这条消去律就 E1006 拒掉整张表（值就是空指针常量 0）。
+            Expr::Deref { e, .. } => eval_full(e, fenv_access),
             // `&global_struct.member`: 地址常量表达式 (C 标准 6.6.9)
             // 用于全局/静态初始化器，如 `const T *p = &global.field;`
             Expr::Member {
@@ -482,7 +489,31 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         Expr::Cond {
             cond, then_, else_, ..
         } => {
-            if eval(cond)? != 0 {
+            // 条件不一定是整数常量：数组名/函数名/字符串字面量在 C 里退化为
+            // 非空指针，地址常量作条件恒为真（链接期也跑不掉）。内核
+            // `include/linux/netfilter/nf_conntrack_sip.h` 的
+            //   `.clen = (__cname) ? sizeof(__cname) - 1 : 0`
+            // 就用字符串字面量当条件（`(const char *)"v"` 非空），gcc 折真；
+            // 只认整数会让整张 `ct_sip_hdrs[]` 被 E1006 拒掉
+            // （`net/netfilter/nf_conntrack_sip.o 错误 1`）。
+            let truthy = match eval(cond) {
+                Ok(v) => v != 0,
+                // 整数口径判不出来时，再看「地址/字符串字面量退化为非空指针」。
+                //
+                // 两者都不成立必须把错误传出去：把 `Err` 当成「假」会把
+                // `d > 0 ? d != 0 : 0` 折成 0，进而让 `while (…)` 整段消失
+                // （`opt_float_truth_condition.c` 的 while_d 返回 0）。
+                Err(_) => match eval_full(cond, fenv_access) {
+                    Ok(
+                        ConstValue::Addr { .. }
+                        | ConstValue::Str { .. }
+                        | ConstValue::Bytes { .. },
+                    ) => true,
+                    Ok(_) => return Err(ConstEvalError::NotConstant),
+                    Err(e) => return Err(e),
+                },
+            };
+            if truthy {
                 eval_full(then_, fenv_access)
             } else {
                 eval_full(else_, fenv_access)
@@ -553,7 +584,10 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 _ => Err(ConstEvalError::NotConstant),
             }
         },
-        Expr::Offsetof { ty, member, .. } => Ok(ConstValue::Int(eval_offsetof(ty, member) as i128)),
+        Expr::Offsetof { ty, member, .. } => match eval_offsetof_opt(ty, member) {
+            Some(v) => Ok(ConstValue::Int(v as i128)),
+            None => Err(ConstEvalError::NotConstant),
+        },
         Expr::StmtExpr { block, .. } => eval_stmt_expr_block(block),
         // 编译期可求值的 GCC/LLVM 内建函数: 参数是常量时返回常量结果。
         // 这些函数通常用 __builtin_constant_p 包裹, dcc 直接展开即可。
@@ -583,6 +617,25 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         None => false,
                     };
                     return Ok(ConstValue::Int(known as i128));
+                }
+                // `__builtin_expect(x, c)` 的值**就是** `x`，`c` 只是给分支预测的提示。
+                //
+                // 为什么必须在这里答对：`static inline` 体被整体搬进调用方之后，条件常常
+                // 整条只差这一层壳就不定型。现场是 `include/linux/ucopysize.h` 的
+                // `check_copy_size()`：
+                //     if (unlikely(sz >= 0 && sz < bytes)) { … __bad_copy_from(); … }
+                // 内联 + 常量代回之后两个实参都已经折成 `Int 0`，只剩 `__builtin_expect`
+                // 这层调用包着，于是 `if` 判不成常量、死块里的调用照发。`__bad_copy_from`
+                // /`__bad_copy_to` 在头里只有 `extern void __compiletime_error(...)` 的**声明**
+                // （定义根本不存在，gcc 靠「永远不发出引用」来保证），所以每发出一次就是一条
+                // 链接期 undefined reference —— 实测 `fs/eventfd.o` 等 116 个 TU 共 232 条。
+                if matches!(
+                    name.name.as_str(),
+                    "__builtin_expect" | "__builtin_expect_with_probability"
+                ) {
+                    if let Some(a) = args.first() {
+                        return eval(a).map(ConstValue::Int);
+                    }
                 }
                 // 浮点常量内建 (__builtin_nan/inf/huge_val 及其 f/l 变体):
                 // 结果是编译期浮点常量, 任何参数 (含字符串 tag) 都折叠为同一常量。
@@ -916,12 +969,72 @@ fn const_rint_i64(x: f64) -> i64 {
     r as i64
 }
 
-/// 编译期内建函数求值 (如 __builtin_clzll/__builtin_ctzll/__builtin_popcountll)。
-/// 仅当参数是常量整数时返回 Some; 否则返回 None 让外层走 NotConstant。
+/// 这条表达式是否就是一个**字符串字面量**（含结尾 NUL）；是则返回它的字节内容。
+///
+/// 只认字面量（可裹转型）：`__builtin_strcmp(p, "<")` 里 `p` 是变量时**不能**猜，
+/// 那只能让调用方保留运行时调用。`ConstValue::Str` 就是 parser 对字面量的表示，
+/// 而 `ConstValue::Bytes` 是 `#embed` 的数组（同样有确定字节），两者都给。
+fn literal_string_bytes(e: &Expr) -> Result<Option<Vec<u8>>, ConstEvalError> {
+    match e {
+        Expr::Cast { e: inner, .. } => literal_string_bytes(inner),
+        Expr::String { .. } => match eval_full(e, false)? {
+            ConstValue::Str { data, .. } | ConstValue::Bytes { data, .. } => Ok(Some(data)),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+/// C 的 `strcmp`/`strncmp` 在对**常量字符串**求值：按无符号字节比，返回第一个不同处
+/// 的差（比较到 NUL 就停），与 glibc/gcc 的折叠结果同口径。
+fn c_strcmp(a: &[u8], b: &[u8], n: Option<u128>) -> i128 {
+    let limit = n.unwrap_or(u128::MAX) as u128;
+    for i in 0..limit {
+        let idx = i as usize;
+        // 超出实际长度就是已经跑进结尾 NUL 之后，按 0 参比（两边一致时自然提前终止）。
+        let ca = a.get(idx).copied().unwrap_or(0) as u32;
+        let cb = b.get(idx).copied().unwrap_or(0) as u32;
+        if ca != cb {
+            return (ca as i32 - cb as i32) as i128;
+        }
+        if ca == 0 {
+            return 0;
+        }
+    }
+    0
+}
+
+/// 编译期内建函数求值 (如 __builtin_clzll/__builtin_ctzll/__builtin_popcountll，
+/// 以及字面量形式的 __builtin_strcmp/__builtin_strncmp)。
+/// 仅当参数是常量时返回 Some; 否则返回 None 让外层走 NotConstant。
 fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalError> {
     let argc = args.len();
     let take1 = |args: &[Expr]| -> Result<i128, ConstEvalError> { eval(&args[0]) };
     match name {
+        // `__builtin_strcmp` / `__builtin_strncmp` 对**两个字面量**必须折成常量。
+        // 现场理由：内核 `kernel/sched/fair.c:537-554` 的 `vruntime_cmp(A, "<", B)`
+        // 把「选哪个比较臂」编码成一个字符串字面量参数，整套结构是
+        //   `if (!__builtin_strcmp(CMP_STR, "<")) { … } else if … else __BUILD_BUG_vruntime_cmp();`
+        // 而 `__BUILD_BUG_vruntime_cmp` 是一个**故意不存在**的函数（注释原话
+        // “Unknown operator throws linker error”）。不折那次 strcmp 就留下
+        // 永不执行的 else 臂里的引用（实测 `kernel/sched/fair.o` 7 条：
+        // `min_vruntime`/`entity_before`/`entity_key`/`vruntime_eligible`/
+        // `__min_vruntime_update`/`protect_slice`/`update_deadline`），最终链接
+        // 就是 `undefined reference to '__BUILD_BUG_vruntime_cmp'`。
+        // gcc -O2 实测基准：strcmp("abc","abd") = -1、strcmp("abc","abc") = 0。
+        "__builtin_strcmp" if argc == 2 => {
+            match (literal_string_bytes(&args[0])?, literal_string_bytes(&args[1])?) {
+                (Some(a), Some(b)) => Ok(Some(c_strcmp(&a, &b, None))),
+                _ => Ok(None),
+            }
+        },
+        "__builtin_strncmp" if argc == 3 => {
+            let n = eval(&args[2])? as u64;
+            match (literal_string_bytes(&args[0])?, literal_string_bytes(&args[1])?) {
+                (Some(a), Some(b)) => Ok(Some(c_strcmp(&a, &b, Some(n as u128)))),
+                _ => Ok(None),
+            }
+        },
         "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" if argc == 1 => {
             let v = take1(args)?;
             if v == 0 {
@@ -1070,6 +1183,36 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
 /// 语句表达式 `({ ... })` 编译期求值.
 /// 仅当块内所有语句都是常量表达式或声明, 且最后一个语句是
 /// 常量表达式时, 才能作为常量返回.
+/// 语句表达式 `({ … })` 的常量求值：把它当一段**直线程序**跑一遍。
+///
+/// 为什么要特意支持 `if`：内核 `__always_inline` 助手被整体搬进调用方后就是这个形状。
+/// `include/linux/bitfield.h` 的 `field_multiplier()` 体是
+/// ```c
+/// if ((field | (field - 1)) & ((field | (field - 1)) + 1))
+///         __bad_mask();
+/// return field & -field;
+/// ```
+/// 而 `__bad_mask` / `__field_overflow` / `__bad_udelay` / `____wrong_branch_error` 在头里
+/// **只有声明、没有定义**（gcc 靠「永远不发出引用」保证链得上）。旧实现只认「表达式语句 +
+/// 带初值的声明」，一遇 `if` 就整体判非常量 ⇒ 外层守卫
+/// `if (__builtin_constant_p(v) && (v & ~field_mask(f)))` 折不成常量 ⇒ trap 调用真发进
+/// `.text`。实测 localmodconfig 全树因此留下 `__field_overflow` 21 条 / `__bad_mask` 8 条 /
+/// `__bad_udelay` 3 条，全在 `LD .tmp_vmlinux1` 报 undefined reference；同配置 gcc 一条没有。
+///
+/// 每条判据都是「不确定就拒绝」，不做猜测：
+///   * 声明：非 static；无初值的声明登记名字但不绑值（读它会因查不到而整体拒绝）；
+///   * 表达式语句：形如 `x = E` 且 `x` 是本块自己声明的局部时把 E 的值绑进 env
+///     （dcc 的复合赋值在 parser 已脱糖成 `x = x op E`，故无需区分算子），否则求值后丢弃；
+///   * `if`：条件必须自己折得出真值，只跑被选中的那支 —— 未选那支里的 trap 调用因此
+///     根本不被求值；
+///   * 复合语句：进去跑一遍再出来；
+///   * `goto`：只允许**向前**跳到本块顶层的标号，并且真的把执行位置改过去（被跳过的
+///     赋值/调用因此不生效）。必须认这条：`__always_inline` 的包装器把 callee 体里的
+///     `return E;` 发成 `__rv = E; goto __end;` + 末尾 `__end:` + 末表达式 `__rv`，不认
+///     `goto` 就等于不认**全部**带提前返回的内联助手；
+///   * 后跳（意味着回路）/ `return` / 循环 / `switch` / asm / Duff：拒绝。`return` 尤其
+///     关键：`({ … return E … })` 里的 return 返回的是**外层函数**，把 E 当语句表达式的
+///     值会造出一个错误的常量。
 fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
     let items = &block.items;
     if items.is_empty() {
@@ -1077,27 +1220,242 @@ fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
     }
     // Track variable bindings from declarations within the block
     let mut env: HashMap<String, ConstValue> = HashMap::new();
-    // 求值所有非末尾语句 (必须是可折叠的常量表达式或无副作用声明)
-    for item in &items[..items.len() - 1] {
-        match item {
-            BlockItem::Stmt(Stmt::Expr { e, .. }) => {
-                // 中间语句: 必须是可求值的常量表达式 (结果丢弃)
-                eval_with_env(e, &env, false)?;
-            },
-            BlockItem::Decl(Decl::Var(v)) => {
-                // Track variable binding: evaluate init and store in env
-                if let Some(init) = &v.init {
-                    let val = eval_with_env(init, &env, false)?;
-                    env.insert(v.name.name.clone(), val);
-                }
-            },
-            _ => return Err(ConstEvalError::NotConstant),
+    // 本语句表达式自己声明的局部名：赋值只准落在它们身上（理由见 [`interp_stmt`]）。
+    let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut steps = 0_usize;
+    // 顶层标号表（名字 -> 首次出现的项下标）。`goto` 只往这里查：嵌在子块里的标号
+    // 作用域不覆盖本层跳转，查不到即拒绝。
+    let mut top_labels: HashMap<String, usize> = HashMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if let BlockItem::Stmt(Stmt::Label { name, .. }) = it {
+            top_labels.entry(name.name.clone()).or_insert(i);
         }
     }
-    // 最后一个语句的值即为语句表达式的值
-    match items.last().unwrap() {
-        BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_with_env(e, &env, false),
-        _ => Err(ConstEvalError::NotConstant),
+    // 语句表达式的值是**末项表达式语句**，但末项不能从执行序列里剥出来单独算：
+    // 内联包装器把 `__end:` 放在末表达式**之前**，跳转要正好落在它身上再取值。
+    // 所以这里按位置跑，跑到末项就把它当值返回。
+    let value_at = items.len() - 1;
+    let mut i = 0_usize;
+    while i < items.len() {
+        if i == value_at {
+            return match &items[i] {
+                BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_with_env(e, &env, false),
+                other => Err(se_reject("末项不是表达式语句", other)),
+            };
+        }
+        let step = interp_block_item(&items[i], i, &mut env, &mut locals, &top_labels, false, &mut steps)?;
+        i = match step {
+            Step::Next => i + 1,
+            // 只许前跳：后跳意味着回路，不是直线程序。
+            Step::Jump(j) if j > i => j,
+            Step::Jump(_) => return Err(se_reject("goto 向后跳（回路）", &items[i])),
+        };
+    }
+    Err(se_reject("末项不可达", &items[value_at]))
+}
+
+/// [`interp_block_item`] 的执行去向。
+enum Step {
+    /// 顺序执行下一项
+    Next,
+    /// 跳到本块顶层的这个下标（内联包装器的 `goto __end;`）
+    Jump(usize),
+}
+
+/// 「这条表达式被求值一次不产生任何可观察效果」的**白名单**判据，只给
+/// [`interp_block_item`] 的「声明初值算不出常量」那一格用。
+///
+/// 为什么自己写而不复用 `semantics::expr_has_side_effects`：那边是「已知形状里有没有写
+/// 动作」的口径（默认假），这里要的是「剩下的形状一律当有效果」（默认真）：内联汇编、
+/// 语句表达式、`__builtin_va_arg`（每读一次推进游标）、复合字面量、`cleanup` 属性一个都不
+/// 能放。宁可少放行：判不出来就是拒，代价只少折一个常量条件，不改变正确性。
+fn init_is_pure_read(e: &Expr) -> bool {
+    // volatile 限定类型的读本身就是可观察效果（C11 6.7.3p6）。
+    if crate::ast::type_has_volatile(&e.ty()) {
+        return false;
+    }
+    match e {
+        Expr::Int { .. }
+        | Expr::Char { .. }
+        | Expr::Float { .. }
+        | Expr::String { .. }
+        | Expr::Ident { .. }
+        | Expr::LabelAddr { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. } => true,
+        // `sizeof(expr)` / `_Alignof(expr)` 的操作数不被求值（VLA 维度已经由 `ty()` 上的
+        // volatile 检查拦不住，这里直接当有效果处处理）。
+        Expr::SizeofExpr { .. } | Expr::AlignofExpr { .. } => false,
+        Expr::Cast { e, .. }
+        | Expr::Unary { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::Member { expr: e, .. } => init_is_pure_read(e),
+        Expr::Binop { l, r, .. } | Expr::Index { arr: l, idx: r, .. } => {
+            init_is_pure_read(l) && init_is_pure_read(r)
+        },
+        _ => false,
+    }
+}
+
+/// [`interp_stmt`] 的步数上限。
+///
+/// 存在理由：语句表达式可以嵌在被反复求值的折叠点里（`if` 条件、内建谓词、另一个
+/// 语句表达式内部），没有上限时一个畸形大块就能把编译期推成平方级 —— 本项目有过
+/// 「优化器按 trip 逐趟实体化导致挂起」的同类记录，这里一次性设闸而不是事后补。
+/// 超限按非常量拒绝：语义不变，只是不再折叠。
+const INTERP_MAX_STEPS: usize = 4096;
+
+/// 报障用：语句表达式求值**为什么**拒绝。`DCC_SE_TRACE=1` 把拒绝点的形状打到 stderr。
+/// 与 `crate::opt` 的 `DCC_CPROP_TRACE` 同一纪律：`OnceLock` 只读一次 env（本路径在每个
+/// 折叠点都会被叫，直接 getenv 会把巨型 TU 的编译期搅乱），只读不改判据、不进产物。
+fn se_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DCC_SE_TRACE").is_some())
+}
+
+/// 统一的「拒绝并留痕」出口：形状只截前 260 字符，否则一个嵌套块就能刷掉整屏。
+fn se_reject(what: &str, node: &dyn std::fmt::Debug) -> ConstEvalError {
+    if se_trace_on() {
+        let s = format!("{node:?}");
+        let cut: String = s.chars().take(260).collect();
+        eprintln!("[se-fold] 拒绝于 {what}: {cut}");
+    }
+    ConstEvalError::NotConstant
+}
+
+/// 解释块内的一项（声明或语句）。`at` 是本项在顶层序列里的下标，供 `goto` 判前跳。
+fn interp_block_item(
+    item: &BlockItem,
+    at: usize,
+    env: &mut HashMap<String, ConstValue>,
+    locals: &mut std::collections::HashSet<String>,
+    labels: &HashMap<String, usize>,
+    fenv_access: bool,
+    steps: &mut usize,
+) -> Result<Step, ConstEvalError> {
+    match item {
+        BlockItem::Decl(Decl::Var(v)) => {
+            if v.is_static {
+                return Err(se_reject("块内 static 声明", item));
+            }
+            // 无初值的声明**跳过而不拒绝**：`__always_inline` 助手被整体搬进来时，语句
+            // 表达式的第一条就是返回值暂存槽 `u64 __inlexp9$rv;`（随后才有 `__rv = E;`）。
+            // 这里不绑值是安全的：真正**读**它的那一步在 env 里查不到名字，会退回
+            // [`eval_full`] 把 Ident 判成非常量 ⇒ 整体照样拒绝，不存在「拿脏值当常量」。
+            // 但名字必须登记为局部：赋值到它身上才算「写在本块内」。
+            let name = v.name.name.clone();
+            let Some(init) = &v.init else {
+                locals.insert(name);
+                return Ok(Step::Next);
+            };
+            match eval_with_env(init, env, fenv_access) {
+                Ok(val) => {
+                    env.insert(name.clone(), val);
+                    locals.insert(name);
+                    Ok(Step::Next)
+                },
+                // 初值算不出来，但它是一次**纯读**（无调用/赋值/自增/内联汇编/语句表达式/
+                // volatile）⇒ 这条声明只是往本块一个没人再读的槽里存了个值，丢掉它不改变
+                // 可观察行为。安全性靠**不登记这个名字**兜住：后面真读它 ⇒ `eval_with_env`
+                // 查不到 ⇒ 退回 `eval_full` 判非常量；真写它 ⇒ 撞「赋值目标不是本块局部」，
+                // 两条都还是整块拒绝，所以放行这一格放不进「拿脏值当常量」。
+                //
+                // 不这样做的代价是实测的：`function_inline` 把被调方形参实体成
+                // `unsigned __inl1$_n = n;`（`n` 是**外层**函数的变量，当场算不出值），
+                // 于是整条 `({ …; 0; })` 被判非常量 ⇒
+                // `pts_feature(&pts, PT_FEAT_DMA_INCOHERENT) && !pt_test_sw_bit_acquire(&pts, …)`
+                // 塌不掉 ⇒ `drivers/iommu/generic_pt/fmt/iommu_amdv1.o` 把只有声明、没有
+                // 定义的 `__pt_no_sw_bit` 留到链接期（`gcc -O2` 不留）。
+                Err(_) if v.cleanup_fn.is_none() && v.register_name.is_none() && init_is_pure_read(init) => {
+                    Ok(Step::Next)
+                },
+                Err(_) => Err(se_reject("声明初值不是常量", item)),
+            }
+        },
+        BlockItem::Decl(_) => Err(se_reject("非变量声明", item)),
+        BlockItem::Stmt(s) => interp_stmt(s, at, env, locals, labels, fenv_access, steps),
+    }
+}
+
+fn interp_stmt(
+    s: &Stmt,
+    at: usize,
+    env: &mut HashMap<String, ConstValue>,
+    locals: &mut std::collections::HashSet<String>,
+    labels: &HashMap<String, usize>,
+    fenv_access: bool,
+    steps: &mut usize,
+) -> Result<Step, ConstEvalError> {
+    *steps += 1;
+    if *steps > INTERP_MAX_STEPS {
+        return Err(se_reject("超出步数上限", s));
+    }
+    match s {
+        Stmt::Expr { e, .. } => {
+            if let Expr::Assign { l, r, .. } = e {
+                let val = eval_with_env(r, env, fenv_access)?;
+                return match &**l {
+                    // 赋值目标必须是**本语句表达式自己声明的局部**。这条不是洁癖而是
+                    // 前置条件：`opt::fold_expr` 会把求值成功的语句表达式**整个换成常量**，
+                    // 若这里放过写到外层变量上的赋值，那次写就随替换消失了（副作用丢了）。
+                    Expr::Ident { name, .. } if locals.contains(&name.name) => {
+                        env.insert(name.name.clone(), val);
+                        Ok(Step::Next)
+                    },
+                    other => Err(se_reject("赋值目标不是本块局部", other)),
+                };
+            }
+            eval_with_env(e, env, fenv_access)?;
+            Ok(Step::Next)
+        },
+        Stmt::Block { b, .. } => {
+            for it in &b.items {
+                match interp_block_item(it, at, env, locals, labels, fenv_access, steps)? {
+                    // 子块里的 `goto` 命中本块顶层标号时向上传，由调用方改执行位置。
+                    Step::Jump(j) => return Ok(Step::Jump(j)),
+                    Step::Next => {},
+                }
+            }
+            Ok(Step::Next)
+        },
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            let t = truthy_value(&eval_with_env(cond, env, fenv_access)?)?;
+            if t {
+                interp_stmt(then_, at, env, locals, labels, fenv_access, steps)
+            } else {
+                match else_ {
+                    Some(b) => interp_stmt(b, at, env, locals, labels, fenv_access, steps),
+                    None => Ok(Step::Next),
+                }
+            }
+        },
+        // 标号本身：继续执行它所包的语句（包装器那里通常是空语句）。
+        Stmt::Label { stmt, .. } => interp_stmt(stmt, at, env, locals, labels, fenv_access, steps),
+        Stmt::Goto { target, .. } => match labels.get(&target.name) {
+            Some(&j) => Ok(Step::Jump(j)),
+            None => Err(se_reject("goto 目标不在本块顶层", s)),
+        },
+        _ => Err(se_reject("不受支持的语句形状", s)),
+    }
+}
+
+/// 常量值的真假（C 的「非零即真」）。返回 `None` 表示判不出来 —— 调用方必须把它
+/// 当「折不动」处理，绝不能当假：当假会选中 `else` 支，当真会留下 trap 调用，
+/// 两边都是静默错编。
+fn truthy_value(v: &ConstValue) -> Result<bool, ConstEvalError> {
+    match v {
+        ConstValue::Int(i) => Ok(*i != 0),
+        ConstValue::Float(_) => v
+            .as_float()
+            .map(|f| f != 0.0)
+            .ok_or(ConstEvalError::NotConstant),
+        // 地址常量/字符串字面量指向真实体，C 里恒真。
+        ConstValue::Addr { .. } | ConstValue::Str { .. } | ConstValue::Bytes { .. } => Ok(true),
     }
 }
 
@@ -1118,22 +1476,35 @@ fn eval_with_env(
     // then apply the same operation logic as eval_full
     match expr {
         Expr::Binop { op, l, r, ty, .. } => {
-            let lv = eval_with_env(l, ctx, fenv_access)?;
-            let rv = eval_with_env(r, ctx, fenv_access)?;
-            match op {
-                BinOp::AndAnd => Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 {
-                    0
-                } else if rv.as_int().unwrap_or(0) != 0 {
-                    1
+            // `&&` / `||` 必须**短路**，与 [`eval_full`] 的同一条臂一个口径（那里写得很
+            // 明白：「不要求两边都是常量」）。原先这里先把两边都求完再判，于是
+            //     if (__builtin_constant_p(v) && (v & ~field_mask(field)))
+            // 在 `v` 不是常量时因为右边折不动而整条判成非常量；gcc 是右边根本不求值、
+            // 直接得 0，死支里的 trap 调用跟着消失。求值器不短路，等于替内核多发一条
+            // 永远不可能执行的调用 —— 而那些 trap 函数只有声明没有定义，链接期就爆。
+            //
+            // 顺带修掉一个真错：旧臂用 `as_int()` 取真假，浮点常量会被**截断成整数**，
+            // `0.5 && x` 因此被判成假；现在走 [`truthy_value`]，与非零判定一致。
+            if matches!(op, BinOp::AndAnd) {
+                let lv = truthy_value(&eval_with_env(l, ctx, fenv_access)?)?;
+                return Ok(ConstValue::Int(if lv {
+                    truthy_value(&eval_with_env(r, ctx, fenv_access)?)? as i128
                 } else {
                     0
-                })),
-                BinOp::OrOr => Ok(ConstValue::Int(
-                    (lv.as_int().unwrap_or(0) != 0 || rv.as_int().unwrap_or(0) != 0) as i128,
-                )),
-                // 算术/比较统一走类型感知路径 (与 eval_binop 共用)
-                _ => arith_binop_values(*op, ty, l, r, lv, rv, fenv_access),
+                }));
             }
+            if matches!(op, BinOp::OrOr) {
+                let lv = truthy_value(&eval_with_env(l, ctx, fenv_access)?)?;
+                return Ok(ConstValue::Int(if lv {
+                    1
+                } else {
+                    truthy_value(&eval_with_env(r, ctx, fenv_access)?)? as i128
+                }));
+            }
+            let lv = eval_with_env(l, ctx, fenv_access)?;
+            let rv = eval_with_env(r, ctx, fenv_access)?;
+            // 算术/比较统一走类型感知路径 (与 eval_binop 共用)
+            arith_binop_values(*op, ty, l, r, lv, rv, fenv_access)
         },
         Expr::Unary { op, e, .. } => {
             let v = eval_with_env(e, ctx, fenv_access)?;
@@ -1255,6 +1626,173 @@ fn is_unsigned_int_ty(ty: &Type) -> bool {
             | Type::ULongLong
             | Type::UInt128
     )
+}
+
+/// 表达式的**可能取值区间**（闭区间），供 [`truth_by_int_range`] 用。
+///
+/// 只对「值不依赖运行期状态」的形状扇出，任何一处给不出就整体放弃：区间一旦算宽了，
+/// 就会把该折的比较判成「不定」，方向上是保守的；算窄了则会把活代码判成死代码，
+/// 所以宁可少折一条。
+fn int_range(e: &Expr) -> Option<(i128, i128)> {
+    match e {
+        Expr::Int { v, ty, .. } => {
+            // 无符号字面量在 AST 里存的是按类型截断后的位模式（`0xffffffffffffffffUL`
+            // 是 -1），那种形状给不出「数学值」——放弃而不是猜。
+            if is_unsigned_int_ty(ty) && *v < 0 {
+                return None;
+            }
+            Some((*v, *v))
+        },
+        Expr::Char { v, .. } => Some((*v, *v)),
+        Expr::Unary {
+            op: UnOp::Plus, e, ..
+        } => int_range(e),
+        Expr::Unary {
+            op: UnOp::Neg, e, ..
+        } => {
+            let (lo, hi) = int_range(e)?;
+            Some((hi.checked_neg()?, lo.checked_neg()?))
+        },
+        // `(X ? a : b)`：值**必是** a 或 b 之一，取并集就不必知道 X。
+        // 这一条是本族的支点：`MAX_PHYSMEM_BITS` 就是
+        // `(pgtable_l5_enabled() ? 52 : 46)`，X 内联后是带 `asm goto` 的语句表达式，
+        // 常量求值器判不出真值，但两臂的值都定得下来。
+        Expr::Cond { then_, else_, .. } => {
+            let (al, ah) = int_range(then_)?;
+            let (bl, bh) = int_range(else_)?;
+            Some((al.min(bl), ah.max(bh)))
+        },
+        Expr::Binop { op, l, r, .. } => {
+            let (ll, lh) = int_range(l)?;
+            let (rl, rh) = int_range(r)?;
+            match op {
+                BinOp::Add => Some((ll.checked_add(rl)?, lh.checked_add(rh)?)),
+                BinOp::Sub => Some((ll.checked_sub(rh)?, lh.checked_sub(rl)?)),
+                BinOp::Mul => {
+                    let cands = [
+                        ll.checked_mul(rl)?,
+                        ll.checked_mul(rh)?,
+                        lh.checked_mul(rl)?,
+                        lh.checked_mul(rh)?,
+                    ];
+                    Some((*cands.iter().min()?, *cands.iter().max()?))
+                },
+                // 移位只接「移位量单值且在 0..128」的形状：否则两端会跨过位宽边界，
+                // 那是 UB 区间，按数学意义算出来的界不再覆盖所有实际取值。
+                BinOp::Shl if rl == rh && (0..128).contains(&rl) => {
+                    Some((ll.checked_shl(rl as u32)?, lh.checked_shl(rl as u32)?))
+                },
+                _ => None,
+            }
+        },
+        // `(a, b)` 的值就是 b
+        Expr::Comma { r, .. } => int_range(r),
+        _ => None,
+    }
+}
+
+/// 比较运算的「区间判据」：两侧都折不出具体值，但**值域**足以定案时返回结果。
+///
+/// 为什么需要它（`mm/vmstat.o` 2 条 + `fs/proc/task_mmu.o` 1 条
+/// `__compiletime_assert_NNN` 的根因）：
+/// ```c
+/// /* arch/x86/include/asm/sparsemem.h:29 */
+/// #define MAX_PHYSMEM_BITS (pgtable_l5_enabled() ? 52 : 46)
+/// /* include/linux/swapops.h:36 */
+/// #define SWP_PFN_BITS     (MAX_PHYSMEM_BITS - PAGE_SHIFT)
+/// BUILD_BUG_ON(SWP_TYPE_SHIFT < SWP_PFN_BITS)   /* 58 < (X ? 40 : 34) 恒假 */
+/// ```
+/// `pgtable_l5_enabled()` 是 `__always_inline`，内联后长成带 `asm goto` 的语句表达式，
+/// [`eval_full`] 判不出真值 ⇒ 整条比较判不出 ⇒ `if (!(!(...)))` 留在产物里 ⇒
+/// 链接期 `undefined reference`。GCC 是按值域消掉的：不需要知道 X。
+fn cmp_by_int_range(op: BinOp, l: &Expr, r: &Expr) -> Option<bool> {
+    if !matches!(
+        op,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
+    ) {
+        return None;
+    }
+    let (ll, lh) = int_range(l)?;
+    let (rl, rh) = int_range(r)?;
+    // 无符号且区间含负值：i128 的有序性不再对应该类型的序，放弃。
+    if (is_unsigned_int_ty(&l.ty()) || is_unsigned_int_ty(&r.ty())) && (ll < 0 || rl < 0) {
+        return None;
+    }
+    match op {
+        BinOp::Lt => {
+            if lh < rl {
+                Some(true)
+            } else if ll >= rh {
+                Some(false)
+            } else {
+                None
+            }
+        },
+        BinOp::Le => {
+            if lh <= rl {
+                Some(true)
+            } else if ll > rh {
+                Some(false)
+            } else {
+                None
+            }
+        },
+        BinOp::Gt => {
+            if ll > rh {
+                Some(true)
+            } else if lh <= rl {
+                Some(false)
+            } else {
+                None
+            }
+        },
+        BinOp::Ge => {
+            if ll >= rh {
+                Some(true)
+            } else if lh < rl {
+                Some(false)
+            } else {
+                None
+            }
+        },
+        BinOp::EqEq => {
+            if ll == lh && rl == rh {
+                Some(ll == rl)
+            } else if lh < rl || rh < ll {
+                Some(false)
+            } else {
+                None
+            }
+        },
+        BinOp::Ne => {
+            if ll == lh && rl == rh {
+                Some(ll != rl)
+            } else if lh < rl || rh < ll {
+                Some(true)
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// 表达式在 C 的真值意义下是不是**恒定**的非零/零，只看得到值域就能定案时返回。
+///
+/// 只翻这几形：整数常量、`!`（`BUILD_BUG_ON` 展开成 `if (!(!(cond)))`，两层都得翻得过去）、
+/// 逗号（值只看右边）与比较。其它形状一律「不知道」——调用方据此**保留原条件求值**
+/// （见 `opt::fold_branches_block`），所以这里回答 false 不会改变任何求值。
+pub fn truth_by_int_range(e: &Expr) -> Option<bool> {
+    match e {
+        Expr::Int { v, .. } => Some(*v != 0),
+        Expr::Char { v, .. } => Some(*v != 0),
+        Expr::Unary {
+            op: UnOp::Not, e: x, ..
+        } => truth_by_int_range(x).map(|b| !b),
+        Expr::Comma { r, .. } => truth_by_int_range(r),
+        Expr::Binop { op, l, r, .. } => cmp_by_int_range(*op, l, r),
+        _ => None,
+    }
 }
 
 /// 按类型规范化整数值: 有符号类型截断到位宽后符号扩展, 无符号
@@ -1618,34 +2156,111 @@ pub fn eval_int_lit(s: &str) -> Option<i128> {
 }
 
 /// __builtin_offsetof(type, member) 编译期偏移
+///
+/// 兼容旧调用点的形状：折不动就返回 0（与历史行为逐字相同）。需要区分
+/// 「下标不是整型常量表达式」的调用点请用 [`Self::eval_offsetof_opt`]。
 pub fn eval_offsetof(ty: &Type, member: &str) -> usize {
-    match ty {
-        Type::Union(_, _, _, _) => 0,
-        Type::Struct(_, fields, _, _) => {
-            let parts: Vec<&str> = member.split('.').collect();
-            let mut offset = 0usize;
-            let mut current_fields = fields.as_ref();
-            for (i, part) in parts.iter().enumerate() {
-                let name = if part.contains('[') {
-                    &part[..part.find('[').unwrap()]
-                } else {
-                    part
-                };
-                if let Some((field, inner_off)) = find_field(current_fields, name) {
-                    offset += field.offset + inner_off;
-                    if i < parts.len() - 1 {
-                        if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, _) = &field.ty {
-                            current_fields = sub.as_ref();
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-            offset
-        },
-        _ => 0,
+    eval_offsetof_opt(ty, member).unwrap_or(0)
+}
+
+/// `__builtin_offsetof(type, member)` 的编译期偏移。
+///
+/// 路径是 `.` 连接的 member-designator，**每一段都能带任意个 `[常量]` 下标**
+/// （C11 6.7.9p6；内核大量使用，如 `drivers/tty/serial/serial_core.c:3581` 的
+/// `offsetof(struct serial_rs485, padding[1])`）。旧实现把 `[...]` 截掉不看，于是
+/// 下标一律算成首元素偏移（上面那条给 12 而不是 16），`_Static_assert` 假失败
+/// （实测 W0010，gcc 同文件 0 条）。另一处旧行为是把**顶层联合体**直接返回 0，
+/// 而联合体各成员偏移本就是 0，与结构体走同一条字段下降路径即可。
+///
+/// 只在「下标存在但读不出整型常量」时返回 `None`（那按 C 本来就不是合法的
+/// offsetof，上层据此报非常量，而不是悄悄折成一个偏小的数）；找不到字段仍然
+/// 按旧行为**就地停下**并返回已累加到的偏移，不给新的错误路径让已有调用点改行为。
+pub fn eval_offsetof_opt(ty: &Type, member: &str) -> Option<usize> {
+    // 字段表一律拿副本：这一步只在编译期跑几次 offsetof，不值得为借用生命周期
+    // 再把函数拆成两段。
+    let mut current_fields: Vec<crate::ast::Field> = match ty {
+        Type::Struct(_, f, _, _) | Type::Union(_, f, _, _) => f.as_ref().clone(),
+        _ => return Some(0),
+    };
+    let parts: Vec<&str> = member.split('.').collect();
+    let mut offset = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        let (name, subs) = split_offsetof_part(part);
+        let Some((field, inner_off)) = find_field(&current_fields, name).map(|(f, o)| (f.clone(), o))
+        else {
+            break;
+        };
+        offset += field.offset + inner_off;
+        let mut cur_ty = field.ty;
+        for sub in subs {
+            let elem = match &cur_ty {
+                Type::Array(inner, _) => inner.base.clone(),
+                // 不是数组却带下标：这形状旧实现也是直接丢掉下标，保持不前进。
+                _ => break,
+            };
+            let idx = offsetof_subscript_index(sub)?;
+            offset += (idx as usize).wrapping_mul(elem.size());
+            cur_ty = elem;
+        }
+        if i + 1 < parts.len() {
+            current_fields = match &cur_ty {
+                Type::Struct(_, f, _, _) | Type::Union(_, f, _, _) => f.as_ref().clone(),
+                _ => break,
+            };
+        }
     }
+    Some(offset)
+}
+
+/// 把 `offsetof` 路径中的一段拆成「字段名 + 若干下标」：`padding[1]` →
+/// `("padding", ["1"])`，`m[1][2]` → `("m", ["1", "2"])`，下标里还能套括号。
+fn split_offsetof_part(part: &str) -> (&str, Vec<&str>) {
+    let Some(bp) = part.find('[') else {
+        return (part, Vec::new());
+    };
+    let name = &part[..bp];
+    let b = part.as_bytes();
+    let mut subs = Vec::new();
+    let mut i = bp;
+    while i < b.len() {
+        if b[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut d = 1_i32;
+        let mut j = i + 1;
+        while j < b.len() {
+            match b[j] {
+                b'[' => d += 1,
+                b']' => {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                },
+                _ => {},
+            }
+            j += 1;
+        }
+        if d != 0 {
+            break; // 括号不配对：剩下的原样丢掉，不猜
+        }
+        subs.push(&part[start..j]);
+        i = j + 1;
+    }
+    (name, subs)
+}
+
+/// 下标文本 → 整型值。先试单个字面量（能处理 `0x10`、`2UL` 这类后缀），
+/// 不行再交给已有的纯算术折叠（`+ - * ( )`，内联汇编位移那套同一工具），
+/// 不另开第三个算术子集。
+fn offsetof_subscript_index(s: &str) -> Option<i64> {
+    let t = s.trim();
+    if let Some(v) = eval_int_lit(t) {
+        return i64::try_from(v).ok();
+    }
+    crate::codegen::x86_64::Codegen::eval_pure_numeric_arith(t)
 }
 
 pub fn is_constant(expr: &Expr) -> bool {
@@ -1846,14 +2461,18 @@ pub fn unwrap_string_cast(e: &Expr) -> &Expr {
 /// 未知时返回 `None`，调用方应回退为 `(size_t)-1`。
 pub fn object_size(ptr: &Expr, type_arg: i128) -> Option<i128> {
     let mode = type_arg.clamp(0, 3);
-    let base = match ptr {
-        Expr::AddrOf { e, .. } | Expr::Cast { e, .. } => e.as_ref(),
-        other => other,
-    };
-    object_size_of(base, mode)
+    // `&obj` 要的就是 `obj` 这个对象的大小；裸指针/裸变量身上没有「对象大小」可言，
+    // 两者必须分开问（`addressed`）。强制转换只是个壳，剥掉重问即可。
+    match ptr {
+        Expr::AddrOf { e, .. } => object_size_of(e, mode, true),
+        Expr::Cast { e, .. } => object_size(e, type_arg),
+        other => object_size_of(other, mode, false),
+    }
 }
 
-fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
+/// `addressed` = 传进来的这个表达式就是 `__builtin_object_size(&…)` 里被取地址的**对象**，
+/// 而不是一个指针值。
+fn object_size_of(expr: &Expr, mode: i128, addressed: bool) -> Option<i128> {
     match expr {
         Expr::Ident { ty, .. } => match ty {
             Type::Array(elem, ArraySize::Const(n)) => {
@@ -1864,7 +2483,20 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
                     Some(total)
                 }
             },
-            _ => Some(ty.size() as i128),
+            // 【未知必须答未知】指针形参身上没有对象大小可言：gcc 对「未定指针」
+            // `p` 的 `__builtin_object_size(p, 0)` 答案是 `(size_t)-1`。
+            //
+            // 这里以前对**任何**非数组 Ident 都答 `ty.size()`，于是 `const void *p`
+            // 得到 8 —— 与 gcc 正好相反。连锁后果很实在：
+            // `include/linux/ucopysize.h` 的 `check_copy_size()` 里
+            //     if (unlikely(sz >= 0 && sz < bytes)) { … __bad_copy_from(); … }
+            // `sz` 恒 >= 0，条件便永远为真，死块里的 `__bad_copy_from()` /
+            // `__bad_copy_to()`（头里只有 `extern void __compiletime_error(...)` 的声明，
+            // 定义根本不存在，gcc 靠「永远不发出引用」保证）被每个 uaccess 调用点发出，
+            // 实测 `kernel/sys.o`、`io_uring/io_uring.o` 等 116 个 TU 共 232 条链接期
+            // undefined reference。
+            _ if addressed => Some(ty.size() as i128),
+            _ => None,
         },
         Expr::String { data, .. } => {
             // 字符串字面量: 含末尾 '\0' 的大小 (sizeof "abcd" == 5)
@@ -1881,7 +2513,9 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
             ty: elem_ty,
             ..
         } => {
-            let parent = object_size_of(arr, mode)?;
+            // `arr` 是「被下标的那个数组/指针」，不是对象本身（数组 Ident 走上面的
+            // Array 支，与 `addressed` 无关）。
+            let parent = object_size_of(arr, mode, false)?;
             if let Ok(i) = eval(idx) {
                 let off = i * elem_ty.size() as i128;
                 let remain = parent.saturating_sub(off);
@@ -1919,17 +2553,19 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
                 _ => None,
             }
         },
-        Expr::Deref { e, .. } => object_size_of(e, mode),
+        // `*p` 是「指针值」，退回到「不知道它背后有多大」（gcc 同样答 -1）；
+        // 只有显式 `&…` 才是「对象」。
+        Expr::Deref { e, .. } => object_size_of(e, mode, false),
         // Transparent wrappers: cast and address-of do not change object size
-        Expr::Cast { e, .. } => object_size_of(e, mode),
-        Expr::AddrOf { e, .. } => object_size_of(e, mode),
+        Expr::Cast { e, .. } => object_size_of(e, mode, addressed),
+        Expr::AddrOf { e, .. } => object_size_of(e, mode, true),
         // Compound literal: size is the type size
         Expr::CompoundLit { ty, .. } => Some(ty.size() as i128),
         // Pointer arithmetic: (ptr + offset) retains base object size
         // Only when the left operand is actually a pointer type
         Expr::Binop {
             op: BinOp::Add, l, ..
-        } if matches!(l.ty(), Type::Ptr(_)) => object_size_of(l, mode),
+        } if matches!(l.ty(), Type::Ptr(_)) => object_size_of(l, mode, false),
         _ => None,
     }
 }

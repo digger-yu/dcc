@@ -297,6 +297,20 @@ pub struct ExplicitRegInfo {
 /// val is the original value from op_map (register name without % prefix like "rax")
 /// Returns the substituted text with % prefix; None if conversion fails
 pub fn asm_reg_modifier_subst(val: &str, modifier: char) -> Option<String> {
+    // 非寄存器操作数（立即数 `$33`、符号 `sym`、内存 `4(%eax)`）：GAS 对它们**不**改宽度
+    // —— `%b1`/`%w1`/`%k1`/`%q1` 原样输出操作数文本，指令宽度由助记符后缀承担（内核
+    // `asm/shared/io.h` 的 BUILDIO 就吃这条：`outb %b0, %w1` 端口常量时 `%w1` 就是 `$0x21`）。
+    // 只有 `%hN`（寄存器高 8 位）在寄存器之外没有意义，继续不给结果。
+    // `%aN` 也不在这一条里：它不是宽度修饰符，模板解析那边对它有专门的「拿操作数原文」
+    // 兼底（`template_resolve.rs` 里 `asm_reg_modifier_subst(val,'a')` 拿不到结果时退回
+    // `asm_raw_operand`），立即数走的是那条路（`.byte 99` 而不是 `.byte $99`），
+    // 这里抢下来会把那条路堵死（用例 `asm_raw_modifiers_p_a_text_output`）。
+    // 以前这里不分操作数类型先 `parse_asm_reg(val)?` 直接退出 ⇒ 端口是编译期常量时 `%w1`
+    // 原样留在模板文本里，操作数解析成 None，报 `unsupported in/out port operand`（实测
+    // `arch/x86/kernel/i8259.o`、`arch/x86/kernel/x86_init.o`）。
+    if matches!(modifier, 'b' | 'w' | 'k' | 'q') && parse_asm_reg(val).is_none() {
+        return Some(val.to_string());
+    }
     let (idx, sz) = parse_asm_reg(val)?;
     if sz >= 128 {
         return None; // Vector/mask registers have no b/w/k/q modifiers

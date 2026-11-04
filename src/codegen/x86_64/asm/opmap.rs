@@ -282,7 +282,7 @@ impl Codegen {
 
             // 立即数约束且操作数可常量求值
             if matches!(letter, "i") && Self::asm_constraint_is_immediate(raw) {
-                if let Some(val) = Self::eval_asm_operand(op) {
+                if let Some(val) = self.eval_asm_operand(op) {
                     // 字符串字面量立即数: eval_asm_operand 返回 .L.str.const.<hash> label,
                     // 但 codegen 之前没把这个字符串落进 string_pool (g_expr_literal 才会
                     // 落池; 内联汇编里 "%c" 把 label 直接嵌入自定义节, 不经 gen_expr).
@@ -377,7 +377,16 @@ impl Codegen {
             }
 
             // 默认: GP 寄存器
-            let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
+            // `register T v asm("rN")` 的变量：约束只是把它的「住处」写进操作数表，
+            // 另分配一个号既读不到值（值在那个固定号里），也白吃一个号。
+            // 见 `pinned_gp_of_operand`。
+            let chosen = match self.pinned_gp_of_operand(op) {
+                Some(reg) => {
+                    planner.reserve_gp(reg, AsmRegUse::Output);
+                    reg
+                },
+                None => planner.alloc_gp(idx, AsmRegUse::Output),
+            };
             let name = self.asm_reg_name_or_report(chosen);
             // 对非 Ident inout (`+r`) 输出 (如 `"+r"(*bar())`): 先把 lvalue 地址
             // 算到 callee-saved scratch (bar() 在此调用一次), 再从该地址 load
@@ -564,7 +573,7 @@ impl Codegen {
 
             // 立即数约束且操作数可常量求值
             if Self::asm_constraint_is_immediate(raw) {
-                if let Some(val) = Self::eval_asm_operand(op) {
+                if let Some(val) = self.eval_asm_operand(op) {
                     if let Expr::String { data, .. } = op {
                         if !self.string_pool.contains_key(data) {
                             let o = self.rodata.len() as u64;
@@ -604,8 +613,13 @@ impl Codegen {
                     self.asm_reject(&format!(
                         "impossible constraint in 'asm': operand {idx} with immediate-only \
                          constraint \"{raw}\" has no compile-time constant value \
-                         (expression: {})",
-                        crate::const_eval::ExprDebug(op)
+                         (expression: {}, in function {})",
+                        crate::const_eval::ExprDebug(op),
+                        if self.current_func_name.is_empty() {
+                            "<unknown>"
+                        } else {
+                            &self.current_func_name
+                        }
                     ));
                     map.insert(format!("%{idx}"), String::new());
                     slots.push(Slot::Imm(String::new()));
@@ -779,7 +793,13 @@ impl Codegen {
             }
 
             // GP 寄存器
-            let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
+            let chosen = match self.pinned_gp_of_operand(op) {
+                Some(reg) => {
+                    planner.reserve_gp(reg, AsmRegUse::Input);
+                    reg
+                },
+                None => planner.alloc_gp(idx, AsmRegUse::Input),
+            };
             let name = self.asm_reg_name_or_report(chosen);
             self.prepare_asm_binding(op, chosen, false);
             map.insert(format!("%{idx}"), name.to_string());
@@ -1091,6 +1111,42 @@ impl Codegen {
             "unsupported inline asm operand pattern '{}' (asm line {})",
             line, asm_line
         ));
+    }
+
+    /// 操作数是 `register T v asm("rN")`（含文件作用域）的变量时，返回它绑定的号。
+    ///
+    /// `"r"`/`"+r"` 约束写在 GCC 里的含义是「把它的**住处**写进操作数表」，不是「请给
+    /// 它分配一个号」：另分配一个号既拿不到变量的值（值在固定号里），又白吃一个号。
+    /// 实测 `call_on_stack`（`arch/x86/include/asm/irq_stack.h`）的 `tos` 在 output
+    /// （`"+r"`）与 input（`"r"`）各出现一次，两次各自分配就把 13 个号里最后两个
+    /// 挤掉，报 `more GP operands than free registers`（`arch/x86/mm/fault.o`）；
+    /// 而 GCC 在这里只需 5 个号（r11 + 3 个实参 + `current_stack_pointer`）。
+    fn pinned_gp_of_operand(&mut self, op: &Expr) -> Option<u8> {
+        let name = match op {
+            Expr::Ident { name, .. } => name.name.clone(),
+            _ => return None,
+        };
+        // 只查**已有**的家，绝不能走 `home_for`：那条路的兜底是 `var_offset()`，会给一个
+        // 还没家的名字现场登记栈槽（`fxsave_area` 这种全局数组名就是这幺被登进晚分配带的）——
+        // 静态扫描 `LateNeed` 不知道这次登记，于是凭空多出一槽、触发 E1133。
+        // 探测未命中时返回 None，调用方继续走原来的 `alloc_gp`，行为与不打这张表一致。
+        let loc = if let Some((loc, _)) = self.global_homes.get(&name) {
+            *loc
+        } else if let Some(loc) = self.home_overrides.get(&name) {
+            *loc
+        } else if let Some((loc, _)) = self.homes.get(&name) {
+            *loc
+        } else {
+            return None;
+        };
+        match loc {
+            crate::location::Location::Reg(r)
+                if r.bank == crate::location::RegBank::Gp && self.reg_bank.is_pinned(r.n) =>
+            {
+                Some(r.n)
+            },
+            _ => None,
+        }
     }
     /// 把 asm 输出寄存器写回一个**非 Ident** 左值（`a[i]` / `*p` / `s.f` / `a[i].f`）。
     ///
