@@ -1,6 +1,6 @@
 # DCC — Linux 7.1.0 (localmodconfig, x86-64): build & verification results
 
-**Verdict (re-checked 2026-11-06, dcc `e000d52e` + the follow-up frame-budget fix, QEMU 8.2.2).**
+**Verdict (re-checked 2026-11-06, dcc `bebf30c7` + the follow-up frame-budget fix, QEMU 8.2.2).**
 dcc builds the full `localmodconfig` x86-64 kernel **from a clean tree and a clean
 include cache**: 2 901 translation units, **0 gcc/cc/clang trap hits and 0
 `GCC-DELEGATE` lines**, a 171 212 384-byte `vmlinux` that **objtool accepts with 0
@@ -29,7 +29,7 @@ found, the reproduce script, and the open gaps.
 
 | Item | Value |
 |---|---|
-| dcc | this repository `e000d52e`, `cargo build --release` → `target/release/dcc` (`dcc 0.1.0`) |
+| dcc | this repository `bebf30c7`, `cargo build --release` → `target/release/dcc` (`dcc 0.1.0`) |
 | Kernel | Linux 7.1.0, pristine source tree `/root/linux-pvh-src` (no git metadata, no local patches) |
 | Config | `localmodconfig` seeded from `defconfig`, then `PVH=y`, `SUSPEND=n`, `HIBERNATION=n`, `ACPI_SLEEP=n`, `IA32_EMULATION=n`, `COMPAT=n` |
 | Build dir | out-of-tree `O=/root/pvh-lmc`, **created empty**; include cache (`~/.dcc`) deleted first, so every unit was preprocessed cold |
