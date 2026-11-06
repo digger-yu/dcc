@@ -825,7 +825,10 @@ impl Codegen {
                     self.asm_reject("rdseed needs register or memory operand");
                 },
             },
-            "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
+            // INVLPG = 0F 01 /7（SDM 2B: ModRM.reg=7）。这里第二个参数是 ModRM.reg，
+            // 旧值 0x01 编成了 SIDT（0F 01 /1），会把 10 字节 IDT 基址写向目标地址——
+            // arch/x86/mm/tlb.c 的 native_flush_tlb_one_user 在 fixmap 地址上执行时因此 #PF。
+            "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x07),
             "invlpga" => {
                 self.emit_insn_expect(&Insn::raw(&[0x0F, 0x01, 0xDF]));
             },

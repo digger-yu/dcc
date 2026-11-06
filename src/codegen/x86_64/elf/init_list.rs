@@ -237,6 +237,24 @@ impl Codegen {
                             }
                         },
                         InitItem::Designated { designator, value } => {
+                            // C11 6.7.9p17: 设计符之后的**位置**初始化项从「刚描述的子对象
+                            // 的下一个」继续，而不是从结构体首字段重新开始。旧实现只更新了
+                            // 目标偏移、没推进 field_idx，于是
+                            //   `{ .a=1, .b=2, .c=3, .d=4, 5, 6, (unsigned long)&bd }`
+                            // 后面的位置项全部写回 a/b/c（且按字段宽度截断：&bd 被当成
+                            // 4 字节发 R_X86_64_32）。8250_exar.c 的 CTI_EXAR_DEVICE 正是
+                            // 这个形状，最终链接报 R_X86_64_32 截断。
+                            // 链式设计符（`.a.b = …`）的 next subobject 在同一父对象内，
+                            // 顶层 field_idx 不能简单 +1，这里保持旧行为不动。
+                            if let Designator::Field(name) = designator {
+                                if let Type::Struct(_, fs, _, _) | Type::Union(_, fs, _, false) = ty {
+                                    if let Some(idx) =
+                                        fs.iter().position(|f| f.name.as_str() == name.name)
+                                    {
+                                        field_idx = idx + 1;
+                                    }
+                                }
+                            }
                             match resolve_designator(ty, designator) {
                                 Some((o, s, ft)) => {
                                     // Look up bitfield info for designated field

@@ -298,6 +298,70 @@ fn percpu_offset_compiles() {
     let _ = fs::remove_file(obj);
 }
 
+/// 函数指针解引用 `*fp`：C11 6.3.2.1p4 要求函数指示符在值上下文退化为
+/// 指向函数的指针，其值就是 `fp` 本身，不得按对象大小再 load 一次。
+/// 现场是 `static_call_update(key, *apic->wakeup_secondary_cpu)`：旧实现多发
+/// 一条 `mov (%rax),%rax`，成员为 NULL 时 arch/x86/kernel/apic/init.c 的
+/// `update_static_calls()` 直接 #PF。
+#[test]
+#[cfg(unix)]
+fn fn_ptr_deref_decays_without_extra_load() {
+    let src = r#"
+struct apic {
+    char pad[0xc0];
+    int (*wakeup)(int);
+};
+
+static int target(int x) { return x + 7; }
+static struct apic a = { .wakeup = target };
+
+int main(void) {
+    int (*direct)(int) = *a.wakeup;
+    if (direct != target) return 1;
+    if (direct(5) != 12) return 2;
+
+    int (*fp)(int) = target;
+    int (*decayed)(int) = *fp;
+    if (decayed != fp) return 3;
+    if (decayed(35) != 42) return 4;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("fn-ptr-deref-decay", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fn ptr deref compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "fn ptr deref runtime check failed");
+}
+
+/// `-mno-sse` 下调用结果必须物化到被要求的寄存器。
+///
+/// 现场是 PVH 启动：`per_cpu_ptr(&cpu_stopper, task_cpu(task))` 被编成
+/// `call task_cpu` 后直接 `mov (%r11,%rcx,8)`，而调用的返回值在 `%rax` ——
+/// 少一条 `mov %rcx,%rax`，下标读的是调用前的垃圾，内核在
+/// `print_stop_info` 里以 CR2=垃圾 收场。
+/// 根因是 `float_in_st0` 的 `_ => !target.sse` 兜底：`-mno-sse`（内核每个 C TU
+/// 都带）把**整数/指针**返回值也说成「交付在 st(0)」，`gen_call_result_move`
+/// 于是跳过搬送。这里两个档位都跑：-O0 走通用下标路径，-O2 走 SIB 快路径。
+#[test]
+#[cfg(unix)]
+fn mno_sse_call_result_used_as_index_runtime() {
+    let src = include_str!("../fixtures/c/per_cpu_call_index.c");
+    for flag in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags(
+            "mno-sse-call-index",
+            src,
+            &[flag, "-mno-sse"],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{flag} -mno-sse: 编译失败: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{flag} -mno-sse: 调用返回值未落到索引寄存器");
+    }
+}
+
 /// P0-6: kernel builtin coverage — verify newly added builtins
 /// (__builtin_ffs, __builtin_isdigit, __builtin_dynamic_object_size,
 /// __builtin_extract_return_addr, __builtin_preserve_access_index)
@@ -1597,6 +1661,114 @@ void probe_cond(void)
             "重定位符号里出现了寄存器名 {reg}（说明 `%c` 没拿到链接期常量）:\n{rels}"
         );
     }
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+}
+
+/// 函数被 `__section(".init.text")` 搬走后，函数体内 asm 的标号必须一起定节。
+///
+/// 缺陷现场：`custom_func_ranges` 只搬代码与重定位，`pushsection_sym_loc` 只认
+/// 可执行 pushsection 区间。函数体内 `1:` 这类标号仍被发成 `.text + 原发射偏移`，
+/// 而 `.text` 原位只剩 0x90 填充 ⇒ `__jump_table` 的 `code` 字段指进 NOP 洞，
+/// 运行时 `insn_decode` 读到 length=1，`arch_jump_entry_size` 触发
+/// `BUG_ON(insn.length != 2 && insn.length != 5)`（vmlinux 实测 306/5053 条）。
+#[test]
+#[cfg(unix)]
+fn asm_label_in_moved_section_function_resolves_to_target_section() {
+    let source = r#"
+struct jump_entry { int code; int target; long key; };
+extern long fake_key;
+
+__attribute__((section(".init.text"), noinline))
+static int init_thing(int x)
+{
+	asm volatile goto(
+		"1:\n\t"
+		"jmp %l[l_yes]\n\t"
+		".pushsection __jump_table, \"aw\"\n\t"
+		".balign 8\n\t"
+		".long 1b - .\n\t"
+		".long %l[l_yes] - .\n\t"
+		".quad fake_key\n\t"
+		".popsection\n\t"
+		::: : l_yes);
+	return x + 1;
+l_yes:
+	return x + 2;
+}
+
+int repro_entry(int x) { return init_thing(x); }
+long fake_key;
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-moved-label-{pid}.c"));
+    let op = dir.join(format!("dcc-moved-label-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fno-PIE", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "编译失败: {stderr}");
+
+    // `__jump_table` 第一行 `.long 1b - .` 的 PC32 目标符号：它就是函数体内的 `1:`。
+    let rel = Command::new("readelf")
+        .args(["-r", "--wide"])
+        .env("LC_ALL", "C")
+        .arg(&op)
+        .output()
+        .expect("readelf -r");
+    let rels = String::from_utf8_lossy(&rel.stdout).to_string();
+    let mut in_jump_table = false;
+    let mut label_sym = String::new();
+    for line in rels.lines() {
+        if line.contains("'.rela__jump_table'") {
+            in_jump_table = true;
+            continue;
+        }
+        if in_jump_table && line.trim_start().starts_with("0000") {
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            if toks.len() >= 5 {
+                label_sym = toks[4].to_string();
+            }
+            break;
+        }
+    }
+    assert!(!label_sym.is_empty(), "没找到 __jump_table 的第一条重定位:\n{rels}");
+
+    // 符号必须定在 .init.text（而不是 .text —— 后者是搬走前的原位）。
+    // 用 objdump -t 而不是 readelf -s：后者对额外节的符号只印节号（如 "8"），
+    // 前者直接印节名，断言不受节号编排影响。
+    let syms = Command::new("objdump")
+        .args(["-t"])
+        .env("LC_ALL", "C")
+        .arg(&op)
+        .output()
+        .expect("objdump -t");
+    let sym_txt = String::from_utf8_lossy(&syms.stdout).to_string();
+    let mut sym_section = String::new();
+    for line in sym_txt.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let Some(&last) = toks.last() else {
+            continue;
+        };
+        if last != label_sym {
+            continue;
+        }
+        // 格式: <addr> <flags> <section> <size> <name>
+        if let Some(sec) = toks[..toks.len() - 1].iter().rev().find(|t| t.starts_with('.')) {
+            sym_section = sec.to_string();
+        }
+        break;
+    }
+    assert_eq!(
+        sym_section, ".init.text",
+        "函数体内 asm 标号 {label_sym} 未随函数定节（section={sym_section:?}），\
+         应指向 .init.text；符号表:\n{sym_txt}"
+    );
     let _ = fs::remove_file(&sp);
     let _ = fs::remove_file(&op);
 }
@@ -4091,4 +4263,144 @@ fn inlined_stmt_expr_in_condition_folds_to_the_gcc_reference() {
             );
         }
     }
+}
+
+/// 指定初始化器的下标是**常量移位表达式**时不得被丢弃。
+///
+/// 缺陷形状：`kernel/printk/printk.c` 的 `_DEFINE_PRINTKRB()` 展开为
+/// `[_DESCS_COUNT(descbits) - 1] = { .state_var = ATOMIC_INIT(...), ... }`，其中
+/// `descbits` 是宏算术（`CONFIG_LOG_BUF_SHIFT - PRB_AVGBITS`）。dcc 曾只认字面量下标，
+/// 整项 `continue` 掉，于是 `_printk_rb_static_descs` 全零：tail 指向的最后一个描述符
+/// `state_var` 为 0 ⇒ `get_desc_state()` 恒为 `desc_miss`，`prb_first_seq()` 在首次
+/// printk 时永远自旋（开机无任何串口输出）。
+///
+/// 判据不能只看「数组大小对了」（`0x30000` 字节照样会分配），必须直接读 `.data` 里
+/// **最后一个元素**的字节：`state_var == -8193`（= `DESC_SV(DESC0_ID(13), desc_reusable)`
+/// 在 62 位 ID 掩码下的值）、`text_blk_lpos == {1, 1}`（`FAILED_BLK_LPOS`）。
+#[test]
+#[cfg(unix)]
+fn designated_array_index_const_shift_initializer_kept() {
+    let source = r#"
+struct prb_desc {
+	long state_var;
+	unsigned long begin;
+	unsigned long next;
+};
+
+#define _DESCS_COUNT(ct_bits) (1UL << (ct_bits))
+#define _DEFINE_PRINTKRB(name, descbits)					\
+static struct prb_desc _##name##_descs[_DESCS_COUNT(descbits)] = {	\
+	[_DESCS_COUNT(descbits) - 1] = {				\
+		.state_var	= -8193,				\
+		.begin		= 1,					\
+		.next		= 1,					\
+	},							\
+};
+
+#define PRB_AVGBITS 5
+#define LOG_BUF_SHIFT 18
+
+_DEFINE_PRINTKRB(printk_rb_static, LOG_BUF_SHIFT - PRB_AVGBITS)
+
+long probe(void) { return _printk_rb_static_descs[8191].state_var; }
+"#;
+    let bytes = dcc_obj_bytes("prb-designated-index", source, &["-O2"]);
+    let data = elf64_section_data(&bytes, ".data").expect(".data 节应存在");
+    let off = 8191 * 24;
+    assert!(
+        data.len() >= off + 24,
+        "数组只写了 {} 字节，最后一个元素没有被初始化（期望至少 {} 字节）",
+        data.len(),
+        off + 24
+    );
+    let state_var = i64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+    let begin = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+    let next = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+    assert_eq!(state_var, -8193, "descs[8191].state_var 被丢弃（读到 {state_var}）");
+    assert_eq!(begin, 1, "descs[8191].text_blk_lpos.begin 被丢弃");
+    assert_eq!(next, 1, "descs[8191].text_blk_lpos.next 被丢弃");
+}
+
+/// 函数内 `static const` 稀疏指定下标数组的维度必须按「最大下标 + 1」推导
+/// (C11 6.7.9p22)，而不是「指定项个数」。
+///
+/// 缺陷形状：`lib/vsprintf.c` 的
+/// `static const unsigned char spec_flag_array[] = { [(' ')-32] = SPACE, ... }`，
+/// 5 个指定项的最大下标 16 ⇒ 长度 17。dcc 曾按项数算成 5：符号 st_size=5，
+/// 下标 3（`'-'`）之后的元素全部读 0 ⇒ `format_decode()` 把 `%-10s` 里的 `-`
+/// 当非法标志，打印 "Please remove unsupported %-" 后内核 panic。
+#[test]
+#[cfg(unix)]
+fn static_local_designated_sparse_array_dim_is_max_index_plus_one() {
+    let src = r#"
+#define SPEC_CHAR(x, flag) [(x)-32] = flag
+static unsigned char spec_flag(unsigned char c, unsigned long *sz)
+{
+    static const unsigned char spec_flag_array[] = {
+        SPEC_CHAR(' ', 1), SPEC_CHAR('#', 2), SPEC_CHAR('+', 4),
+        SPEC_CHAR('-', 8), SPEC_CHAR('0', 16),
+    };
+    *sz = sizeof(spec_flag_array);
+    c -= 32;
+    return (c < sizeof(spec_flag_array)) ? spec_flag_array[c] : 0;
+}
+int main(void)
+{
+    unsigned long sz = 0;
+    if (spec_flag('-', &sz) != 8) return 1;
+    if (sz != 17) return 2;
+    if (spec_flag(' ', &sz) != 1) return 3;
+    if (spec_flag('#', &sz) != 2) return 4;
+    if (spec_flag('+', &sz) != 4) return 5;
+    if (spec_flag('0', &sz) != 16) return 6;
+    if (spec_flag('A', &sz) != 0) return 7;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("static-sparse-designated-array", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "sparse designated array compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "sparse designated array runtime check failed (rc={rc})");
+}
+
+/// 自定义节里「数组名 / 函数名」直接初始化指针时，必须发 R_X86_64_64 重定位。
+///
+/// 缺陷形状：`kernel/panic.c` 的 `static char *taint_buf __refdata = init_taint_buf;`。
+/// 指针变量在 `.ref.data`，初始化器是 `Expr::Ident`（数组名，类型 Array），不是
+/// `Expr::AddrOf`。自定义节路径曾只认 `&x`/字符串/InitList，Ident 落进
+/// `global_init_bytes` 的 None 分支 → 槽位补零、.rela.ref.data 缺失 ⇒ 链接后指针为
+/// NULL，首次 `print_tainted()` 在 `seq_buf_init` 里写空指针（CR2=0，#PF）。
+///
+/// 判据是重定位本身：`.rela.ref.data` 恰好一条 `R_X86_64_64`，偏移 0，加数 0，
+/// 符号名是 `init_taint_buf`。只检查 `.ref.data` 字节全零会假绿（重定位在链接期
+/// 才回填内容）。
+#[test]
+#[cfg(unix)]
+fn custom_section_pointer_from_array_name_emits_reloc() {
+    let source = r#"
+static char init_taint_buf[64] = "hello";
+
+static char *taint_buf __attribute__((section(".ref.data"))) = init_taint_buf;
+
+char *get_taint_buf(void) { return taint_buf; }
+"#;
+    let bytes = dcc_obj_bytes("refdata-ptr-array", source, &["-O2"]);
+    let relas = elf64_rela(&bytes, ".rela.ref.data");
+    assert_eq!(
+        relas.len(),
+        1,
+        ".rela.ref.data 应恰好一条重定位（数组名初始化指针），实际 {relas:?}"
+    );
+    let (off, sym, ty, addend) = relas[0];
+    assert_eq!(off, 0, "指针槽在 .ref.data 偏移 0");
+    assert_eq!(ty, 1 /* R_X86_64_64 */, "重定位类型应为 R_X86_64_64");
+    assert_eq!(addend, 0, "数组名取首元素地址，加数应为 0");
+    let syms = elf64_syms_by_type(&bytes);
+    let name = syms
+        .get(sym as usize)
+        .map(|s| s.name.as_str())
+        .unwrap_or("<符号索引越界>");
+    assert_eq!(name, "init_taint_buf", "重定位应指向数组 init_taint_buf，实际指向 {name}");
 }

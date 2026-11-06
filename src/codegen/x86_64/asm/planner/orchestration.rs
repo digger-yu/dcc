@@ -234,6 +234,20 @@ impl AsmRegisterPlanner {
         reg
     }
 
+    /// 只把号从本条 asm 的候选里排除，**不**登记为「本句发出过」。
+    ///
+    /// 调用方的驻足号（`defer_gp_load` 的 callee-saved scratch）用它：那些号只在
+    /// 操作数装载期间活着，flush 后立即归还，不应该被 `finish` claim 成函数级占用。
+    /// 与 `reserve_gp` 的差别只在 `chosen_gp` / `input_gp` 两个台账。
+    pub fn exclude_gp(&mut self, reg: u8) {
+        self.used_gp.insert(reg);
+    }
+
+    /// 该号是否已被本条 asm 的某个操作数/驻足值占用（规划期台账）。
+    pub fn is_used_gp(&self, reg: u8) -> bool {
+        self.used_gp.contains(&reg)
+    }
+
     /// Reserve a GP register for allocation.
     ///
     /// 纯本地台账：进 `used_gp`（影响后续 pick）、进 `chosen_gp`（供 finish claim）、

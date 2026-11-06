@@ -147,7 +147,12 @@ impl Codegen {
     pub fn stack_reserve_bytes(&self) -> i64 {
         // 向量/bitcast 临时槽需要 3 个 16 字节槽: slot0 是
         // vector 结果约定, slot1/2 用于同尺寸重解释 cast。
-        let vector_scratch = 48;
+        //
+        // 没有向量类型的函数（`max_vec_bytes == 0`）**不需要**这三格：向量临时槽
+        // 的唯一入口是 `vector_temp_base`，它的每个调用点都在「类型是向量」的分支里
+        // （见 `abi/layout.rs` 的 `vec_band_reserve`）。以前无向量也白开 48B，加上
+        // 那条恒 512B 的向量带，内核里一个平函数要 880B 帧。
+        let vector_scratch = if self.max_vec_bytes == 0 { 0 } else { 48 };
         if self.target.red_zone {
             vector_scratch
         } else {
@@ -332,7 +337,7 @@ impl Codegen {
         if !Self::disptab_rbp_on() {
             return None;
         }
-        if self.target.frame_pointer || self.target.stack_protector {
+        if self.target.frame_pointer || self.func_canary {
             return None;
         }
         if f.is_naked || f.is_nested {
@@ -774,11 +779,23 @@ impl Codegen {
                 // _Complex long double 返回 (经 x87, needs_memory_return
                 // == false) 仍在调用侧复制到固定 result_off, 不经过
                 // alloc_sret_slot, 故不占本区。
-                sret + std::iter::once(callee.as_ref())
-                    .map(Self::sret_bytes_expr)
-                    .chain(args.iter().map(Self::sret_bytes_expr))
-                    .max()
-                    .unwrap_or(0)
+                //
+                // 但**按值传的 `_Complex long double` 实参**要在调用前各落一个
+                // 32B 物化槽 (`gen_complex_ld_materialize`): `complex-7.c` 的
+                // `check_long_double(0, ld1…ld5)` 就是五次 32B。旧版本靠每帧
+                // 恒 512B 的向量带兜住这笔账，`vec_band_reserve` 改成「无向量
+                // 0 预留」后立刻变成 E1128。
+                let arg_slots: i64 = args
+                    .iter()
+                    .map(|a| Self::complex_ld_slot(&a.ty()))
+                    .sum();
+                sret
+                    + arg_slots
+                    + std::iter::once(callee.as_ref())
+                        .map(Self::sret_bytes_expr)
+                        .chain(args.iter().map(Self::sret_bytes_expr))
+                        .max()
+                        .unwrap_or(0)
             },
             Expr::VaArg { ty, ap, .. } => {
                 // 只有真正走 `alloc_sret_slot` 的缓冲区交付才占本区；复数
@@ -795,8 +812,21 @@ impl Codegen {
             Expr::Binop { l, r, .. } => {
                 // _Complex long double 二元: 两个 32B 物化槽同时存活
                 // (spill l, spill r), 结果走固定 result_off 不占本区。
-                Self::complex_ld_sret_binop(e)
-                    + Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r))
+                //
+                // 比较运算符 (`a1 != ld1`, 结果类型是 int) 不在
+                // `complex_ld_sret_binop` 的判据里, 但两个操作数照样各落一槽
+                // (complex.rs 的比较分支就是两次 `spill_complex_ld_operand`),
+                // 所以这里按**操作数类型**补登记; 与结果侧取 max, 避免同一个
+                // 槽被算两遍。
+                let operand_slots = Self::complex_ld_slot(&l.ty())
+                    + Self::complex_ld_slot(&r.ty());
+                // 左右子表达式**求和**，不取 max：发射侧是 bump 分配，表达式树
+                // 内部不回收（`||`/`&&` 短路的左支槽也要活到整个条件求值完），
+                // 取 max 会让 `a1!=ld1 || a2!=ld2 || …` 只算一个 64B —— 实测
+                // `complex-7.c` 的 `check_long_double` 就是五段串联，水位 320B。
+                Self::complex_ld_sret_binop(e).max(operand_slots)
+                    + Self::sret_bytes_expr(l)
+                    + Self::sret_bytes_expr(r)
             },
             Expr::Assign { l, r, .. } => {
                 // 聚合赋值走「目标地址先落一个 sret 槽」那一形时，本语句额外占一个
@@ -857,9 +887,57 @@ impl Codegen {
                     .max(Self::sret_bytes_expr(then_))
                     .max(Self::sret_bytes_expr(else_))
             },
+            Expr::AsmExpr {
+                outputs, inputs, ..
+            } => {
+                // 非 Ident 输出（`"=a"(*eax)` / `"=r"(a[i])`）的写回地址必须在模板
+                // 之前算好。驻足池（rbx/r12/r14/r15）被变量的家与本句 asm 的固定操作数
+                // 占满时，发射侧退到 `alloc_sret_slot(8)`（步长用 `sret_slot_bytes`，
+                // 不统计在这里就是 E1128）。多算无害：发射侧只在驻足失败时才落槽。
+                let addr_slots = outputs
+                    .iter()
+                    .filter(|o| !matches!(o, Expr::Ident { .. }))
+                    .count() as i64
+                    * Self::sret_slot_bytes(8);
+                addr_slots
+                    + outputs
+                        .iter()
+                        .chain(inputs.iter())
+                        .map(Self::sret_bytes_expr)
+                        .max()
+                        .unwrap_or(0)
+            },
             _ => 0,
         };
-        own
+        // 叶子形态的 `_Complex long double` rvalue 在消费端同样落 32B 物化槽
+        // (`gen_complex_ld_materialize`): 初始化 (`z = w`)、赋值、cast、按值
+        // 实参都以这些形态出现。Call/Binop/Assign/Comma/Cond/StmtExpr/VaArg/
+        // AsmExpr 已在各自分支登记 (或由递归覆盖), 这里不重复计入。
+        let leaf_slot = match e {
+            Expr::Call { .. }
+            | Expr::Binop { .. }
+            | Expr::Assign { .. }
+            | Expr::Comma { .. }
+            | Expr::Cond { .. }
+            | Expr::StmtExpr { .. }
+            | Expr::VaArg { .. }
+            | Expr::AsmExpr { .. }
+            | Expr::Unary { .. } => 0,
+            _ => Self::complex_ld_slot(&e.ty()),
+        };
+        own + leaf_slot
+    }
+
+    /// `_Complex long double` 表达式在消费端物化一槽的字节数。
+    ///
+    /// 这是规划期与发射期 (`emit/expr/complex.rs::gen_complex_ld_materialize`
+    /// 的 `alloc_local(32)`) 之间的唯一口径: 宽度写在两边就是又一个 E1128 源。
+    fn complex_ld_slot(ty: &Type) -> i64 {
+        if matches!(ty, Type::Complex(q) if matches!(q.base, Type::LongDouble)) {
+            32
+        } else {
+            0
+        }
     }
 
     /// 若表达式是 `_Complex long double` 二元 (含一元负/conj 等物化点),
@@ -2369,6 +2447,59 @@ impl Codegen {
         self.emit_xmm_r13_disp(0xF3, 0x11, xmm, off);
     }
 
+    /// 发 canary 装载：`mov <seg>:guard, %rax`。
+    ///
+    /// 有 `-mstack-protector-guard-symbol=`（内核 x86_64 的形态）且当前是 ET_REL 时，
+    /// 用 **RIP 相对**寻址读那个符号 —— 内核传的是
+    /// `-mstack-protector-guard-symbol=__ref_stack_chk_guard`，链接期解析到 .data 里的
+    /// `__stack_chk_guard`。固定偏移 `%gs:0x28` 要求 GS 基址已指向 per-cpu 区，而
+    /// 早启动路径（`native_write_cr4()`）在 GS 基址为 0 时就执行了。
+    pub(crate) fn emit_canary_load(&mut self) {
+        let seg_prefix = match self.target.stack_protector_guard_reg {
+            crate::cli::StackGuardReg::Gs => 0x65u8,
+            _ => 0x64u8, // Fs is default
+        };
+        if self.relocatable {
+            if let Some(sym) = self.target.stack_protector_guard_symbol.clone() {
+                // 65 48 8B 05 <disp32> = mov %seg:sym(%rip), %rax
+                let seg = if seg_prefix == 0x65 { "%gs" } else { "%fs" };
+                self.emit_insn(
+                    &Insn::raw_bytes(&[seg_prefix, 0x48, 0x8b, 0x05, 0, 0, 0, 0])
+                        .with_gas(format!("mov {}:{}(%rip), %rax", seg, sym)),
+                );
+                self.pending_data_rels.push((self.pos() - 4, sym));
+                return;
+            }
+        }
+        // 无符号：TLS/per-cpu canary 的固定偏移形态。
+        self.emit_insn(&Insn::raw_bytes(&[
+            seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00,
+        ]));
+    }
+
+    /// 发 canary 校验：`xor <seg>:guard, %r11`（随后 `je` 跳过 `__stack_chk_fail`）。
+    pub(crate) fn emit_canary_check(&mut self) {
+        let seg_prefix = match self.target.stack_protector_guard_reg {
+            crate::cli::StackGuardReg::Gs => 0x65u8,
+            _ => 0x64u8, // Fs is default
+        };
+        if self.relocatable {
+            if let Some(sym) = self.target.stack_protector_guard_symbol.clone() {
+                // 65 4C 33 1D <disp32> = xor %seg:sym(%rip), %r11
+                let seg = if seg_prefix == 0x65 { "%gs" } else { "%fs" };
+                self.emit_insn(
+                    &Insn::raw_bytes(&[seg_prefix, 0x4c, 0x33, 0x1d, 0, 0, 0, 0])
+                        .with_gas(format!("xor {}:{}(%rip), %r11", seg, sym)),
+                );
+                self.pending_data_rels.push((self.pos() - 4, sym));
+                return;
+            }
+        }
+        self.emit_insn(&Insn::raw_bytes(&[
+            seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00,
+        ]));
+    }
+
     pub fn emit_func_epilogue(&mut self) {
         // 取走「体内比帧线低多少」这本账：尾声自己发的恢复指令不该再往里记。
         let ledger = self.rsp_below_frame_line.take();
@@ -2377,7 +2508,7 @@ impl Codegen {
         // 再从内存读它就是错值）。函数尾的那一次 flush 只管「顺落下来结束」的路径。
         self.region_flush();
         // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
-        if self.target.stack_protector && self.frame_layout.canary_fits() {
+        if self.func_canary && self.frame_layout.canary_fits() {
             // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器（槽位 = `abi::layout::CANARY_OFF`）
             self.emit_insn(&Insn::mov_rm_mem(
                 true,
@@ -2386,15 +2517,8 @@ impl Codegen {
                 13,
                 -8,
             ));
-            // xor r11, seg:[0x28]  → 与原始 canary 比较
-            // seg = fs (0x64) or gs (0x65) based on guard register
-            let seg_prefix = match self.target.stack_protector_guard_reg {
-                crate::cli::StackGuardReg::Gs => 0x65u8,
-                _ => 0x64u8, // Fs is default
-            };
-            self.emit_insn(&Insn::raw_bytes(&[
-                seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00,
-            ]));
+            // xor r11, <guard>  → 与原始 canary 比较（guard 的寻址形态见 `emit_canary_check`）
+            self.emit_canary_check();
             // Always call __stack_chk_fail on canary mismatch.
             // Both ET_REL and ET_EXEC use the same path:
             // __stack_chk_fail is emitted as an undefined global

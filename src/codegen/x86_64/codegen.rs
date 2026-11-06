@@ -379,6 +379,15 @@ pub struct Codegen {
     /// 本函数是否真的在序言里把 %r13 动态对齐到 `cur_func_over_align`。
     /// 仅当「有过对齐局部 + 非变参 + 无栈传参」时为真。
     pub cur_func_do_align: bool,
+    /// 本函数是否真的发栈金丝雀（存/验两处共用这一个读数）。
+    ///
+    /// 为什么要逐函数定而不能读 `target.stack_protector`：`-fstack-protector-strong`
+    /// 在 GCC 那里不是「所有函数都插」，只有数组局部 / 取局部地址 / VLA 的函数才插。
+    /// 内核 `native_write_cr4()`（只有标量局部）在 GS 基址建立之前就被
+    /// `x86_64_start_kernel()` 调用，被插桩就会读 `%gs:0x28` → 线性地址 0x28 →
+    /// #PF → #DF（实测 PVH 启动卡在这里）。判定值在 `compile_func` 入口算一次，
+    /// 序言、尾声、跳表基址判据三处都读它。
+    pub func_canary: bool,
     // 可重定位模式 (.o)
     pub relocatable: bool,
     pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
@@ -460,6 +469,10 @@ pub struct Codegen {
     /// sret/物化槽区顶界 (r13 相对偏移, 紧邻变量区底)。槽自该地址
     /// 向下分配, 帧规划保证下界不越过 vec/bf/帧底固定区顶界。
     pub sret_region_base: i64,
+    /// 本条内联 asm 预计算的写回地址槽占用的 sret 水位（模板之前记、写回之后还原）。
+    /// 内联 asm 的操作数求值里可以再嵌一条 asm，所以这个值只能在 `build_asm_operand_map`
+    /// 末尾（嵌套 asm 已收尾）写入，由发射侧在写回完成后取出还原。
+    pub asm_pending_sret_mark: Option<i64>,
     // 嵌套函数静态链
     pub nested_funcs: HashMap<String, Vec<(String, i64)>>, // 嵌套函数名 → upvars (name, parent_offset)
     // 嵌套函数重命名：(父函数名，原名) → 唯一名 (避免同名嵌套函数符号冲突)
@@ -594,6 +607,15 @@ pub struct Codegen {
     pub pushsection_exec_stack: Vec<(usize, u64, Vec<(String, u64)>)>,
     /// 可执行 pushsection 代码区间：(text 起始偏移，size, extra_sections 索引，节内偏移)
     pub pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
+    /// 自定义节函数搬迁区间：(text 发射起点, 发射长度, extra_sections 索引, 节内偏移)。
+    ///
+    /// 与 `pushsection_code_ranges` 同一口径，但覆盖的是「整个函数被搬到
+    /// `.init.text`/`.noinstr.text`/`.text.<name>`」这一类区间。
+    /// `pushsection_sym_loc` 靠它把函数体内的 asm 标号定位到搬迁后的节：
+    /// 没有这张表时标号仍指 `.text` 原址，而那里只剩 0x90 填充 ——
+    /// `__jump_table` 的 `code` 字段引用函数体内的 `1:` 时因此指向 NOP 洞，
+    /// 运行时 `insn_decode` 读到 `length=1`，`arch_jump_entry_size` 触发 BUG_ON。
+    pub custom_func_move_ranges: Vec<(u64, u64, usize, u64)>,
     /// pushsection 内标号在它**最终所在节**里的坐标：标号名 → (extra_sections 索引, 节内偏移).
     ///
     /// 为什么需要独立一张表: `self.labels` 一律用 `self.code.len()` (text 坐标) 登记,
@@ -607,6 +629,16 @@ pub struct Codegen {
     pub pushsection_label_offsets: HashMap<String, (usize, u64)>,
     /// 延迟解析：pushsection 数据中标签差值表达式 (前向引用)
     pub deferred_pushsection_fixups: Vec<DeferredPushsectionFixup>,
+    /// 内联 asm 里 RIP-relative 引用**编译器自造标号**的待结算表：
+    /// `(disp32 位置, 标号名)`。
+    ///
+    /// 为什么不直接进 `pending_data_rels`：`.L` 前缀标号按 GAS/ELF 约定不进
+    /// symtab 的未定义名单（`referenced_reloc_symbols` 显式排除），发 PC32 只能
+    /// 落到 STN_UNDEF。GAS 对 `(2f)(%rip)` 的口径是「目标节符号 + 节内偏移
+    /// addend」；同节时它就地写位移。本表在 `patch_local_jumps` 里统一结算 ——
+    /// 那时全部标号与 pushsection 搬迁区间都已定稿。内核实测形状：
+    /// `__WARN_bug_entry()` 的 `lea (2f)(%%rip), %[addr]`，`2:` 在 `__bug_table` 段。
+    pub pending_asm_internal_symdisp_rels: Vec<(u64, String)>,
     // -S 汇编文本输出
     pub emit_asm_text: bool,
     pub debug_level: u8,
@@ -998,6 +1030,8 @@ pub struct FuncEmitChunk {
     /// 就查不到节内坐标，`.long 774f - .` 的重定位加数只能退回 `.text` 反查，ALTERNATIVE
     /// 条目会指到替换代码以外的字节上。
     pub pushsection_label_offsets: HashMap<String, (usize, u64)>,
+    /// 内联 asm RIP-relative 引用内部标号的待结算表（同 `Codegen` 同名字段）。
+    pub pending_asm_internal_symdisp_rels: Vec<(u64, String)>,
     pub extra_sections: Vec<elf::ElfSection>,
     pub custom_sec_indices: HashMap<String, usize>,
     /// C++ 零成本异常: 本 chunk 函数的 **CFI 事实**。
@@ -1181,6 +1215,7 @@ impl Codegen {
             cur_func_over_align: 0,
             cur_func_anchor_off: 0,
             cur_func_do_align: false,
+            func_canary: false,
             relocatable: false,
             function_sections: false,
             patchable_function_entry,
@@ -1229,6 +1264,7 @@ impl Codegen {
             sret_watermark: 0,
             sret_site_log: Vec::new(),
             sret_region_base: 0,
+            asm_pending_sret_mark: None,
             nested_funcs: HashMap::new(),
             nested_func_renames: HashMap::new(),
             nested_func_parent: HashMap::new(),
@@ -1277,8 +1313,10 @@ impl Codegen {
             pending_custom_sec_rels: vec![],
             pushsection_exec_stack: vec![],
             pushsection_code_ranges: vec![],
+            custom_func_move_ranges: vec![],
             pushsection_label_offsets: HashMap::new(),
             deferred_pushsection_fixups: vec![],
+            pending_asm_internal_symdisp_rels: vec![],
             emit_asm_text: false,
             debug_level: 0,
             opt_level: 0,
@@ -2067,11 +2105,12 @@ impl Codegen {
                         crate::codegen::shared::elf::SHF_GNU_RETAIN;
                     self.extra_sections[sec_idx].align =
                         self.extra_sections[sec_idx].align.max(align as u64);
-                    if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {
-                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_NOBITS;
-                    } else if v.init.is_some() {
-                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_PROGBITS;
-                    }
+                    // 与下面「自定义 section 变量」同一条判据：只有 `.bss`/`.bss.*` 是 NOBITS。
+                    self.extra_sections[sec_idx].ty = if Self::is_bss_section_name(&sec_name) {
+                        crate::codegen::shared::elf::SHT_NOBITS
+                    } else {
+                        crate::codegen::shared::elf::SHT_PROGBITS
+                    };
                     let sec = &mut self.extra_sections[sec_idx];
                     let off = (sec.data.len() + align - 1) & !(align - 1);
                     while sec.data.len() < off {
@@ -2181,13 +2220,47 @@ impl Codegen {
                                 }
                             },
                             _ => {
-                                // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
-                                let is_float = v.ty.is_real_float();
-                                if let Some(bytes) =
-                                    global::global_init_bytes(init, sz, is_float, &v.ty)
+                                // 静态地址常量（数组名退化为首元素地址 / 函数名 /
+                                // `arr + n` 等）：与 .data 路径同一口径。
+                                // `static char *p = arr;` 的 init 是 Expr::Ident（类型
+                                // Array），不是 Expr::AddrOf；只认 AddrOf 会让这里落进
+                                // global_init_bytes 的 None 分支 → 槽位补零。
+                                // kernel/panic.c 的 `taint_buf = init_taint_buf` 即此形状：
+                                // 链接后指针为 0，print_tainted() 在 seq_buf_init 里写
+                                // 空指针（CR2=0）。
+                                if let Some((base_name, byte_off)) =
+                                    Self::static_addr_parts(init)
                                 {
-                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                                    let ref_off =
+                                        self.extra_sections[sec_idx].data.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.extra_sections[sec_idx]
+                                        .data
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type = if width == 4 {
+                                        crate::codegen::shared::elf::R_X86_64_32
+                                    } else {
+                                        crate::codegen::shared::elf::R_X86_64_64
+                                    };
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        base_name,
+                                        Some(sec_idx),
+                                        rel_type,
+                                        byte_off,
+                                    ));
                                     has_init = true;
+                                } else {
+                                    // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                                    let is_float = v.ty.is_real_float();
+                                    if let Some(bytes) =
+                                        global::global_init_bytes(init, sz, is_float, &v.ty)
+                                    {
+                                        self.extra_sections[sec_idx]
+                                            .data
+                                            .extend_from_slice(&bytes);
+                                        has_init = true;
+                                    }
                                 }
                             },
                         }
@@ -2217,12 +2290,21 @@ impl Codegen {
                     let sec_idx = self.ensure_custom_section(sec_name, false, is_writable);
                     self.extra_sections[sec_idx].align =
                         self.extra_sections[sec_idx].align.max(align as u64);
-                    if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {
-                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_NOBITS;
-                    } else if v.init.is_some() {
-                        // 同名节一旦包含显式初始化数据就必须占文件空间。
-                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_PROGBITS;
-                    }
+                    // **只有 `.bss`/`.bss.*` 才是不占文件空间的 NOBITS**：
+                    //
+                    // `__attribute__((section(".data..percpu"))) int x;` 这类无初始化的
+                    // 自定义节变量，gcc 发的是 PROGBITS + 零填充（它的 `!has_init` 分支也
+                    // 会补 `sz` 字节 0，与下面 2361 行一致）。旧写法一律改成 SHT_NOBITS，
+                    // 后果不只是链接器那句 `section '.data..percpu' type changed to
+                    // PROGBITS` 警告：内核 `setup_per_cpu_areas` 是
+                    // `memcpy(__per_cpu_start, …, __per_cpu_end - __per_cpu_start)` 复制整段
+                    // 初始化模板，NOBITS 那部分在文件里不存在，复制到的就是相邻节的字节
+                    // （percpu 变量初值随机）。
+                    self.extra_sections[sec_idx].ty = if Self::is_bss_section_name(sec_name) {
+                        crate::codegen::shared::elf::SHT_NOBITS
+                    } else {
+                        crate::codegen::shared::elf::SHT_PROGBITS
+                    };
                     let sec = &mut self.extra_sections[sec_idx];
                     let off = (sec.data.len() + align - 1) & !(align - 1);
                     while sec.data.len() < off {
@@ -2347,13 +2429,47 @@ impl Codegen {
                                 }
                             },
                             _ => {
-                                // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
-                                let is_float = v.ty.is_real_float();
-                                if let Some(bytes) =
-                                    global::global_init_bytes(init, sz, is_float, &v.ty)
+                                // 静态地址常量（数组名退化为首元素地址 / 函数名 /
+                                // `arr + n` 等）：与 .data 路径同一口径。
+                                // `static char *p = arr;` 的 init 是 Expr::Ident（类型
+                                // Array），不是 Expr::AddrOf；只认 AddrOf 会让这里落进
+                                // global_init_bytes 的 None 分支 → 槽位补零。
+                                // kernel/panic.c 的 `taint_buf = init_taint_buf` 即此形状：
+                                // 链接后指针为 0，print_tainted() 在 seq_buf_init 里写
+                                // 空指针（CR2=0）。
+                                if let Some((base_name, byte_off)) =
+                                    Self::static_addr_parts(init)
                                 {
-                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                                    let ref_off =
+                                        self.extra_sections[sec_idx].data.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.extra_sections[sec_idx]
+                                        .data
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type = if width == 4 {
+                                        crate::codegen::shared::elf::R_X86_64_32
+                                    } else {
+                                        crate::codegen::shared::elf::R_X86_64_64
+                                    };
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        base_name,
+                                        Some(sec_idx),
+                                        rel_type,
+                                        byte_off,
+                                    ));
                                     has_init = true;
+                                } else {
+                                    // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                                    let is_float = v.ty.is_real_float();
+                                    if let Some(bytes) =
+                                        global::global_init_bytes(init, sz, is_float, &v.ty)
+                                    {
+                                        self.extra_sections[sec_idx]
+                                            .data
+                                            .extend_from_slice(&bytes);
+                                        has_init = true;
+                                    }
                                 }
                             },
                         }
@@ -2833,6 +2949,13 @@ impl Codegen {
             })
             .chain(self.pushsection_code_ranges.iter().copied())
             .collect();
+        // 同一张表留给 `pushsection_sym_loc`：符号表阶段还要用「函数搬去了哪个节」
+        // 把函数体内的 asm 标号定节（见该函数注释）。
+        self.custom_func_move_ranges = move_ranges
+            .iter()
+            .take(custom_func_ranges.len())
+            .copied()
+            .collect();
 
         // IFUNC / CPUID 合成体：必须晚于上面那个 `move_ranges` 快照（自定义节搬迁只
         // 覆盖用户函数区间，合成代码不能被搬走），又必须早于 `patch_local_jumps`
@@ -2859,6 +2982,17 @@ impl Codegen {
         self.emit_rel_relocations(prog, &custom_func_ranges);
         // C++ 零成本异常: 类型表重定位按符号名查索引, 因此必须在符号表定稿后。
         self.emit_eh_relocations();
+    }
+
+    /// `.bss` / `.bss.*` 才是「不占文件空间的 NOBITS」。
+    ///
+    /// `__attribute__((section))` 的未初始化变量**不能**按「有没有 init」决定节类型：
+    /// 内核 `DEFINE_PER_CPU` 就是 `.data..percpu`（无初值），而 `setup_per_cpu_areas`
+    /// 靠文件里的零模板整段 `memcpy(__per_cpu_start, …, __per_cpu_end - __per_cpu_start)`
+    /// 初始化每个 CPU 的区域 —— 发成 NOBITS 那部分在文件里不存在，复制到的就是相邻
+    /// 节的字节（percpu 变量初值随机）。gcc 对带 section 属性的无初值变量发 PROGBITS。
+    fn is_bss_section_name(name: &str) -> bool {
+        name == ".bss" || name.starts_with(".bss.")
     }
 
     /// 静态地址常量折叠: &x / (T*)&x / &((arr + i)->f) / arr + n 等
@@ -2902,9 +3036,16 @@ impl Codegen {
     }
 
     fn final_text_loc(pos: u64, move_ranges: &[(u64, u64, usize, u64)]) -> (u16, u64) {
+        // 区间会**嵌套**：可执行 pushsection 的代码是嵌在函数发射流里的，`at` 同时落在
+        // 「函数搬到 .init.text」和「这段代码搬到 .altinstr_aux」两个区间内。必须取最内层
+        // （长度最小）那一层，否则 `.altinstr_aux` 里的 `jnz %l[t_yes]` 会被当成与目标
+        // 同节（都算到 .init.text）而写死位移，等真正的代码被搬到 aux 后位移全错 ——
+        // 实测 map_kernel.o 的 aux 只有 `jnz +5 / jmp +0x15`，两个目的地址都在节外，
+        // objtool 报 `can't find jump dest instruction at .altinstr_aux+0x2c`。
         move_ranges
             .iter()
-            .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+            .filter(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+            .min_by_key(|(_, size, _, _)| *size)
             .map(|(start, _size, sec_idx, sec_off)| {
                 ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
             })
@@ -2951,13 +3092,21 @@ impl Codegen {
                     );
                     continue;
                 }
-                if self.relocatable && !p.is_push_imm {
+                if self.relocatable {
+                    // `push $sym` 的 imm32 是**绝对地址**（GAS: R_X86_64_32S），不是
+                    // 相对位移。旧代码把它和跳转混在同一个 `!p.is_push_imm` 闸门后面，
+                    // ET_REL 下未命中的符号直接落到 E1100。
+                    let rel_type = if p.is_push_imm {
+                        crate::codegen::shared::elf::R_X86_64_32S
+                    } else {
+                        crate::codegen::shared::elf::R_X86_64_PC32
+                    };
                     let rel_off = p.disp_offset;
                     self.pending_code_rels.push(PendingCodeRel {
                         offset: rel_off,
                         symbol: p.target,
-                        rel_type: crate::codegen::shared::elf::R_X86_64_PC32,
-                        addend: -4,
+                        rel_type,
+                        addend: if p.is_push_imm { 0 } else { -4 },
                     });
                     continue;
                 }
@@ -2966,8 +3115,49 @@ impl Codegen {
             };
             let off = p.disp_offset as usize;
             if p.is_push_imm {
-                // push $label: imm32 = absolute address (lower 32 bits)
-                self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
+                // push $label: imm32 = 标签的**绝对地址**（低 32 位），不是节内偏移。
+                //
+                // 旧实现直接写 `dst`（`self.code` 里的发射坐标），既不判断 relocatable、
+                // 也不加节基址、更不发重定位：ET_REL 产物里 `pushq $1f` 就成了
+                // `push $0x86dc`（`1:` 在本 TU .text 的偏移）。现场是
+                // arch/x86/include/asm/sync_core.h 的 iret_to_self()：iretq 从栈上
+                // 弹出这个“地址”当 CS/RIP，QEMU 立刻 #GP(e=2020)，随后栈指针被
+                // 弹成垃圾、异常打印二次 #PF。
+                //
+                // 正确口径与 GAS 一致：ET_REL 发 `R_X86_64_32S`，符号取标签**最终
+                // 所在节**的 STT_SECTION（`.text` 或被 pushsection 搬走的自定义节），
+                // addend = 节内偏移；链接期 S + A 才是运行期绝对地址。
+                if self.relocatable {
+                    let (sec, sec_off) = Self::final_text_loc(dst, move_ranges);
+                    let symbol = match sec {
+                        1 => Some(".text".to_string()),
+                        n if n >= 7 => {
+                            self.extra_sections.get((n - 7) as usize).map(|s| s.name.clone())
+                        },
+                        _ => None,
+                    };
+                    match symbol {
+                        Some(symbol) => self.pending_code_rels.push(PendingCodeRel {
+                            offset: p.disp_offset,
+                            symbol,
+                            rel_type: crate::codegen::shared::elf::R_X86_64_32S,
+                            addend: sec_off as i64,
+                        }),
+                        None => self.report_internal_bug(
+                            "E1106",
+                            format!(
+                                "push-immediate at .text+{:#x} targets label '{}' in reserved \
+                                 section {}",
+                                p.at, p.target, sec
+                            ),
+                            "push $label 只能指向 .text 或自定义节的标号",
+                        ),
+                    }
+                } else {
+                    // ET_EXEC: 代码偏移 0 对应虚拟地址 `self.entry`。
+                    let addr = self.entry + dst;
+                    self.code[off..off + 4].copy_from_slice(&(addr as i32).to_le_bytes());
+                }
             } else {
                 let (src_sec, src_at) = Self::final_text_loc(p.at, move_ranges);
                 let src_next = src_at + (p.next_ip - p.at);
@@ -3005,17 +3195,96 @@ impl Codegen {
                     let rel = (dst_pos as i64) - (src_next as i64);
                     self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
                 } else if self.relocatable {
-                    self.pending_code_rels.push(PendingCodeRel {
-                        offset: p.disp_offset,
-                        symbol: p.target,
-                        rel_type: crate::codegen::shared::elf::R_X86_64_PC32,
-                        addend: -4,
-                    });
+                    // 跨节跳转**不能**用标号名当符号：`.L` 内部标号不进 symtab
+                    // （`reloc_sym_index` 会报 E1103 并丢弃），连 C 标签的内部名也一样。
+                    // GAS 的口径是「目标节符号 + 节内偏移」：`.text` 或被 pushsection
+                    // 搬走的自定义节，addend = 节内偏移 - 4（PC32 的 P 是 disp32 字段）。
+                    let symbol = match dst_sec {
+                        1 => Some(".text".to_string()),
+                        n if n >= 7 => self
+                            .extra_sections
+                            .get((n - 7) as usize)
+                            .map(|s| s.name.clone()),
+                        _ => None,
+                    };
+                    match symbol {
+                        Some(symbol) => self.pending_code_rels.push(PendingCodeRel {
+                            offset: p.disp_offset,
+                            symbol,
+                            rel_type: crate::codegen::shared::elf::R_X86_64_PC32,
+                            addend: dst_pos as i64 - 4,
+                        }),
+                        None => self.report_internal_bug(
+                            "E1107",
+                            format!(
+                                "cross-section jump at .text+{:#x} targets label '{}' in reserved \
+                                 section {}",
+                                p.at, p.target, dst_sec
+                            ),
+                            "jump targets must live in .text or a .pushsection section",
+                        ),
+                    }
                 } else {
                     let rel = (dst as i64) - (p.next_ip as i64);
                     self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
                 }
             }
+        }
+
+        // 内联 asm `lea (2f)(%rip)` / `mov 2f(%rip), %reg` 一类「RIP-relative 引用本 TU
+        // 内部标号」的操作数。GAS 的结算口径是「目标节符号 + 节内偏移」，绝不把 `.L`
+        // 标号本身当外部符号发重定位（它不进 symtab）。这里是唯一结算点：全部标号与
+        // pushsection 搬迁区间都已定稿。
+        //   * 目标在 `.text`（含被搬进自定义节的可执行 pushsection 区间）→
+        //     `final_text_loc` 折成最终节号；
+        //   * 目标在 pushsection 数据节（`__bug_table` / `.discard.*` …）→
+        //     `pushsection_label_offsets` 里已有“节内偏移”的真身坐标 —— `self.labels`
+        //     对它们只有 `.text` 发射坐标，是错的那一份。
+        // addend = 节内偏移 - 4：PC32 的 P 是 disp32 字段本身，下一指令在 P+4。
+        for (disp_pos, label) in std::mem::take(&mut self.pending_asm_internal_symdisp_rels) {
+            let target: Option<(u16, u64)> = self
+                .pushsection_label_offsets
+                .get(&label)
+                .map(|&(sec_idx, off)| ((sec_idx + 7) as u16, off))
+                .or_else(|| {
+                    self.labels
+                        .get(&label)
+                        .map(|&pos| Self::final_text_loc(pos, move_ranges))
+                });
+            let Some((target_sec, target_off)) = target else {
+                self.report_internal_bug(
+                    "E1102",
+                    format!(
+                        "inline asm RIP-relative operand at .text+{:#x} references internal \
+                         label '{}' which is never defined in this TU",
+                        disp_pos, label
+                    ),
+                    "a compiler-generated .L label must be defined by the asm block emitter; \
+                     do not turn it into a relocation against an external symbol",
+                );
+                continue;
+            };
+            let section = match target_sec {
+                1 => ".text".to_string(),
+                n if n >= 7 => self.extra_sections[(n - 7) as usize].name.clone(),
+                _ => {
+                    self.report_internal_bug(
+                        "E1102",
+                        format!(
+                            "internal label '{}' resolves to reserved section index {}",
+                            label, target_sec
+                        ),
+                        "internal asm labels must live in .text or a .pushsection section",
+                    );
+                    continue;
+                },
+            };
+            self.pending_code_rels.push(PendingCodeRel {
+                offset: disp_pos,
+                symbol: section,
+                rel_type: crate::codegen::shared::elf::R_X86_64_PC32,
+                addend: target_off as i64 - 4,
+            });
         }
     }
 }

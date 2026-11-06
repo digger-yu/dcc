@@ -414,13 +414,26 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
                 // 数组衰减后的指针值)。再包一层 PointerValue 会把对象首 8 字节
                 // 错当指针解引用 —— 20010409-1 的 `d->a[d->b]` (d: `B d[1]`)
                 // 因此多 load 一次, 拿到 `a` (NULL) 而非 `&a`, 段错误。
+                // 指针下标的描述符 (`t[i]`, t: T**) 物化出来是**第 i 个指针槽的
+                // 地址**而不是指针值 —— 与 StackFrame / GlobalSymbolAddr / ExprAddr
+                // 同属「槽地址」一类, 必须再 load 一次。旧判据只看描述符基址种类,
+                // 而 `t[i]` 的基址在此已是 StackSlotLoad / PointerValue (值已加载),
+                // 下标偏移叠在值上后恰好又是槽地址, 于是被误判为「已是值」:
+                // `t[i]->sym[j]` 被发成 `t + i*8 + off(sym) + j` (少一次解引用),
+                // 而 `t[i]->len` (字段偏移 0) 恰好掩盖了它 —— 内核 scripts/kallsyms
+                // 的 insert_real_symbols_in_table 因此在 O2 内联后读栈垃圾, 生成的
+                // kallsyms_token_table 含控制字符, 汇编期 unterminated string。
+                // 判据复用 Index 臂的单一入口 [`is_memory_ptr_lvalue_base`]:
+                // Member (指针字段) 的描述符已是**值**, 不能进这一支, 否则
+                // `a->b->c` 会被多数一次解引用。
                 let needs_ptr_load = matches!(base_expr_ty(base), Type::Ptr(_))
-                    && matches!(
-                        ptr_addr.base,
-                        AddressBase::StackFrame { .. }
-                            | AddressBase::GlobalSymbolAddr { .. }
-                            | AddressBase::ExprAddr { .. }
-                    );
+                    && (is_memory_ptr_lvalue_base(base.as_ref())
+                        || matches!(
+                            ptr_addr.base,
+                            AddressBase::StackFrame { .. }
+                                | AddressBase::GlobalSymbolAddr { .. }
+                                | AddressBase::ExprAddr { .. }
+                        ));
                 let ptr_addr = if needs_ptr_load {
                     let element_info = ptr_addr.element_info.clone();
                     AddressDescriptor {
@@ -914,9 +927,14 @@ pub fn storage_type_from_ast(ty: &Type) -> StorageType {
 /// 判据只写一份，两侧都从这里取。
 pub fn expr_has_side_effects(e: &Expr) -> bool {
     match e {
-        Expr::Unary { op, e: inner, .. } => {
-            matches!(op, ast::UnOp::Neg) // PreDecr/PostDecr/PreIncr/PostIncr 是独立变体
-                || expr_has_side_effects(inner)
+        Expr::Unary { op, e: inner, ty, .. } => {
+            // 整数/指针取负不写内存、不调用、不触发异常，重复求值无害；只有浮点
+            // （可能带 sNaN 的 fenv 异常）才保持「有副作用」。这一条以前对所有类型
+            // 都判真，代价是内核 `BUILD_BUG_ON_ZERO(e)` 的 `-!!(e)` 让**整条实参**
+            // 被当成有副作用，`__always_inline` 因此拒展开（实测 `field_multiplier`
+            // 留在 `__bad_mask` 引用上，见 kernel 构建 §5.0q）。
+            (matches!(op, ast::UnOp::Neg) && matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128 | Type::Complex(_) | Type::Imaginary(_)))
+                || expr_has_side_effects(inner) // PreDecr/PostDecr/PreIncr/PostIncr 是独立变体
         },
         Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
             expr_has_side_effects(l) || expr_has_side_effects(r)

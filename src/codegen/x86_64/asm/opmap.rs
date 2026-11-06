@@ -18,6 +18,44 @@ use crate::semantics::{self, *};
 use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// 一个 GP 操作数装载的**延迟动作**：在全部操作数求值完成之后、模板发射之前才真正
+/// 写进目标寄存器。
+///
+/// 为什么必须延迟：`prepare_asm_binding` 走 `gen_expr`，而 `gen_expr` 把 %rax 当求值
+/// 基址（`EVAL_BASE`），部分子路径还硬写 %rcx/%rdx/%rsi/%rdi。在操作数循环里逐条
+/// 装载，**后面**操作数一求值，前面已就位的固定寄存器就被踩掉。实测内核
+/// `arch/x86/kernel/cpu/scattered.c` 的 `native_cpuid`：
+/// `"0"(*eax) / "2"(*ecx)` 两个输入，第二个经 %rax 中转后把 EAX 里的 cpuid leaf
+/// 冲成 0（读回厂商串），guest 在 `init_scattered_cpuid_features` 就地 #PF。
+#[derive(Debug)]
+enum DeferredGpLoad {
+    /// 表达式的值直接装进目标（只收「单条装载指令」的形态，见
+    /// `asm_gp_load_is_single_insn`）。
+    Direct { target: u8, expr: Expr },
+    /// 值已经求到 callee-saved 驻足号，flush 时一条 `mov` 进目标。
+    FromScratch { target: u8, scratch: u8 },
+    /// 从 `base` 指向的内存按 `size` 装载进目标（`"+r"(*p)` 的旧值）。
+    FromPtr { target: u8, base: u8, size: usize },
+    /// `base` 是 sret 帧槽里的地址（驻足池耗尽时的 `"+r"(*p)`）：先把地址装进
+    /// 目标，再用目标自己当基址取旧值（`load_stack` + `mov t, [t]`）。
+    FromAddrSlot { target: u8, slot: i64, size: usize },
+    /// 全局符号地址装进目标（`"=r"(global)` 的写回地址）。
+    GlobalAddr { target: u8, name: String },
+}
+
+impl DeferredGpLoad {
+    fn target(&self) -> u8 {
+        match *self {
+            DeferredGpLoad::Direct { target, .. }
+            | DeferredGpLoad::FromScratch { target, .. }
+            | DeferredGpLoad::FromPtr { target, .. }
+            | DeferredGpLoad::FromAddrSlot { target, .. }
+            | DeferredGpLoad::GlobalAddr { target, .. } => target,
+        }
+    }
+}
+
 impl Codegen {
     fn asm_format_subst(val: &str) -> String {
         // 缺失操作数占位符会被保留为 `%[name]` / `%N`; 这些不是
@@ -58,6 +96,196 @@ impl Codegen {
         // p 约束: 把指针值加载到寄存器 (而不是 lea 变量地址)
         // 对于指针变量, 加载其值; 对于其他表达式, 按值求值
         self.gen_expr(expr, reg);
+    }
+
+    /// 约束里的固定 GP 号（`a/b/c/d/S/D` 或 `{eax}` 这类显式寄存器）。
+    ///
+    /// 与规划器 `alloc_gp_for_constraint` 的字母表一致；`r/R/g`、`q/Q`、`@cc` 不钉号。
+    fn fixed_gp_of_constraint(raw: &str) -> Option<u8> {
+        if let Some(eri) = Self::asm_parse_explicit_reg(raw) {
+            return match eri.kind {
+                ExplicitRegKind::Gp => Some(eri.reg),
+                ExplicitRegKind::Seg => None,
+            };
+        }
+        let core = raw.trim_start_matches(['=', '+', '&', '%']);
+        if core.contains('{') || core.starts_with("@cc") {
+            return None;
+        }
+        let letters: Vec<char> = core.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if letters.iter().any(|c| matches!(c, 'r' | 'R' | 'g')) {
+            return None;
+        }
+        if letters.contains(&'a') {
+            Some(0)
+        } else if letters.contains(&'b') {
+            Some(3)
+        } else if letters.contains(&'c') {
+            Some(1)
+        } else if letters.contains(&'d') {
+            Some(2)
+        } else if letters.contains(&'S') {
+            Some(6)
+        } else if letters.contains(&'D') {
+            Some(7)
+        } else {
+            None
+        }
+    }
+
+    /// 单条装载即可入寄存器：局部标量 Ident（栈家或 `register asm` 家）与整型常量。
+    /// 全局 Ident 不算 —— TLS 形态走 `__tls_get_addr` 调用，不是一条指令。
+    fn asm_gp_load_is_single_insn(&self, op: &Expr) -> bool {
+        match op {
+            Expr::Int { .. } | Expr::Char { .. } => true,
+            Expr::Ident { name, ty, .. } => {
+                if self.is_global_not_local(&name.name) {
+                    return false;
+                }
+                ty.size() <= 8
+                    && matches!(
+                        ty,
+                        Type::Bool
+                            | Type::Char
+                            | Type::SChar
+                            | Type::UChar
+                            | Type::Char8
+                            | Type::Char16
+                            | Type::Char32
+                            | Type::Short
+                            | Type::UShort
+                            | Type::Int
+                            | Type::UInt
+                            | Type::Long
+                            | Type::ULong
+                            | Type::LongLong
+                            | Type::ULongLong
+                            | Type::Ptr(_)
+                            | Type::Enum(..)
+                    )
+            },
+            _ => false,
+        }
+    }
+
+    /// 在 callee-saved 池里挑一个驻足号：跳过 `avoid` 与规划器已占用的号。
+    ///
+    /// 必须是 callee-saved：caller-saved 号是各条求值子路径的固定暂存，驻足到那里
+    /// 会被后续操作数的求值踩掉；也必须是规划器台账里没发出去的号，否则本句 asm 的
+    /// 某个操作数会与驻足值共用同一寄存器。
+    fn alloc_asm_park_reg(&mut self, planner: &AsmRegisterPlanner, avoid: u8) -> Option<u8> {
+        for r in [3u8, 12, 14, 15] {
+            if r == avoid || planner.is_used_gp(r) {
+                continue;
+            }
+            if self.reg_bank.alloc_temp_named(r) {
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    /// 延迟装载一个 GP 输入（或 inout 输出的旧值）。理由与策略见 `DeferredGpLoad`。
+    fn defer_gp_load(
+        &mut self,
+        op: &Expr,
+        target: u8,
+        planner: &mut AsmRegisterPlanner,
+        deferred: &mut Vec<DeferredGpLoad>,
+    ) {
+        if self.asm_gp_load_is_single_insn(op) {
+            deferred.push(DeferredGpLoad::Direct {
+                target,
+                expr: op.clone(),
+            });
+            return;
+        }
+        if let Some(scratch) = self.alloc_asm_park_reg(planner, target) {
+            planner.exclude_gp(scratch);
+            self.prepare_asm_binding(op, scratch, false);
+            deferred.push(DeferredGpLoad::FromScratch { target, scratch });
+            return;
+        }
+        // 驻足池耗尽：退回「flush 时直接求值」。此时只剩 %rax 目标最后装载这一条
+        // 顺序保障（flush 的排序），与旧行为同风险。
+        deferred.push(DeferredGpLoad::Direct {
+            target,
+            expr: op.clone(),
+        });
+    }
+
+    /// 从 `base` 指向的内存按 `sz` 零扩展装载到 `dst`（`"+r"(*p)` 的旧值装载）。
+    fn load_reg_from_ptr_sized(&mut self, dst: u8, base: u8, sz: usize) {
+        let mut rex = 0x40u8;
+        if dst >= 8 {
+            rex |= 0x04;
+        }
+        if base >= 8 {
+            rex |= 0x01;
+        }
+        match sz {
+            1 => {
+                if rex != 0x40 {
+                    self.emit_insn(&Insn::raw_bytes(&[rex]));
+                }
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6]));
+            },
+            2 => {
+                self.emit_insn(&Insn::raw_bytes(&[0x66]));
+                if rex != 0x40 {
+                    self.emit_insn(&Insn::raw_bytes(&[rex]));
+                }
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7]));
+            },
+            4 => {
+                if rex != 0x40 {
+                    self.emit_insn(&Insn::raw_bytes(&[rex]));
+                }
+                self.emit_insn(&Insn::raw_bytes(&[0x8B]));
+            },
+            _ => {
+                self.emit_insn(&Insn::raw_bytes(&[rex | 0x08]));
+                self.emit_insn(&Insn::raw_bytes(&[0x8B]));
+            },
+        }
+        self.emit_reg_indirect_modrm(dst, base);
+    }
+
+    /// 执行延迟装载。%rax 目标最后：它同时是所有残余求值路径的固定暂存
+    /// (`EVAL_BASE`)，放在前面会被紧随其后的求值踩掉。
+    fn flush_deferred_gp_loads(&mut self, deferred: Vec<DeferredGpLoad>) {
+        let mut rax_loads: Vec<DeferredGpLoad> = Vec::new();
+        let mut others: Vec<DeferredGpLoad> = Vec::new();
+        for d in deferred {
+            if d.target() == Self::EVAL_BASE {
+                rax_loads.push(d);
+            } else {
+                others.push(d);
+            }
+        }
+        for d in others.into_iter().chain(rax_loads) {
+            match d {
+                DeferredGpLoad::Direct { target, expr } => {
+                    self.prepare_asm_binding(&expr, target, false);
+                },
+                DeferredGpLoad::FromScratch { target, scratch } => {
+                    if target != scratch {
+                        self.mov(target, scratch);
+                    }
+                    self.free_callee_saved(scratch);
+                },
+                DeferredGpLoad::FromPtr { target, base, size } => {
+                    self.load_reg_from_ptr_sized(target, base, size);
+                },
+                DeferredGpLoad::FromAddrSlot { target, slot, size } => {
+                    self.load_stack(target, slot);
+                    self.load_reg_from_ptr_sized(target, target, size);
+                },
+                DeferredGpLoad::GlobalAddr { target, name } => {
+                    self.emit_global_addr(target, &name);
+                },
+            }
+        }
     }
 
     /// 该约束是否要求 x86-64 的 legacy 寄存器类（`q` / `Q`）。
@@ -101,10 +329,22 @@ impl Codegen {
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
         let mut idx = 0usize;
+        // 写回地址槽占用的 sret 水位。槽必须在模板之前分配、写回之后才能还原，
+        // 所以把标记留给发射侧（见 `Codegen::asm_pending_sret_mark`）。
+        let addr_slot_mark = self.save_sret_watermark();
         // x87 FPU 栈加载需要按 st() 从高到低顺序执行 (fld 推栈,
         // 最后一次 fld 才是 st(0)). 收集所有 x87 operand, 统一在
         // outputs+inputs 都处理完后再排序加载.
         let mut pending_x87: Vec<(u8, &Expr)> = Vec::new();
+        // GP 操作数的延迟装载队列（理由与四种形态见 `DeferredGpLoad`）。
+        // `deferred_out` 是输出侧的条目：它们在全部输入求值完成后才具体化，
+        // 但必须排在输入条目**之前** —— `"0"`/`"2"` 这类匹配输入要用自己的值
+        // 覆盖输出预装载的值，顺序反了就是把旧值又装回去。
+        let mut deferred: Vec<DeferredGpLoad> = Vec::new();
+        let mut deferred_out: Vec<DeferredGpLoad> = Vec::new();
+        // GP 输出里需要延迟装载的项：(输出下标, 是否 inout)。
+        // 目标寄存器在 early-clobber 重分配之后才能定，所以收尾时按 `slots[i]` 取。
+        let mut pending_output_gp: Vec<(usize, bool)> = Vec::new();
 
         // 内部占位: 每个操作数分配状态
         enum Slot {
@@ -118,15 +358,47 @@ impl Codegen {
         let mut slots: Vec<Slot> = Vec::new();
         let mut meta: Vec<(u8, u8, bool, bool, u8)> = Vec::new(); // (reg, xmm_width, is_output, is_mem, flags_raw)
                                                                   // flags_raw: bit 0 = early_clobber
-                                                                  // For non-Ident inout (`+r`) outputs, prepare_asm_binding evaluates the
-                                                                  // current value into the bound register (triggering side-effects like
-                                                                  // bar() in `*bar()`).  The lvalue address is computed once here and held
-                                                                  // in a callee-saved scratch across the asm, so writeback can reuse it
-                                                                  // instead of re-running gen_lvalue_addr (which would re-trigger bar()).
-        let mut saved_inout_addrs: Vec<Option<u8>> = Vec::new();
+        // 非 Ident 输出左值的写回地址：(输出下标, 驻足号, sret 帧槽)。
+        // 地址在模板之前算好；写回只 store（+ 必要时 load 一次地址），不再求值。
+        let mut saved_addrs: Vec<(usize, Option<u8>, Option<i64>)> = Vec::new();
 
         // 解析 clobber 列表, 把被 clobber 的寄存器加入统一规划器的排除集合。
         let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
+        // 内存操作数的地址暂存号预扫描。
+        //
+        // `"m"(s->f)` / `"m"(a[i])` / `"m"(*p)` 的地址必须在整条 asm 期间活着，
+        // 模板里会展开成 `(%reg)`，所以每个这类操作数都要一个专属的 callee-saved 号。
+        // 必须**先于**下面的 `owned_gp` 快照分配：快照里有它，规划器之后就不会把同号
+        // 再发给别的寄存器操作数；`alloc_callee_saved` 置的 used_by_self 同时让序言
+        // 保存/恢复调用者的值。
+        //
+        // 旧实现硬编码 `%r12` 却从不登记：不保存调用者的 r12，别的操作数也照样能分到
+        // %r12 把地址踩掉；更要紧的是 `Member`/`Index` 走的是 `gen_expr`（右值/取值），
+        // `"+m"(v->counter)` 于是把**计数器的值**当地址去 `lock incl`（内核 online_css
+        // 实测 r12=0、CR2=0，启动期 triple fault）。
+        let mem_needs_scratch = |op: &Expr, raw: &str| {
+            let (_o, is_inout, _e, _m) = Self::parse_asm_constraint_flags(raw);
+            Self::asm_constraint_prefers_memory(raw, is_inout)
+                && !matches!(op, Expr::Ident { .. })
+        };
+        let mut mem_scratch: Vec<Option<u8>> = Vec::with_capacity(outputs.len() + inputs.len());
+        for (i, op) in outputs.iter().enumerate() {
+            let raw = output_constraints.get(i).map(String::as_str).unwrap_or("=r");
+            mem_scratch.push(if mem_needs_scratch(op, raw) {
+                // 池耗尽时退回 r12（旧行为），至少语义上是地址寄存器。
+                Some(self.alloc_asm_mem_scratch(&clobber_gp))
+            } else {
+                None
+            });
+        }
+        for (i, op) in inputs.iter().enumerate() {
+            let raw = input_constraints.get(i).map(String::as_str).unwrap_or("r");
+            mem_scratch.push(if mem_needs_scratch(op, raw) {
+                Some(self.alloc_asm_mem_scratch(&clobber_gp))
+            } else {
+                None
+            });
+        }
         // 寄存器所有权只有一个真源：`RegBank`。构造时一次性把「本条 asm 之外已有主人」
         // 的 GP 号（函数级 pinned + 溅出池正占的号）快照进规划器的排除集合；
         // 规划期不再持有 `&mut RegBank`，因此操作数求值（`prepare_asm_binding` 等
@@ -135,34 +407,24 @@ impl Codegen {
         let owned_gp: Vec<u8> = self.reg_bank.owned_gp();
         let mut planner = AsmRegisterPlanner::new(&owned_gp, &clobber_gp, &clobber_xmm);
 
-        // 预扫描输出约束: 预留固定寄存器 (a/b/c/d/S/D),
-        // 避免 =r 等通用分配抢占后续 =a 等固定约束所需的寄存器。
-        for oc in output_constraints.iter() {
-            let core = oc.trim_start_matches(['=', '+', '&', '%']);
-            if core.contains('{') || core.starts_with("@cc") {
-                continue;
-            }
-            let letters: Vec<char> = core.chars().filter(|c| c.is_ascii_alphabetic()).collect();
-            if letters.iter().any(|c| matches!(c, 'r' | 'R' | 'g')) {
-                continue;
-            }
-            let fixed: Option<u8> = if letters.contains(&'a') {
-                Some(0)
-            } else if letters.contains(&'b') {
-                Some(3)
-            } else if letters.contains(&'c') {
-                Some(1)
-            } else if letters.contains(&'d') {
-                Some(2)
-            } else if letters.contains(&'S') {
-                Some(6)
-            } else if letters.contains(&'D') {
-                Some(7)
-            } else {
-                None
-            };
-            if let Some(reg) = fixed {
-                planner.reserve_gp(reg, AsmRegUse::Output);
+        // 预扫描固定寄存器约束（输出 + 输入，含 `{eax}` 这类显式寄存器）：先于任何
+        // 通用分配预留，避免前面的 `"r"` 操作数抢占后面固定约束要的号（同一句 asm
+        // 两个操作数共享一个号 = 静默错值）。输入侧此前没有这一步：`"r"(a), "c"(b)`
+        // 会先给 a 发 rax，再让 b 用 rcx；换一个 seed 就撞号。
+        for (oc, is_out) in output_constraints
+            .iter()
+            .map(|c| (c, true))
+            .chain(input_constraints.iter().map(|c| (c, false)))
+        {
+            if let Some(reg) = Self::fixed_gp_of_constraint(oc) {
+                planner.reserve_gp(
+                    reg,
+                    if is_out {
+                        AsmRegUse::Output
+                    } else {
+                        AsmRegUse::Input
+                    },
+                );
             }
         }
 
@@ -240,8 +502,9 @@ impl Codegen {
                             64 => 208,
                             _ => 0,
                         };
-                        // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
-                        self.prepare_asm_binding(op, eri.reg, !is_inout);
+                        // +r (读写): 加载变量值; =r (只写): 无需预装载。
+                        // 装载一律延迟到全部操作数求值之后（见 `DeferredGpLoad`）。
+                        pending_output_gp.push((op_idx, is_inout));
                         planner.reserve_gp(eri.reg, AsmRegUse::Output);
                         map.insert(format!("%{idx}"), name.to_string());
                         slots.push(Slot::Reg(eri.reg, name));
@@ -314,7 +577,8 @@ impl Codegen {
 
             // 内存操作数 (m 优先)
             if Self::asm_constraint_prefers_memory(raw, is_inout) {
-                if let Some(mem) = self.asm_memory_operand_str(op) {
+                let scratch = mem_scratch.get(idx).copied().flatten().unwrap_or(12);
+                if let Some(mem) = self.asm_memory_operand_str(op, scratch) {
                     map.insert(format!("%{idx}"), mem.clone());
                     slots.push(Slot::Mem(mem));
                     meta.push((0, 0, true, true, if early { 1 } else { 0 }));
@@ -352,7 +616,7 @@ impl Codegen {
                 planner.alloc_gp_for_constraint(raw, idx, AsmRegUse::Output)
             {
                 let name = self.asm_reg_name_or_report(chosen);
-                self.prepare_asm_binding(op, chosen, !is_inout);
+                pending_output_gp.push((op_idx, is_inout));
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
                 meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
@@ -367,7 +631,7 @@ impl Codegen {
             // 内存地址 (p): lea 到一个 GP 寄存器, 模板里就是 %reg
             if Self::asm_constraint_is_address(raw) {
                 let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
-                self.asm_load_address_to_reg(op, chosen);
+                pending_output_gp.push((op_idx, is_inout));
                 let name = self.asm_reg_name_or_report(chosen);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
@@ -388,66 +652,12 @@ impl Codegen {
                 None => planner.alloc_gp(idx, AsmRegUse::Output),
             };
             let name = self.asm_reg_name_or_report(chosen);
-            // 对非 Ident inout (`+r`) 输出 (如 `"+r"(*bar())`): 先把 lvalue 地址
-            // 算到 callee-saved scratch (bar() 在此调用一次), 再从该地址 load
-            // 旧值到绑定寄存器 (无副作用). writeback 复用 scratch 里的地址, 不再
-            // 重新 gen_lvalue_addr —— 否则 bar() 会被调两次 (990130-1.c).
-            let saved = if is_inout && !matches!(op, Expr::Ident { .. }) {
-                match self.alloc_callee_saved() {
-                    Some(scratch) if self.gen_lvalue_addr(op, scratch) => {
-                        // mov chosen, [scratch]: 从已算好的地址 load 旧值.
-                        let sz = op.ty().size();
-                        let mut rex = 0x40u8;
-                        if chosen >= 8 {
-                            rex |= 0x04;
-                        }
-                        if scratch >= 8 {
-                            rex |= 0x01;
-                        }
-                        match sz {
-                            1 => {
-                                // movzx eax, byte [scratch]: 0F B6 /r
-                                if rex != 0x40 {
-                                    self.emit_insn(&Insn::raw_bytes(&[rex]));
-                                }
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6]));
-                            },
-                            2 => {
-                                // movzx eax, word [scratch]: 0F B7 /r
-                                self.emit_insn(&Insn::raw_bytes(&[0x66]));
-                                if rex != 0x40 {
-                                    self.emit_insn(&Insn::raw_bytes(&[rex]));
-                                }
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7]));
-                            },
-                            4 => {
-                                if rex != 0x40 {
-                                    self.emit_insn(&Insn::raw_bytes(&[rex]));
-                                }
-                                self.emit_insn(&Insn::raw_bytes(&[0x8B]));
-                            },
-                            _ => {
-                                self.emit_insn(&Insn::raw_bytes(&[rex | 0x08]));
-                                self.emit_insn(&Insn::raw_bytes(&[0x8B]));
-                            },
-                        }
-                        self.emit_reg_indirect_modrm(chosen, scratch);
-                        Some(scratch)
-                    },
-                    Some(scratch) => {
-                        self.free_callee_saved(scratch);
-                        None
-                    },
-                    None => None,
-                }
-            } else {
-                self.prepare_asm_binding(op, chosen, !is_inout);
-                None
-            };
+            // 非 Ident 输出（含 `+r`）的写回地址统一在 early-clobber 重分配之后、
+            // 模板之前由下面的预计算段算好（驻足号或 sret 帧槽）。
             map.insert(format!("%{idx}"), name.to_string());
             slots.push(Slot::Reg(chosen, name));
             meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
-            saved_inout_addrs.push(saved);
+            pending_output_gp.push((op_idx, is_inout));
             idx += 1;
         }
 
@@ -481,8 +691,9 @@ impl Codegen {
                         } else if is_xmm {
                             self.prepare_asm_xmm_binding(op, nreg, is_inout);
                         } else {
-                            // 对当前操作数 (输入) 调 prepare, 把值加载到复用寄存器
-                            self.prepare_asm_binding(op, nreg, false);
+                            // 对当前操作数 (输入) 调 prepare 把值加载到复用寄存器；
+                            // 装载延迟到全部操作数求值之后（见 `DeferredGpLoad`）。
+                            self.defer_gp_load(op, nreg, &mut planner, &mut deferred);
                         }
                         map.insert(format!("%{idx}"), nname.to_string());
                         if is_xmm {
@@ -535,7 +746,7 @@ impl Codegen {
                             64 => 208,
                             _ => 0,
                         };
-                        self.prepare_asm_binding(op, eri.reg, false);
+                        self.defer_gp_load(op, eri.reg, &mut planner, &mut deferred);
                         map.insert(format!("%{idx}"), name.to_string());
                         slots.push(Slot::Reg(eri.reg, name));
                         planner.reserve_gp(eri.reg, AsmRegUse::Input);
@@ -631,7 +842,8 @@ impl Codegen {
 
             // 内存操作数
             if Self::asm_constraint_prefers_memory(raw, is_inout) {
-                if let Some(mem) = self.asm_memory_operand_str(op) {
+                let scratch = mem_scratch.get(idx).copied().flatten().unwrap_or(12);
+                if let Some(mem) = self.asm_memory_operand_str(op, scratch) {
                     map.insert(format!("%{idx}"), mem.clone());
                     slots.push(Slot::Mem(mem));
                     meta.push((0, 0, false, true, 0));
@@ -766,7 +978,7 @@ impl Codegen {
                 planner.alloc_gp_for_constraint(raw, idx, AsmRegUse::Input)
             {
                 let name = self.asm_reg_name_or_report(chosen);
-                self.prepare_asm_binding(op, chosen, false);
+                self.defer_gp_load(op, chosen, &mut planner, &mut deferred);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
                 meta.push((chosen, 0, false, false, 0));
@@ -783,7 +995,7 @@ impl Codegen {
             // 内存地址 (p)
             if Self::asm_constraint_is_address(raw) {
                 let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
-                self.asm_load_address_to_reg(op, chosen);
+                self.defer_gp_load(op, chosen, &mut planner, &mut deferred);
                 let name = self.asm_reg_name_or_report(chosen);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
@@ -801,7 +1013,7 @@ impl Codegen {
                 None => planner.alloc_gp(idx, AsmRegUse::Input),
             };
             let name = self.asm_reg_name_or_report(chosen);
-            self.prepare_asm_binding(op, chosen, false);
+            self.defer_gp_load(op, chosen, &mut planner, &mut deferred);
             map.insert(format!("%{idx}"), name.to_string());
             slots.push(Slot::Reg(chosen, name));
             meta.push((chosen, 0, false, false, 0));
@@ -851,17 +1063,50 @@ impl Codegen {
             if let Some(cand) = planner.reassign_early_gp(reg, i) {
                 let new_name = self.asm_reg_name_or_report(cand);
                 let key = format!("%{i}");
-                if let Some(op) = outputs.get(i) {
-                    let raw = output_constraints
-                        .get(i)
-                        .map(String::as_str)
-                        .unwrap_or("=r");
-                    let (_, is_inout, _, _) = Self::parse_asm_constraint_flags(raw);
-                    self.prepare_asm_binding(op, cand, !is_inout);
-                }
+                // 预装载已经登记在 `pending_output_gp` 里，收尾时按 `slots[i]`
+                // 取新号发射；这里不再重新求值（否则 `+r"(*bar())` 会把 bar() 调两次）。
                 map.insert(key, new_name.to_string());
                 slots[i] = Slot::Reg(cand, new_name);
                 meta[i] = (cand, 0, true, false, flags);
+            }
+        }
+
+        // ===== 非 Ident 输出的写回地址：模板之前算好 =====
+        //
+        // 写回过去在 asm 之后才 `gen_lvalue_addr`，那时有两个致命前提：
+        //   (a) `alloc_callee_saved` 还能发出一个号 —— 实测 `native_cpuid`
+        //       （`"=a"(*eax)/"=b"(*ebx)/"=c"(*ecx)/"=d"(*edx)`）里 r12/r14/r15 是
+        //       变量的家、rbx 又被本句 `"=b"` 钉住 ⇒ 返回 None ⇒ 四个输出全部被静默丢弃，
+        //       `regs[]` 永远是旧值；
+        //   (b) 重算地址时 %rax/%rcx/%rdx 可以自由当暂存 —— 可它们正住着还没写回的输出。
+        // 所以地址必须在模板之前定下来：优先停到 callee-saved 驻足号（整条 asm 期间持有），
+        // 驻足池满则落一个 sret 帧槽（写回时只需一次 `load_stack`）。
+        if !self.current_func_name.is_empty() {
+            for i in 0..num_outputs {
+                let (reg, xmm_w, is_out, is_mem, _flags) = meta[i];
+                if !is_out || is_mem || !matches!(xmm_w, 0 | 32 | 64 | 128) {
+                    continue;
+                }
+                let Some(op) = outputs.get(i) else {
+                    continue;
+                };
+                if matches!(op, Expr::Ident { .. }) {
+                    continue;
+                }
+                let avoid = if xmm_w == 0 { reg } else { u8::MAX };
+                if let Some(park) = self.alloc_asm_park_reg(&planner, avoid) {
+                    if self.gen_lvalue_addr(op, park) {
+                        planner.exclude_gp(park);
+                        saved_addrs.push((i, Some(park), None));
+                        continue;
+                    }
+                    self.free_callee_saved(park);
+                }
+                let off = self.alloc_sret_slot(8);
+                if self.gen_lvalue_addr(op, Self::EVAL_BASE) {
+                    self.store_stack(Self::EVAL_BASE, off);
+                    saved_addrs.push((i, None, Some(off)));
+                }
             }
         }
 
@@ -876,8 +1121,57 @@ impl Codegen {
             }
         }
 
+        // ===== 延迟装载：所有操作数求值完成，模板发射前把值装进最终寄存器 =====
+        // 输出侧条目必须排在输入侧之前（`"0"`/`"2"` 匹配输入要用自己的值覆盖输出
+        // 预装载的值）；具体理由与四种形态见 `DeferredGpLoad`。
+        for (i, is_inout) in pending_output_gp {
+            let target = match slots.get(i) {
+                Some(Slot::Reg(r, _)) => *r,
+                _ => continue,
+            };
+            let Some(op) = outputs.get(i) else {
+                continue;
+            };
+            let saved = saved_addrs
+                .iter()
+                .find(|(idx, _, _)| *idx == i)
+                .map(|&(_, r, s)| (r, s))
+                .unwrap_or((None, None));
+            if is_inout {
+                match saved {
+                    (Some(park), _) => deferred_out.push(DeferredGpLoad::FromPtr {
+                        target,
+                        base: park,
+                        size: op.ty().size(),
+                    }),
+                    (_, Some(slot)) => deferred_out.push(DeferredGpLoad::FromAddrSlot {
+                        target,
+                        slot,
+                        size: op.ty().size(),
+                    }),
+                    _ => self.defer_gp_load(op, target, &mut planner, &mut deferred_out),
+                }
+            } else if let Expr::Ident { name, .. } = op {
+                if self.is_global_not_local(&name.name) {
+                    // `=r`(全局) 的写回地址：asm 之后要用，必须在模板前就位。
+                    deferred_out.push(DeferredGpLoad::GlobalAddr {
+                        target,
+                        name: name.name.clone(),
+                    });
+                } else {
+                    // 本地变量：写回按栈槽偏移落值，这条 lea 实际不被使用；保留原行为。
+                    self.prepare_asm_binding(op, target, true);
+                }
+            }
+        }
+        deferred.splice(0..0, deferred_out);
+        self.flush_deferred_gp_loads(deferred);
+
         // 把 meta 转成 AsmOpBinding
         bindings.clear();
+        // 发射侧写完回后按这个标记把 sret 水位还原（见 `asm_pending_sret_mark`）。
+        // 这里才写：操作数求值里可能嵌内层 asm，它们已经各自 push/pop 完毕。
+        self.asm_pending_sret_mark = Some(addr_slot_mark);
         // 本条 asm 收尾：规划期所有 callee-saved 号（rbx/r12/r14/r15）在这里一次性
         // claim 进 RegBank（置 allocated+used_by_self）；caller-saved 号不在溅出池里，
         // 无需登记。取 planner 所有权，因此这是「规划期结束」的类型边界。
@@ -887,23 +1181,37 @@ impl Codegen {
         // 错值；点名它（与 legacy `q` 池耗空那条同一口径），而不是把一个确定会盖值的
         // 分配交出去。
         if exhausted {
-            self.asm_reject(
-                "impossible constraint: inline asm has more GP operands than free registers",
-            );
+            self.asm_reject(&format!(
+                "impossible constraint: inline asm has more GP operands than free registers \
+                 ({} outputs + {} inputs, {} already owned, {} clobbered, in function {}; \
+                 outs=[{}] ins=[{}])",
+                outputs.len(),
+                inputs.len(),
+                owned_gp.len(),
+                clobber_gp.len(),
+                if self.current_func_name.is_empty() {
+                    "<unknown>"
+                } else {
+                    &self.current_func_name
+                },
+                output_constraints.join(","),
+                input_constraints.join(",")
+            ));
         }
         for (i, (reg, xmm_w, is_out, is_mem, flags)) in meta.iter().enumerate() {
-            let saved = if i < saved_inout_addrs.len() {
-                saved_inout_addrs[i]
-            } else {
-                None
-            };
+            // 地址条目按**输出下标**登记（`i` 在 meta 里与输出下标一致到 `num_outputs`
+            // 为止），不再用平行的 push 顺序对齐：以前那种下标一旦有前置分支
+            // （xmm/固定字母/内存）走掉就会错位到别的操作数上。
+            let saved = saved_addrs.iter().find(|(idx, _, _)| *idx == i).copied();
             bindings.push(AsmOpBinding {
                 reg: *reg,
                 is_output: *is_out,
                 is_mem: *is_mem,
                 early_clobber: (flags & 1) != 0,
                 xmm_width: *xmm_w,
-                saved_inout_addr_reg: saved,
+                saved_addr_reg: saved.and_then(|(_, r, _)| r),
+                saved_addr_slot: saved.and_then(|(_, _, s)| s),
+                mem_addr_reg: mem_scratch.get(i).copied().flatten(),
             });
         }
         // name aliases
@@ -923,6 +1231,28 @@ impl Codegen {
             }
         }
         map
+    }
+
+    /// 取一个可在本条 asm 里当内存操作数地址的 callee-saved 号。
+    ///
+    /// 两个约束同时成立才可用：
+    ///   * `RegBank` 里空闲；
+    ///   * 不在本条 asm 的 GP clobber 名单里 —— 地址必须在整条 asm 期间有效，
+    ///     模板自己会毁掉的号不能拿来存地址。
+    ///
+    /// 按号逐个试（`alloc_temp_named`）而不是先拿 `alloc_temp` 再退让：退让只能靠
+    /// `claim` 把号永久钉住，那会让同一个函数里后续每条 asm 可用的号越用越少。
+    fn alloc_asm_mem_scratch(&mut self, clobber_gp: &HashSet<u8>) -> u8 {
+        for &reg in &[3u8, 12, 14, 15] {
+            if clobber_gp.contains(&reg) {
+                continue;
+            }
+            if self.reg_bank.alloc_temp_named(reg) {
+                return reg;
+            }
+        }
+        // 池耗尽：退回最后一个候选（r12，旧行为）；调用方照旧用 `(%r12)`。
+        12
     }
     /// Prepare an asm operand.  `is_pure_output` is true when the constraint is
     /// `=r` (write-only — asm will completely overwrite, no need to pre-load
@@ -1160,16 +1490,19 @@ impl Codegen {
     /// 聚合 / 向量 / long double / 128 位整数）。调用方保留原有行为：宁可维持旧状态，
     /// 也不把值写到一个算错的位置。
     ///
-    /// scratch 必须来自 callee-saved 池：GP 分配池 (`AsmRegisterPlanner::GP_POOL`) 只含
-    /// caller-saved 号，所以这个 scratch 一定不是本句 asm 的任何操作数寄存器；
-    /// `alloc_callee_saved` 同时置 `reg_allocated` 与 `callee_saved_used`，因此它也不会
-    /// 与外层表达式的溅出槽相撞，并且序言会真的保存它。写回结束立刻归还。
+    /// scratch 的来源分三层（顺序即优先级）：
+    ///   1. `saved_addr_reg` —— 模板之前算好的地址驻足号（callee-saved），不再求值；
+    ///   2. `saved_addr_slot` —— 驻足池耗尽时落的 sret 帧槽，只 `load_stack` 一次；
+    ///   3. 都没有（地址预计算失败/文件作用域）：现算，scratch 优先 callee-saved，
+    ///      池满退到 caller-saved（避开 `out_mask` 里还没写回的输出与钉住的家）。
     fn writeback_asm_general_lvalue(
         &mut self,
         expr: &Expr,
         src: u8,
         xmm_width: u8,
         saved_addr_reg: Option<u8>,
+        saved_addr_slot: Option<i64>,
+        out_mask: u64,
     ) -> bool {
         let ty = expr.ty();
         let effective_ty = match &ty {
@@ -1209,17 +1542,26 @@ impl Codegen {
             // 操作数在 xmm 里但类型不是 float/double：不知道该怎么存，保持旧行为。
             return false;
         }
-        // 调用方已在 prepare 阶段算好 lvalue 地址并溅到一个 callee-saved scratch；
-        // 直接用它，避免重跑 gen_lvalue_addr 触发副作用子表达式二次求值
-        // (如 `"+r"(*bar())` 里 bar() 被调两次 —— 见 990130-1.c)。
+        // 调用方已在模板之前算好 lvalue 地址：priority 1/2 直接复用，避免重跑
+        // `gen_lvalue_addr` —— 既会二次求值副作用子表达式（`"+r"(*bar())` 把 bar()
+        // 调两次，见 990130-1.c），也会踩掉还没写回的输出寄存器（求值固定用
+        // %rax/%rcx/%rdx 当暂存）。
         let scratch = match saved_addr_reg {
             Some(r) => r,
-            None => match self.alloc_callee_saved() {
+            None => match self.alloc_writeback_scratch(out_mask) {
                 Some(r) => r,
                 None => return false,
             },
         };
-        let addr_ready = saved_addr_reg.is_some() || self.gen_lvalue_addr(expr, scratch);
+        let addr_ready = if saved_addr_reg.is_some() {
+            true
+        } else if let Some(off) = saved_addr_slot {
+            // 约定：地址在模板之前已按 8 字节落进该帧槽。
+            self.load_stack(scratch, off);
+            true
+        } else {
+            self.gen_lvalue_addr(expr, scratch)
+        };
         if !addr_ready {
             if saved_addr_reg.is_none() {
                 self.free_callee_saved(scratch);
@@ -1236,12 +1578,35 @@ impl Codegen {
         true
     }
 
+    /// 写回期的地址暂存号。
+    ///
+    /// 优先 `alloc_callee_saved`（池内号会进序言保存）；池满退到 caller-saved ——
+    /// 此时模板已经执行完，输入寄存器全部死亡，唯一要避开的是 `out_mask` 里
+    /// **还没写回的输出寄存器**（它们的值还得落盘）与 `register asm` 钉住的家。
+    fn alloc_writeback_scratch(&mut self, out_mask: u64) -> Option<u8> {
+        if let Some(r) = self.alloc_callee_saved() {
+            if r < 64 && out_mask & (1u64 << r) == 0 {
+                return Some(r);
+            }
+            self.free_callee_saved(r);
+        }
+        for r in [0u8, 1, 2, 6, 7, 8, 9, 10, 11] {
+            if out_mask & (1u64 << r) != 0 || self.reg_bank.is_pinned(r) {
+                continue;
+            }
+            return Some(r);
+        }
+        None
+    }
+
     pub(crate) fn writeback_asm_operand(
         &mut self,
         expr: &Expr,
         reg: u8,
         xmm_width: u8,
         saved_addr_reg: Option<u8>,
+        saved_addr_slot: Option<i64>,
+        out_mask: u64,
     ) {
         // 非 Ident 左值先走通用写回（原因与实测见 `writeback_asm_general_lvalue`）。
         // 必须放在最前面：下面每个分支都以 `Expr::Ident` 为前提，非 Ident 落进去就是
@@ -1249,7 +1614,14 @@ impl Codegen {
         // 的分支 —— 它们的宽度语义与 GP/SSE 两条不同，混进来只会让诊断变模糊。
         if !matches!(expr, Expr::Ident { .. })
             && matches!(xmm_width, 0 | 32 | 64 | 128)
-            && self.writeback_asm_general_lvalue(expr, reg, xmm_width, saved_addr_reg)
+            && self.writeback_asm_general_lvalue(
+                expr,
+                reg,
+                xmm_width,
+                saved_addr_reg,
+                saved_addr_slot,
+                out_mask,
+            )
         {
             return;
         }

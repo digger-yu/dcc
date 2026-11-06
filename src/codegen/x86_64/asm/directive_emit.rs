@@ -79,8 +79,21 @@ impl Codegen {
                 None => 0,
             };
         }
+        if std::env::var_os("DCC_TRACE_SKIP").is_some() {
+            eprintln!(
+                "[skip] measuring={} pos={} expr={}",
+                self.asm_measuring,
+                self.pos(),
+                count_expr
+            );
+        }
         let n = match self.eval_asm_label_expr(&count_expr) {
-            Some(v) => v.max(0) as usize,
+            Some(v) => {
+                if std::env::var_os("DCC_TRACE_SKIP").is_some() {
+                    eprintln!("[skip]   -> {v}");
+                }
+                v.max(0) as usize
+            },
             None => {
                 // 测距遍里算不出是正常的（那份实例故意不带测距表），静默按 0 字节；
                 // 不能走下面的报错路径——报错路径会往 .text 里留占位字节，
@@ -145,24 +158,14 @@ impl Codegen {
         Some(self.asm_text_pos(p))
     }
 
-    /// `asm_label_coord` 的整表版本，给只能拿 `&HashMap<String, u64>` 的数据求值路径用。
-    pub(crate) fn asm_label_coords(&self) -> HashMap<String, u64> {
-        let holes: Vec<(u64, u64)> = self
-            .pushsection_code_ranges
-            .iter()
-            .map(|(s, z, _, _)| (*s, s.saturating_add(*z)))
-            .collect();
-        self.labels
-            .iter()
-            .map(|(k, v)| {
-                let coord = match self.pushsection_label_offsets.get(k) {
-                    Some(&(_, off)) => off,
-                    None => Self::asm_text_pos_with_holes(*v, &holes),
-                };
-                (k.clone(), coord)
-            })
-            .collect()
-    }
+    // 这里曾有一个 `asm_label_coords()`：把 `labels` / `pushsection_label_offsets` /
+    // `pushsection_code_ranges` 折成一张 `HashMap<String, u64>`。它唯一的调用方是
+    // `emit_pushsection_data`——而那个函数是**逐行**执行的，于是每行 asm 都重建整张表，
+    // 复杂度 O(行数 × 标号数)。7.1 内核 `.vmlinux.export.c`（14 000 个导出符号、
+    // 5.6 万行 asm）因此卡了 20 分钟（perf：23% HashMap 重建 + 19% SipHash + 15% memcmp
+    // + 12% malloc）。现在标号差值一律走 `DeferredPushsectionFixup`，由上面那个
+    // 单标号入口在全部标号定义完之后逐个查（`resolve_deferred_pushsection_fixups`），
+    // 全表不再存在。
 
     /// 求一个可能带标签引用的表达式：先把标号名折成「它所在节里的坐标」，再走纯数求值。
     ///
@@ -190,11 +193,20 @@ impl Codegen {
                     out.push_str(&pos);
                     continue;
                 }
-                if let Some(v) = self.asm_skip_measure.get(word).copied().or_else(|| {
-                    self.labels
-                        .get(word)
-                        .and_then(|_| self.asm_label_coord(word))
-                }) {
+                // 已经定义过的标号一律用**本遍**的真实坐标：测距遍里前向标签未定义、
+                // 两条 `.skip` 都按 0 结算，整张测距表在「跳过后又跳过后」的标号上系统性偏小
+                // （实测嵌套 ALTERNATIVE：`772_1` 测距 2、真实 5，外层多垫 1 字节，
+                // objtool 报 `weirdly overlapping alternative! 8 != 6`）。测距表只对
+                // 本遍还没出现的前向引用兜底。
+                if let Some(v) = self
+                    .labels
+                    .get(word)
+                    .and_then(|_| self.asm_label_coord(word))
+                    .or_else(|| self.asm_skip_measure.get(word).copied())
+                {
+                    if std::env::var_os("DCC_TRACE_SKIP").is_some() {
+                        eprintln!("[skip]     {word} = {v}");
+                    }
                     out.push_str(&v.to_string());
                     continue;
                 }

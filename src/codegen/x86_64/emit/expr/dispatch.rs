@@ -3645,6 +3645,18 @@ impl Codegen {
                                         self.gen_expr(init, Self::EVAL_BASE);
                                         self.mov_to_stack(0, &v.name.name);
                                     }
+                                } else if matches!(init, Expr::CompoundLit { .. })
+                                    && matches!(
+                                        &v.ty,
+                                        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+                                    )
+                                {
+                                    // CompoundLit 值通道是**缓冲地址**（同 `gen_block_item`
+                                    // 与 `functions.rs` 顶层声明）：小尺寸 struct 也必须
+                                    // 整块拷贝，否则槽里是指针字节。
+                                    let dst_ty = v.ty.clone();
+                                    let dst_name = v.name.name.clone();
+                                    self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                                 } else if matches!(
                                     // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
                                     &v.ty,

@@ -753,7 +753,10 @@ impl Codegen {
         // `.byte 773b-771b` 两个端点都在 `.text`（扣掉可执行 pushsection 留在 `.text` 的
         // 洞），`.byte 775f-774f` 两个端点都在 `.altinstr_replacement`（用搬迁后的节内
         // 偏移）。`asm_label_coords` 一次把两种坐标折成同一张表。
-        let labels_adj: HashMap<String, u64> = self.asm_label_coords();
+        // 这里**不再**预先构造「全量标号坐标表」：唯一需要它的分支（`a - b` 两个标号
+        // 求差）已经改成一律延后结算，见 `parse_asm_data_expr` 里的注释。旧写法
+        // `let labels_adj = self.asm_label_coords();` 是**逐行**执行的，4 万节的
+        // `.vmlinux.export.o` 因此卡 20 分钟。
         match directive {
             // 数据 pushsection 里的 `.globl` / `.global`：名字必须进 `global_asm_exports`，
             // 否则 ELF 建表侧根本不知道要给下面那条标号发一条**定义**符号。实测
@@ -772,7 +775,6 @@ impl Codegen {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -804,7 +806,6 @@ impl Codegen {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -838,7 +839,6 @@ impl Codegen {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -870,13 +870,26 @@ impl Codegen {
             },
             ".quad" | ".8byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym, _deferred) = Self::parse_asm_data_expr(
+                    let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
                     );
+                    if let Some((left_label, right_label)) = deferred {
+                        // `.quad a - b`：两个标号都在本 TU 内时求差是**绝对值**，不产生
+                        // 重定位。旧写法把 deferred 丢掉，于是这类条目静默写成 0（GAS
+                        // 会算出差值），现在还它一个 8 字节延迟结算。
+                        let data_offset = self.extra_sections[sec_idx].data.len();
+                        self.deferred_pushsection_fixups
+                            .push(DeferredPushsectionFixup {
+                                sec_idx,
+                                data_offset,
+                                left_label,
+                                right_label,
+                                byte_size: 8,
+                            });
+                    }
                     if let Some((sym_name, _rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         // 字段宽 8 字节时不能沿用 `parse_asm_data_expr` 回的形状：它只看
@@ -1016,9 +1029,20 @@ impl Codegen {
         // 内容是编译器自己写的定长记录（8 字节函数指针数组），gcc 靠内容里的 `.align 8`
         // 抬对齐，dcc 没有那条伪指令，所以在这里保住「至少 8」——内核遍历
         // `__init_array_start..__init_array_end` 按 8 步进，对齐降到 1 会读坏。
-        // inline asm 的 `.pushsection/.section` 不走本入口，因此上面「默认对齐 1」对
-        // `.altinstructions` / `__ex_table` 这类记录节生效。
-        if !is_merge && self.extra_sections[idx].align < 8 {
+        //
+        // **但这条「至少 8」只能给那几族表**，不能无条件给所有自定义节：节对齐是对
+        // 内容对齐的声明，调用方随后会用变量自己的 `align` 抬（`codegen.rs` 的
+        // `align.max(align as u64)`）。无条件抬到 8 会把 `.data..percpu..hot..<小变量>`
+        // 的 `sh_addralign` 从 1/2/4 改成 8，而内核链接脚本是
+        // `*(SORT_BY_ALIGNMENT(.data..percpu..hot.*))`：排序按对齐降序，对齐一旦全部
+        // 拉平，就退回按名字排，`__per_cpu_hot_end - __per_cpu_hot_start` 从 59 变 72，
+        // `ASSERT(... <= 64, "percpu cache hot data too large")` 直接失败（实测 7.1 内核
+        // `ld .tmp_vmlinux1` 卡在这一条）。gcc 给 `int` 的 percpu 变量就是 align 4。
+        let ptr_table = matches!(
+            name,
+            ".init_array" | ".fini_array" | ".preinit_array" | ".ctors" | ".dtors"
+        );
+        if !is_merge && ptr_table && self.extra_sections[idx].align < 8 {
             self.extra_sections[idx].align = 8;
         }
         idx
@@ -1281,6 +1305,10 @@ impl Codegen {
                     4 => {
                         let bytes = (diff as u32).to_le_bytes();
                         data[fixup.data_offset..fixup.data_offset + 4].copy_from_slice(&bytes);
+                    },
+                    8 => {
+                        let bytes = (diff as u64).to_le_bytes();
+                        data[fixup.data_offset..fixup.data_offset + 8].copy_from_slice(&bytes);
                     },
                     _ => {},
                 }

@@ -2375,8 +2375,14 @@ pub(crate) fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, us
                 Type::Array(e, _) => e.base.clone(),
                 _ => return None,
             };
-            let idx = match idx_expr {
-                Expr::Int { v, .. } if *v >= 0 => *v as usize,
+            // 下标必须是编译期整数常量。此前只认 `Expr::Int` 字面量，于是
+            // `['l'] = {...}` / `[FOO_ENUM] = {...}` 这类字符常量或枚举常量
+            // 设计符被当成「解析失败」跳过，目标槽位保持 0。实测内核
+            // lib/vsprintf.c 的 `lookup_state['s']` 整张表全零，第一个
+            // printk 就在 format_decode 里报 unsupported format 并级联崩溃。
+            // const_eval 已覆盖 Char / 常量表达式 / 枚举常量，统一走它。
+            let idx = match const_eval::eval(idx_expr) {
+                Ok(v) if v >= 0 => v as usize,
                 _ => return None,
             };
             let elem_size = elem_ty.size();

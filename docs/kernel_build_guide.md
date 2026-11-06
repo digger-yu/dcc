@@ -41,7 +41,36 @@
    `CONFIG_OBJTOOL=y` 同样要求 `tools/objtool/**` 能被 dcc 编（它依赖 libelf 头文件与
    `list.h` 那一族宏）。
 
-## 当前进度（2026-10-28 → 2026-11-03）
+## 当前进度（2026-10-28 → 2026-11-06）
+
+**11-06 的六处缺陷**（PVH 启动从 `x86_64_start_kernel` 推进到 `early_ioremap_init` 期间逐个定位；
+前三条来自 printk / ALTERNATIVE / 内联 asm 写回，后三条来自启动链本体）：
+
+| 缺陷 | 现场 | 根因 | 修的位置与实证 |
+|------|------|------|----------------|
+| 指定初始化器下标是**常量移位表达式**时整项被丢弃 | 开机串口一个字符都没有；`_printk_rb_static_descs` 在 `.data` 里全零 | `kernel/printk/printk.c` 的 `_DEFINE_PRINTKRB()` 展开成 `[_DESCS_COUNT(descbits) - 1] = {...}`，`descbits` 是宏算术；dcc 只认字面量下标，非字面量分支 `continue` ⇒ 最后一个描述符 `state_var=0`，`get_desc_state()` 恒为 `desc_miss`，`prb_first_seq()` 首次 printk 时永远自旋 | `const_eval` 求下标表达式后回填。判据读 `.data` 里**最后一个元素**的三字段（`state_var=-8193`、`lpos={1,1}`），用例 `designated_array_index_const_shift_initializer_kept` |
+| 内联 asm 里 `(sym)(%rip)` 形式的内存操作数解析不出 | `lea (2f)(%rip), %reg`（`__WARN_bug_entry()`）被误当寄存器间接，`2f)(%rip` 解析失败 | `asm/operand.rs` 的括号分支只认 `(%reg)`；GAS 允许把符号包在括号里再跟 `(%rip)` | `operand.rs` 识别「首个括号组不是寄存器且紧跟 `(%rip)`」⇒ 按符号 PC32 处理。用例见 `asm/` 的 `(%rip)` 符号内存族 |
+| 寄存器类 asm 输出绑在**非 Ident 左值**上时静默丢写回 | `a[i]`/`*p`/`s.f` 四个档位全部丢值（gcc 是 5/7/9/11） | `writeback_asm_operand` 每个分支都以 `Expr::Ident` 为前提，其它形状直接 `return` | 写回统一走「左值地址预先算好再存」。用例 `asm_output_on_indexed_lvalue_is_written_back`（`-O0..-O3` 与 gcc 对拍） |
+| **`-mno-sse` 下 `float_in_st0` 把非浮点类型判成 st(0)**（调用结果不物化） | PVH 启动 `per_cpu_ptr(&cpu_stopper, task_cpu(task))`：`call task_cpu` 之后直接 `mov (%r11,%rcx,8),%r8`，`%rcx` 是调用前的垃圾 → CR2=垃圾；整树重编前 `early_ioremap_init` 的 `call early_ioremap_pmd` 后直接 `cmp %r8,%rbx`（缺 `mov %rax,%r8`）⇒ WARN 误触发 → oops | `special/x87_floating_point.rs::float_in_st0` 的兜底 `_ => !self.target.sse`：`-mno-sse` 下把整数/指针/聚合/向量全判成「结果在 st(0)」，`call.rs::gen_call_result_move` 的 `dst != 0 && !float_in_st0(ty)` 因此跳过 `mov dst, %rax` | 收窄成 `Float/Double => !sse, _ => false`。夹具 `per_cpu_call_index.c`（`table[pick()]` + volatile 函数指针），用例 `mno_sse_call_result_used_as_index_runtime`（`-O0/-O2 × -mno-sse`）。**注意**：这是语义层修复 ⇒ 所有旧 `.o` 必须重编 |
+| **`mov %segreg, %reg` (8C /r) 的 ModRM/REX 参数写反** | `text_poke_early` 里 `mov %%ss, %0` 被编成 `8c c2` = `mov %es,%edx`；随后 `iretq` 弹出错误 CS ⇒ QEMU `#GP(e=2020)`，异常打印再砸栈 | SDM 2B：**reg 字段 = Sreg，r/m 字段 = GPR**，REX.R = Sreg bit3、REX.B = GPR bit3。旧实现 `modrm_reg_reg(d, seg)` + `rex(.., d, 0, seg)` 两边全反 | `asm/enc_mov.rs` 8C 分支交换两处（读写两个方向现在同构）。用例 `asm_mov_seg_to_gpr_keeps_sreg_in_modrm_reg_field` 覆盖 es/cs/ss/ds/fs/gs 六段 × 精确字节 |
+| **`pushq $1f` 的 imm32 没有重定位** | `text_poke_early` 里是 `push $0x86dc`（`1:` 在本 TU 的节内偏移），`iretq` 从栈上弹出它当 CS/RIP ⇒ `#GP(e=2020)`、RSP 被弹成 `0xffffffffffffffa0` | `enc_mov.rs::emit_asm_push_sized` 只登记 `PendingJump{is_push_imm}`，`patch_local_jumps`/`resolve` 的回填直接写 `dst`（发射坐标）：既不加节基址也不发重定位；且未命中的分支用 `!p.is_push_imm` 把 ET_REL 降级通道挡在外面 | ET_REL 改发 `R_X86_64_32S`，符号取标签**最终所在节**的 STT_SECTION（`.text` 或被 pushsection 搬走的自定义节），addend = 节内偏移；未命中的外部符号同样发 32S（addend 0）；ET_EXEC 写 `entry + dst`。用例 `asm_push_local_label_emits_abs32_relocation` + `asm_push_local_label_exec_mode_uses_virtual_address` |
+
+**增量重编的方法**（编译器修一次就重编全树太贵，本轮的取舍）：
+
+* 语义层 / ABI 层 / 寄存器分配 / 值通道类修复（如 `float_in_st0`）会改变**任意** TU 的产物，
+  只能用 `scripts/kernel_purge_stale_objects.sh` 的默认判据（`.o` 早于 dcc 二进制 + gcc 回退）
+  清掉全树 `.o` 再 `make`；它不是 `make clean`，`include/generated`、宿主工具、`.config` 全部保留。
+* 编码层修复（如 8C 字段顺序、`push $label` 的重定位）用 `--insn <ERE>` 定向删：
+  判据是现有 `.o` 的反汇编里真有一条被修错的指令形状，而不是按头文件依赖推广。
+* 头文件里的内联汇编/宏修复用 `--deps <子串>`（如 `--deps include/asm/sync_core.h`）。
+* 定向重编的落点：`rm -f obj .obj.cmd` 后跑 `kernel_pvh_verify.sh --build`，只重编该 TU 并重链。
+
+**11-05 的两处启动链缺陷**（PVH 启动从 triple fault 一路推到用户空间时定位）：
+
+| 缺陷 | 现场 | 根因 | 修的位置与实证 |
+|------|------|------|----------------|
+| 控制寄存器/调试寄存器 `mov` 的 ModRM 字段与 REX 位全写反 | QEMU PVH 一进 64 位就 triple fault：`IP=0xffffffff8122fee9 RSP=0x80000151 CR2=0x80000151`；故障点在 `native_read_cr4`，反汇编是 `40 0f 20 c4 mov %cr0,%rsp` | SDM 2B 的 `0F 20/21/22/23` 是 **reg=CRn/DRn，r/m=GPR**；`enc_mov.rs` 两条方向都把两个字段与 `REX.R/REX.B` 写反 ⇒ `mov %cr4,%rax` 被发成 `mov %cr0,%rsp`，返回地址/栈指针当场被 CR0 覆盖 | `src/codegen/x86_64/asm/enc_mov.rs`：四个方向按 SDM 重写（REX.R = CR/DR 号 bit3，REX.B = GPR bit3）。实证：夹具四个方向（读/写 × CR/DR）与 `objdump` 逐条一致；快照用例 `ctrl_regs`（`tests/disasm_snapshots_x86_64/ctrl_regs/`） |
+| `-fstack-protector-strong` 被当成「所有函数都插」+ 忽略 `-mstack-protector-guard-symbol=` | 越过 `__startup_64` 后 `#DF`，`CR2=0x28`：`native_write_cr4` 里 `65 48 8b 04 25 28 00 00 00 mov %gs:0x28,%rax` 在 GS 基址=0 时读线性地址 0x28（调用栈 `native_write_cr4 ← x86_64_start_kernel`） | ① GCC 的 strong 判据只给「数组局部 / 取局部地址 / VLA」的函数插桩，`native_write_cr4()` 只有标量局部，GCC 不插；② 内核 x86_64 传 `-mstack-protector-guard-reg=gs -mstack-protector-guard-symbol=__ref_stack_chk_guard`，GCC 发 `%gs:sym(%rip)`（链接到 .data 的 `__stack_chk_guard`，GS 基址为 0 也能读），dcc 却固定发 `%gs:0x28` 绝对偏移 | `cli.rs` 区分 strong 并接 guard symbol；`Codegen::func_canary` 在 `compile_func` 入口按 strong 判据逐函数定；`emit_canary_load/emit_canary_check` 在 ET_REL + 有符号时发 `%gs:sym(%rip)` 并登记 `R_X86_64_PC32`。实证：夹具 `sp_strong.c` 与 gcc 对拍（scalar-only 不插、数组/取地址两形插），dcc 产物重定位 `__ref_stack_chk_guard-0x4` 与 gcc 同形；`arch/x86/kernel/cpu/common.o` 的 `native_write_cr4` 不再有 `%gs:0x28` |
 
 **11-03 的状态**：PVH 全树链已经走到 `vmlinux` 前的两个必经阶段（STUBCPY、modpost），各撞一个缺陷，均已修并各带一条集成用例；随后按「符号表修复影响每个 TU」的定义做了一次全量重编（build9，删掉全部 2987 个 `.o`）。三条修复：
 
@@ -853,6 +882,26 @@ bash .work_tmp/kwduppurge.sh --verify     # 重编后复查，命中应为 0
 ② 删 `.cmd` 后 Kbuild 会连带重编同目录其他依赖生成头的对象（本轮 209 个删除引发了接近全树的一轮重编）——
 这是代价，不是错误；真要控制它就不要删 `.cmd`，只删 `.o`。
 
+### 5.0c-2 定向作废的三个模式（`--deps` / `--src` / `--insn`）
+
+§5.0c 的判据已经进 `kernel_purge_stale_objects.sh`，按「命中集能不能从产物/命令行里完整判定」选：
+
+| 模式 | 判据 | 适用修复 | 代价 |
+|---|---|---|---|
+| `--deps <子串>` | `.o.cmd` 的 `deps_…` 清单里有该头文件 | 头文件里的宏/内联函数被改对 | 只跑 grep，秒级 |
+| `--src <子串>` | `.o.cmd` 里有该源文件路径 | 单个 TU 相关 | 同上 |
+| `--insn <ERE>` | `.o` 反汇编命中正则 | 编码层缺陷（产物里有可识别的坏指令形状） | 每个 `.o` 跑一次 objdump，千把个约一分钟 |
+
+三个都默认只算命中集、不叠加 mtime 判据；加 `--list` 先看清单再删。删完照 §5.0 第 3 步续跑。
+
+**命中集接近全树时不要硬做「定向」**：2026-11-05 的 parser 修复（inline asm 约束的相邻字面量
+拼接，见 §5.4 同日条目）命中判据是 `--deps arch/x86/include/asm/percpu.h`，实测 **2819/2986**
+个 TU 都 include 了它 —— 定向等于全量。这时的折中是「**先打通启动**」：只清启动路径可达的
+子系统（`arch/x86`、`init`、`kernel`、`mm`、`lib`、`fs`、`block`、`ipc`、`security`、`crypto`、`usr`、
+`drivers/{tty,base,acpi,firmware,pci,clocksource,irqchip,char,dma,iommu,virtio}`）共 1691 个 `.o`，
+其余目录留给清盘后的全新验证。边界写在 `.work_tmp/purge_core_objects.sh` 头部：
+`arch/x86/boot/*.o`（gcc 代编的 setup）与 `realmode/rmpiggy.o`（objcopy 产物）不能删，宿主工具整棵不碰。
+
 ### 5.0d 两棵树的身份必须拿证据判（删错树不会响，只会让后面的对照静默失效）
 
 工作区里有两棵同构的内核树：`/root/linux-7.1-dcc`（**目标树**，必须全程 dcc）与
@@ -1027,9 +1076,14 @@ AsmGoto/Invoke/EhLandingPad。最小复现 `.work_tmp/{mp_repro,se_static,se_aut
    是死支，里面调的是 `include/linux/pgtable.h:546` 的 `BUILD_BUG()` 占位实现
    ⇒ `undefined reference to 'pmdp_clear_flush_young'`。新增 `collapse_const_if_operand`，
    安全性与块级折叠同口径（条件挂着未解析的 `__builtin_constant_p` 时不动；条件本身需要
-   代码时原样留成一条语句）。同一机制还罩掉了 `drivers/md/dm.o` 的 `dax_get_private`/
-   `dm_zone_endio`、`drivers/iommu/generic_pt/fmt/iommu_amdv1.o` 的 `__pt_no_sw_bit`、
-   `net/mac80211/tx.o` 的 `__bad_mask` 与 `BUILD_BUG_ON`。
+   代码时原样留成一条语句）。同一机制罩掉的是 `drivers/iommu/generic_pt/fmt/iommu_amdv1.o`
+   的 `__pt_no_sw_bit` 与 `mm/rmap.o` 的 `pmdp_clear_flush_young`。
+
+   **订正**：本节原先还写着它「罩掉了 `drivers/md/dm.o` 的 `dax_get_private`/`dm_zone_endio`、
+   `net/mac80211/tx.o` 的 `__bad_mask` 与 `BUILD_BUG_ON`」—— 实测**没有**：build14（干净
+   重编到 `vmlinux.unstripped` 那一次）里这五个对象一条都没少。它们分别卡在四条互不相同的
+   否决链上（侧效应判据、轮次闸门、第二轮没有折常量、static 数据没有 DCE），修法与证据见
+   §5.0q。
 6. **`offsetof` 的下标不折叠**。`fold_expr` 没有 `Expr::Offsetof` 臂 ⇒
    `offsetof(struct __guc_ads_blob, engine_usage.engines[guc_class][ilog2(engine->logical_mask)])`
    里的 `ilog2()` 三元两条臂都发出来，产物同时引用 `__ilog2_u32` 与 `__ilog2_u64`
@@ -1474,6 +1528,172 @@ undefined reference）：
 ③ 拿 `readelf -r` 找 `map_one` 的真调用当作证据 —— 证据本身是对的，结论（「标号紧邻规则没跑」）
 是错的。
 
+### 5.0q 最后五个 TU 的陷阱引用：四条否决链 + 两条测试用例抓回来的回归（本轮）
+
+build14（`make clean` 后干净重编）一路编到 `vmlinux.unstripped` 链接，只剩五条未定义引用，
+每条都落在「`__always_inline` 没展开 ⇒ 多留一份外带副本 ⇒ 副本里的运行期条件折不掉 ⇒ 陷阱
+函数发进 `.text`」这同一个骨架里，但「展开卡在哪」各不相同：
+
+| 对象 | 符号 | 卡在哪 |
+|---|---|---|
+| `drivers/usb/host/pci-quirks.o` | `__bad_udelay` | 第二轮内联（`function_inline(module, 0)`）之后没人再折常量 |
+| `net/mac80211/{agg-rx,s1g,tx}.o` | `__bad_mask` | `expr_has_side_effects` 把 `-!!(e)` 判成有副作用 + 第二轮档位闸门 |
+| `net/mac80211/tx.o` | `BUILD_BUG_ON` | 宏实参同时出现在 `#` 与普通位置时的预处理口径（§见下） |
+| `drivers/md/dm.o` | `dax_get_private` | 没有「未引用 static 数据对象」的 DCE，`dm_dax_ops` 撑着整条 dax 链 |
+| `drivers/md/dm.o` | `dm_zone_endio` | `const_eval_through_comma` 对 `__builtin_expect` 一律答「要代码」 |
+
+#### 1. `expr_has_side_effects`：一元负号不是副作用
+
+`field_multiplier()` 的调用点写法是 `u32_encode_bits(v, GENMASK(…)`，而 `GENMASK` 里的
+`BUILD_BUG_ON_ZERO(e)` 展开成 `(int)sizeof(struct { int:(-!!(e)); })`。`semantics::
+expr_has_side_effects` 当时把 `Expr::Unary{op: Neg}` **一律**判成有副作用（判据从 x86_64
+后端搬来时带上的：浮点取负可能触发 fenv 异常），于是 `field_multiplier` 的整个实参被判
+「有副作用」⇒ 表达式内联否决 ⇒ 外带副本 ⇒ 副本体里的 `if (…) __bad_mask();` 是真代码。
+整数/指针取负不写内存、不调用、不陷阱，重复求值无害，所以判据收窄成「只有浮点/复数取负
+才算」。（证据：`.work_tmp/t_inl2.c`/`t_inl3.c`/`t_inl4.c` 三份夹具把变量逐个排除 —— 纯常量
+mask 干净、纯位运算 mask 干净、带 `__builtin_choose_expr` 干净，只剩 `-!!(e)`。）
+
+#### 2. 强制内联的档位闸门：只拦投机，不拦语义
+
+`__always_inline` 是**语义**要求（gcc 展不开直接报错），但两条通道都拿 `level < 2` 当闸门：
+`inline_forced_call_as_stmt_expr` 无条件拒，`try_static_inline_general` 函数头早退。而第二轮
+强制内联传的正是 `level = 0` ⇒ 上一轮内联**新生成**的 always_inline 调用（`field_mask` 展进
+caller 后露出的 `field_multiplier(field)`）再没人展开。改成「`level < 2` 只拒非
+`always_inline`」，并把深度闸门的判据移到拿到 `f` 之后（强制内联用 `INLINE_MAX_DEPTH_FORCED`
+那条线，不共享投机的 8 层）。
+
+#### 3. 第二轮内联之后没有任何表达式折法跑过
+
+`udelay(10)` 的形参经 `__inlN$_usec` 实体化，于是 `if (__inlN$_usec >= 20000)` 只能在
+`propagate_const_locals_in_conditions` 之后才能折成 `if (0)`；`X && 0` 要在 `fold_constants`
+里才能吸成 `(X, 0)`。这两个 pass 都只跑在第二轮内联**之前**。修法：内联完按同一顺序补跑
+`fold_constants` → `propagate_const_locals_in_conditions` → `fold_constant_branches` →
+`eliminate_unreachable`（全树唯一一处「同一 pass 在同一轮里跑两次」，理由写在调用点旁）。
+
+#### 4. 未引用的 static **数据**对象没人删
+
+`dcc` 只有「未引用 static 函数」的 DCE（`cross_function_dce`）。`drivers/md/dm.c` 的
+`static const struct dax_operations dm_dax_ops = {…}` 在一个函数指针表里插着，`CONFIG_DAX=n`
+时没有任何 `dax_get_private` 定义，但那个表没人读也没人删 ⇒ 初始化器里的三个 `dm_dax_*`
+函数被当成「被引用」保住 ⇒ 它们的体里再引用 `dax_get_private`。新增 `cross_variable_dce`
+（收集 asm 名字 + 全函数体/初始化器/文件级 asm 的 Ident 为引用集，`retain` 掉未被引用且
+没带 `used`/`retain`/`section`/`alias`/`copy_fn`/`asm_label`/`weak` 的 static 数据）。
+它必须排在 `cross_function_dce` **之前**（表没了，`dm_dax_*` 才轮到函数 DCE）。
+
+#### 5. `__builtin_expect(0,0)` 挡住了 `X && 0` 的定值吸收（以及它引出的回归）
+
+`const_eval_through_comma` 的第一道闸是 `discarded_value_needs_code`，它对**任何** `Call` 都
+答「要代码」，于是 `static_branch_unlikely(&zoned_enabled) && unlikely(bdev_is_zoned(…))`
+（`CONFIG_BLK_DEV_ZONED=n` 时右操作数是 0）折不成常量。改成
+`discarded_value_needs_code(e) && !dropping_value_is_safe(e)`：`dropping_value_is_safe` 只放行
+「`const_eval` 算得出常量、且实参各自也安全」的直接调用。
+
+**这条放宽当场造出一个回归，被测试用例抓住**：`dropping_value_is_safe` 里
+`__builtin_constant_p` 是「恒放行」（它的实参按定义不求值），而 `const_eval` 对
+`__builtin_constant_p(变量)` 只能答 0。于是
+`static int probe(int n) { return __builtin_constant_p(n); }` 被
+`fold_const_return_calls` 当成「返回常量 0 的桩」，所有 `probe(…)` 折成 0 ——
+用例 `builtin_constant_p_of_inline_temp_still_true` 从绿变红。修法：`const_eval_through_comma`
+开头先问 `expr_has_unresolved_constp(e)`，挂着未解析的 constp 就没有「值」（真正答案只能由
+`ipa_modref` 的 proven 局部表给，它跑在前面）。
+
+#### 6. `try_static_inline_general` 内部还有一道静默否决
+
+`inline_forced_call_as_stmt_expr` 已经因为「实参里的强制内联调用已由实参下探展开」而带上
+`allow_effectful_args=true`，但借道的 `try_static_inline_general` 里
+`if needs_rv && args.any(expr_has_side_effects) { return false; }` 不带这个语义，静默再拒一次
+（现场实参是 `__ffs(links)`）。形参临时量本来就是「每个实参求值一次、按声明从左到右」
+（C 的实参求值序本就是 unspecified，固定成这一种合法），展开前后求值次数逐字相同 ⇒ 把
+`allow_effectful_args` 透传进去，只在非强制通道保留旧闸门。
+
+#### 7. `rewrite_returns_to_dest` 用错了左值类型（第二条回归）
+
+`return <expr>;` 改写成 `<rv> = <expr>;` 时，左值类型照抄了**返回表达式的类型**。
+`char *scan(…) { … return scratch; }` 里 `scratch` 是 `char[16]` ⇒ 这次写入变成 16 字节聚合
+拷贝，`__inl$rv` 里躺的是字符串内容而不是它的地址（实测返回 `0x…656c70` = `"plain-te"`）。
+用例 `inliner_must_not_bind_address_of_parameter_to_caller_object` 在 -O2/-O3 报 rc=3。
+左值必须是**结果槽的声明类型**（callee 的 `f.ret_ty`），右值保持原类型（数组→指针的退化
+由既有赋值路径补）。这条以前不显形，是因为第二轮内联在 `level 0` 被闸门挡住，压根没走到
+这个改写；闸门一放开就暴露了。
+
+#### 8. 空 `.tdata`/`.tbss`：`SHF_EXCLUDE` 而不是 `SHT_NULL`
+
+只去掉 ALLOC 不够：ld 2.42 的 `--orphan-handling=error`（本配置
+`CONFIG_LD_ORPHAN_WARN_LEVEL=error`）仍然对 `init/main.o` 里的空 `.tdata`/`.tbss` 报
+`unplaced orphan section`。改成 `SHT_NULL` 能让 ld 看不见它们，但会破掉两条外部契约:
+固定节表要按名可见（`gnu_stack_note_section_matches_gas` 断言节号 6 叫 `.tbss`）、
+`.tdata` 必须是 `SHT_PROGBITS`（`tls_model_attr_fixture_lays_out_tbss_and_emits_tlsdesc_on_a64`）。
+最终做法：节类型与节名保持原样，空节带 `SHF_EXCLUDE`（`0x80000000`，GNU 扩展，bfd 的
+`lang_place_orphans` 会跳过 `SEC_EXCLUDE`）。
+
+#### 9. 预处理：`#`/`##` 与普通位置必须同时持有两种实参形态
+
+`BUILD_BUG_ON(cond)` 的 `cond` 既被 `#condition` 字符串化（要**原始** token），又要在断言里
+求值（要**已展开**的实参）。旧实现「只要宏体里出现过 `#`/`##` 就整份用原始文本」，于是普通
+位置的嵌套宏交给「当前宏已涂蓝」的重扫 ⇒ `BUILD_BUG_ON(...)` 原样留在预处理输出里，被
+当成函数调用发出未定义引用。改为 `find_normal_params` 先算「哪些形参出现在普通位置」，
+逐参数决定预展开，`substitute_params` 同时收 `raw_args`（给 `#`/`##`）与 `args`（给普通位置），
+可变参数两份拼法各留一份。
+
+复现与验证装置（本轮新增，均在 `scripts/`）：`dcc_kernel_tu.sh`（借某个对象的完整
+`savedcmd` 编自写夹具）、`repro_kbuild_tu.sh <build> <obj> [out]`（重放单个 kbuild TU，只改
+`-o`，构建树不动）。五个受害 TU 的 `nm -u` 现在都归零；`cargo test --release --test integration`
+1310 条通过。
+
+### 5.0r 每个函数都白开 880B 帧：向量临时带与 vector scratch 无条件预留（本轮已修）
+
+**症状不是“慢”，是栈不够用。** 11 月 4 日干净全量构建跑到 94 个 `CC` 时，拿 `objdump -d`
+抽样：`kernel/locking/qrwlock.o` 里连 `arch_atomic_read`（源码就一句 `__READ_ONCE(v->counter)`）
+都是
+```
+push %r13 ; mov %rsp,%r13 ; sub $0x390,%rsp      ← 912B
+… xor %eax,%eax ; mov $0x72,%rcx ; rep stos %rax,%es:(%rdi)   ← 还整帧清零
+```
+自足夹具把这条形状压到最小：`int f(const int *p){ return *(volatile const int*)p; }` 在
+`-O2 -fomit-frame-pointer -mno-red-zone -fstack-protector-strong -mcmodel=kernel` 下仍是
+`sub $0x380,%rsp`；`int h(int x){ return x+1; }` 是 `sub $0x370,%rsp`。**与 `-O` 档位、
+`-ftrivial-auto-var-init` 都无关**（两者去掉后数字一字不变）。
+
+用户态程序 8MB 栈，每帧多 800B 只是浪费；内核 `THREAD_SIZE` 16KB（`THREAD_SIZE_ORDER=1`），
+320B 与 880B 的差别就是「51 层」与「18 层」——`start_kernel` 的调用链十几层就见底，
+表现是启动早期 stack guard page 命中（`kernel stack overflow`）或随机踩坏相邻帧。
+
+**归因**：`abi/layout.rs::FramePlan::resolve` 的求和里有四条恒定项，只有它们能解释这个基线：
+
+| 项 | 值 | 真实需求 |
+|---|---|---|
+| `vec_reserve`（`vec_band_reserve(max_vec_bytes)`） | 恒 512 | 只有含向量类型的函数要 |
+| `stack_reserve`（`stack_reserve_bytes()`） | 128 + 48 | 48 是向量/bitcast 的 3 个 16B scratch |
+| `bf_rmw_reserve` | 64 | 只有出现位域 RMW 的函数要 |
+| `CX_FRAME_BAND` | 48 | 复数/16B 聚合 rvalue 物化带（`-frame_size + 8` 契约） |
+
+`vec_band_reserve` 的 `VEC_RESERVE.max(32*slot)` 对 `max_vec_bytes == 0` 也返回 512，
+所以「没有任何向量」的函数照样背 512；`vector_scratch` 同理。
+
+**改法（按需，不砍容量）**：
+1. `vec_band_reserve(0) == 0`。判据的可靠性来自 `LateNeed::max_vec_bytes` 的扫法：
+   `late_need_expr` 对**每个表达式节点**先 `late_need_type(&e.ty())`，再穷举 `Decl` 变体；
+   而 `vector_temp_base` 的每个调用点都在「类型是向量」的分支里（cast / rvalue /
+   复合字面量 / 成员）。于是 `max_vec_bytes == 0` ⟺ 本函数不可能走到 vec 槽。
+2. `stack_reserve_bytes()` 的 48 走同一判据（`max_vec_bytes == 0` 时归零）；128 保留
+   （那是「没有红区时替代红区」的余量，本轮没有找到它的消费者，不猜）。
+3. 兜底：`LayoutMap::vec_temp` 加断言 —— `vec_reserve == 0 && frame_size != 0` 时当场
+   报错。将来若出现「扫描漏了一种向量来源」，宁可构建期炸在这里，也不要静默把值写到
+   帧外。`unresolved()` 占位表 `frame_size == 0`，不参与本判据。
+
+**效果**：同一夹具 880B → 320B（`0x370` → `0x140`，省 512 + 48）。内核里 `semaphore.o` 的
+帧分布随之变成 61 个 `0x20`、5 个 `0x170`、3 个 `0x4c0`（大帧都是真带 1KB 局部数组的函数）。
+`bf_rmw_reserve` 64 与 `CX_FRAME_BAND` 48 本轮不动：前者要逐函数的位域 RMW 静态扫描，
+后者被 90 余处 `-frame_size + 8` 硬寻址依赖，收益小、爆炸半径大。
+
+**验证**：`cargo test --lib` 2600 条、`cargo test --release --test integration` 1310 条全过
+（`vec_band_reserve_keeps_slot_count_and_grows_only_for_wide_vectors` 里 `max=0` 的断言从
+「等于 512」改成「等于 0」，`8/16/32/64/256` 的格数约束不动）。
+
+**为什么没在 15:43 那轮暴露**：那轮只跑到链接期就停了（`vmlinux.unstripped` 前仍有未定义
+引用与 orphan 错误），从未启动过内核；帧大小属于“产物正确但资源账不对”，静态检查与
+`nm` 都看不到。
+
 ### 5.0b 旧版：靠 `make clean` 从 0 重跑（仅用于最后那一次可复现验证）
 
 Kbuild 的 `if_changed` 只比对**记录的命令行串**，而内核 TU 的命令行里写的是包装脚本路径
@@ -1569,6 +1789,8 @@ DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，且 QEMU 启动验
 | realmode 路径一刀切委托 gcc | 包装器曾按 `*/realmode/*` 整目录委托，把 64 位的 `arch/x86/realmode/init.c`（`.init.o.cmd` 里没有 `-m16`）也白送给了 gcc | ✅ **已修**（2026-10-28：删掉路径规则，只留 `-m16/-m32` 判据——26 个真 16 位 C 仍由 gcc 代编，`realmode/init.c` 回归 dcc；`kernel_purge_stale_objects.sh` 的排除同步收窄为 `realmode/rm/`、`rmpiggy.o` 与 `boot/` 顶层） |
 | 16 位 setup 代码（`arch/x86/boot/*.c`、`arch/x86/realmode/rm/*.c`） | dcc 只有 x86_64 后端，没有 `code16gcc` + `-mregparm=3` 的 16 位路径；这 26 个 C 文件是设计性例外，包装器按 `-m16/-m32` 委托 gcc 并留 `GCC-DELEGATE` 痕迹（不是缺陷，不做追踪） | ⚠️ **长期例外**（2026-10-28 复核：其余 64 位 TU 均已由 dcc 编） |
 | `~/.dcc/cache` 无限增长 | 全树单轮可涨到 38 GB / 44 万条目，且无目录环境变量与淘汰策略 | ⚠️ **未修**（本轮靠外部 `find ~/.dcc/cache -type f -mmin +30 -delete` 控住，已写进 §5.0；缓存是内容寻址，删任何条目只会多算不会错值，适合加容量上限淘汰） |
+| inline asm 约束的相邻字符串字面量未拼接（PVH 启动 #PF→triple fault） | 内核 `arch/x86/include/asm/percpu.h` 的 `__pcpu_reg_8(mod, x) → mod "r" (x)` 展开成 `"=" "r" (pfo_val__)`（两个相邻字面量，C 语义上要拼成 `"=r"`）。`parse_asm_operand_list` 只吃第一个字面量，第二个 `"r"(pfo_val__)` 被当函数调用解析 ⇒ 输出左值成 `Call{callee:"r"}`，`writeback_asm_operand` 的 Ident 分支静默丢写回，`pfo_val__` 读到从未写过的栈槽。现场：`head64.c` 的 `__native_tlb_flush_global(this_cpu_read(cpu_tlbstate.cr4))` 先 `mov %gs:(%r12),%rax` 再 `mov -0xe0(%r13),%rax` 覆盖 ⇒ CR4=0x80（缺 PAE）⇒ `native_write_cr4` 里 #PF→#DF→triple fault，QEMU 复位回 SeaBIOS | ✅ **已修**（2026-11-05：约束解析改成 `while TokKind::StringLit` 拼接，与 asm 模板字面量同一口径；用例 `asm_concat_string_literal_constraints_write_back` 用复刻内核宏的 `__reg8` 锁住写回。实测 `/tmp/tu.c` 与真实 `head64.o` 重编后均变为 `mov %rax,-0x50(%r13)` 写回，`xor $0x80` 前读到的是 percpu 真值） |
+| inline asm 的 `"m"`/`"+m"` 操作数在成员/下标表达式上取的是**值**而不是地址（PVH 启动 #PF→triple fault） | 内核 `arch/x86/include/asm/atomic.h::arch_atomic_inc` 是 `asm_inline volatile(LOCK_PREFIX "incl %0" : "+m" (v->counter) :: "memory")`。`asm_memory_operand_str` 对 `Member`/`Index` 走 `gen_expr`（右值约定=取值），于是 `lock incl %0` 展开成 `lock incl (%r12)`，而 r12 装的是 `css+0x58` 处的**计数器值**（现场 `movslq (%r12),%r12`），r12=0 ⇒ CR2=0 #PF。调用链 `start_kernel → cgroup_init_early → cgroup_init_subsys → online_css`，随后 97,281 次 #GP→#DF→triple fault 复位。另一个隐患：地址暂存号硬编码 `%r12` 且从不登记所有权，既不保存调用者的 r12，也能被别的操作数分到同号踩掉 | ✅ **已修**（2026-11-05：`Member`/`Index` 改走 `gen_lvalue_addr`；地址暂存号改为按操作数预分配 callee-saved 号（`alloc_asm_mem_scratch`，跳过本条 asm 的 GP clobber 名单）并在 `owned_gp` 快照之前登记，序言因此保存/恢复，多个内存操作数各得独立寄存器。用例 `asm_memory_operand_member_takes_address`。实测 `kernel/cgroup/cgroup.o` 重编后为 `add $0x58,%rax; mov %rax,%rbx; lock incl (%rbx)`，`%rbx/%r12` 均在序言/尾声保存恢复；`asm` 集成用例 162 通过） |
 
 ## 6. 调试技巧
 

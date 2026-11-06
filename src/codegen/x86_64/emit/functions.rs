@@ -203,6 +203,49 @@ impl Codegen {
         }
     }
 
+    /// `-fstack-protector-strong` 的逐函数准入判据（GCC `cfgexpand.c` 口径）。
+    ///
+    /// GCC 对 strong 的定义是「basic 的判据 + 数组局部 + 取局部地址」，不是
+    /// 「所有函数都插」：只有标量局部的函数（内核 `native_write_cr4()` 就是一例）
+    /// 不插桩。这不是加固口味问题 —— `x86_64_start_kernel()` 在本 CPU 的 GS 基址
+    /// 建立之前就调 `native_write_cr4()`，无条件插 canary 会在 `%gs:0x28` 上取线性
+    /// 地址 0x28，直接 #PF → #DF，PVH 启动卡在这里。
+    ///
+    /// 判据只取保守方向：漏插只会降低加固强度，不会改变语义；
+    /// - 数组局部 / 含 VLA 的局部（`Type::Array` 或 `has_vla()`）；
+    /// - 地址被取的局部/形参（`ast_gvn::addr_escaped_names` 的根名 ∩ 本函数绑定名）；
+    /// - 显式 `alloca` 调用本轮未收（同上，只影响加固强度）。
+    fn func_canary_needed(&self, f: &FuncDecl) -> bool {
+        if !self.target.stack_protector_strong {
+            // basic / all：保持原有「所有函数都插」的行为。
+            return true;
+        }
+        let Some(body) = &f.body else { return false };
+        if f.is_naked {
+            return false;
+        }
+        let mut locals = Vec::new();
+        Self::collect_local_decls(&body.items, &mut locals);
+        if locals
+            .iter()
+            .any(|v| matches!(v.ty, Type::Array(..)) || v.ty.has_vla())
+        {
+            return true;
+        }
+        let escaped = crate::ast_gvn::addr_escaped_names(body);
+        if escaped.is_empty() {
+            return false;
+        }
+        let mut bound: std::collections::HashSet<&str> =
+            locals.iter().map(|v| v.name.name.as_str()).collect();
+        for p in &f.params {
+            if let Some(pn) = &p.name {
+                bound.insert(pn.name.as_str());
+            }
+        }
+        escaped.iter().any(|n| bound.contains(n.as_str()))
+    }
+
     /// 给**没走 SSA**的函数挑一批热局部变量，让它们住进 callee-saved 号。
     ///
     /// 为什么需要：`VarDecl::home` 只有 SSA 分配器会写（`ssa::regalloc`），而
@@ -327,6 +370,9 @@ impl Codegen {
 
     pub fn compile_func(&mut self, f: &FuncDecl, prog: &Program) {
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
+        // 逐函数定 canary（见 `func_canary_needed`）：必须在任何发射之前算完，
+        // 序言（两处）、尾声、跳表基址判据都只读这一个读数。
+        self.func_canary = self.target.stack_protector && self.func_canary_needed(f);
         self.var_map.clear();
         // 段地址槽登记表是逐函数状态：不清就会把上一个函数的 `t = &gv` 广播到
         // 下一个函数的同名槽位（误发前缀 = 访存到错误的段）。
@@ -1147,16 +1193,9 @@ impl Codegen {
                 self.emit_zero_init_frame(self.frame_layout.frame_size);
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
-            if self.target.stack_protector && self.frame_layout.canary_fits() {
-                // mov rax, seg:[0x28]  → 加载 canary
-                // seg = fs (0x64) or gs (0x65) based on guard register
-                let seg_prefix = match self.target.stack_protector_guard_reg {
-                    crate::cli::StackGuardReg::Gs => 0x65u8,
-                    _ => 0x64u8, // Fs is default
-                };
-                self.emit_insn(&Insn::raw_bytes(&[
-                    seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00,
-                ]));
+            if self.func_canary && self.frame_layout.canary_fits() {
+                // mov rax, <guard> → 加载 canary（guard 的寻址形态见 `emit_canary_load`）
+                self.emit_canary_load();
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit_insn(&Insn::mov_rm_mem(
                     false,
@@ -1464,16 +1503,9 @@ impl Codegen {
                 self.emit_zero_init_frame(self.frame_layout.frame_size);
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
-            if self.target.stack_protector && self.frame_layout.canary_fits() {
-                // mov rax, seg:[0x28]  → 加载 canary
-                // seg = fs (0x64) or gs (0x65) based on guard register
-                let seg_prefix = match self.target.stack_protector_guard_reg {
-                    crate::cli::StackGuardReg::Gs => 0x65u8,
-                    _ => 0x64u8, // Fs is default
-                };
-                self.emit_insn(&Insn::raw_bytes(&[
-                    seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00,
-                ]));
+            if self.func_canary && self.frame_layout.canary_fits() {
+                // mov rax, <guard> → 加载 canary（guard 的寻址形态见 `emit_canary_load`）
+                self.emit_canary_load();
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit_insn(&Insn::mov_rm_mem(
                     false,

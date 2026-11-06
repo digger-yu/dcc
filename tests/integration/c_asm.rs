@@ -221,6 +221,87 @@ fn asm_register_planner_respects_fixed_gp_constraints() {
     );
 }
 
+/// 回归测试 (内核 PVH 启动 #PF): 约束字符串写成相邻字面量 `"=" "r" (v)`
+/// —— 内核 arch/x86/include/asm/percpu.h 的 `__pcpu_reg_8(mod, x) → mod "r" (x)`
+/// 就是这个形态。解析器只吃第一个字面量时，输出左值变成 `Call{callee:"r"}`，
+/// 写回被静默丢弃，`this_cpu_read()` 读到从未写过的栈槽：head64.c 里
+/// CR4 因此变成 0x80（缺 PAE），内核 triple fault 复位。
+#[test]
+#[cfg(unix)]
+fn asm_concat_string_literal_constraints_write_back() {
+    // `v` 初值 0：写回丢失时判定读到的就是 0，返回值必然为 1（确定性失败）。
+    // `__reg8` 复刻内核宏，让相邻字面量来自宏展开而不是源码里直接相邻。
+    let source = "\
+#define __reg8(mod, x) mod \"r\" (x)\n\
+int main(void) {\n\
+    long v = 0;\n\
+    long in = 5;\n\
+    asm volatile(\"lea 2(%1), %0\" : __reg8(\"=\", v) : __reg8(\"\", in));\n\
+    return v == 7 ? 0 : 1;\n\
+}\n";
+    let (out, exe) = run_compile_and_run("asm-concat-constraint", source);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().expect("run exe");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "asm 输出没有写回 `v`（相邻字面量约束被截断？）"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn asm_memory_operand_member_takes_address() {
+    // 回归测试 (内核 PVH 启动 triple fault): `"+m"(v->counter)` 的成员访问
+    // 必须取**地址**。旧实现走 `gen_expr`（右值/取值），于是 `lock incl (%r12)`
+    // 里的 r12 是计数器值时解引用到 NULL —— 内核 online_css 的
+    // atomic_inc(&css->online_cnt) 实测 CR2=0。
+    // 这里把计数器放在结构体第二字段（偏移 4）并以初值 41 驱动：取错地址会
+    // 写坏其它内存或崩掉，取对地址则 cnt 变 42。
+    let source = "\
+struct S { int pad; int cnt; };\n\
+int main(void) {\n\
+    struct S s = { 7, 41 };\n\
+    asm volatile(\"lock incl %0\" : \"+m\" (s.cnt) :: \"memory\");\n\
+    return (s.pad == 7 && s.cnt == 42) ? 0 : 1;\n\
+}\n";
+    let (out, exe) = run_compile_and_run("asm-mem-member-addr", source);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().expect("run exe");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "`\"+m\"(s.cnt)` 没有把地址交给 asm（成员被按值求值？）"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn asm_two_memory_operands_get_distinct_address_registers() {
+    // 两个内存操作数各自需要一个地址寄存器。旧实现把两者都硬编码成 `(%r12)`，
+    // 后算的那个会把先算的地址盖掉 —— 两个地址不同时就是静默写错位置。
+    let source = "\
+struct P { int a; int b; };\n\
+int main(void) {\n\
+    struct P src = { 0, 41 };\n\
+    struct P dst = { 0, 0 };\n\
+    asm volatile(\"movl %1, %%eax\\n\\tmovl %%eax, %0\"\n\
+                 : \"=m\" (dst.b) : \"m\" (src.b) : \"eax\", \"memory\");\n\
+    return (src.a == 0 && src.b == 41 && dst.a == 0 && dst.b == 41) ? 0 : 1;\n\
+}\n";
+    let (out, exe) = run_compile_and_run("asm-mem-two-operands", source);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().expect("run exe");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "两个内存操作数共享了地址寄存器（后者盖掉前者？）"
+    );
+}
+
 #[test]
 fn asm_constraint_type_mismatch_warns_float_gp_input() {
     let source = "int f(double x) { asm(\"\" : : \"r\"(x)); return 0; }\n";
@@ -1235,6 +1316,108 @@ fn asm_bare_seg_prefix_has_opcode_and_disassembly() {
         assert_bytes_present(&text, &bytes, label);
         assert_disasm_present(&disasm, label);
     }
+}
+
+/// `mov %sreg, %reg` (8C /r) 的 ModRM 必须把**段寄存器放在 reg 字段**、GPR 放在
+/// r/m 字段 (SDM 2B)。旧实现把两边写反: `mov %%ss, %0` 编成 `8C C2` —— 解码成
+/// `mov %es,%edx`, 读 SS 拿到 ES。现场是 arch/x86/include/asm/sync_core.h 的
+/// iret_to_self(): iretq 弹出错误 CS → QEMU 里 text_poke_early 报 #GP(e=2020)。
+/// 这里用 `=a` 把目标钉在 eax, 期望字节才是确定的。
+#[test]
+fn asm_mov_seg_to_gpr_keeps_sreg_in_modrm_reg_field() {
+    // (段名, ModRM) —— reg 字段 = 段号 (es=0,cs=1,ss=2,ds=3,fs=4,gs=5), rm = eax
+    for (seg, modrm) in [
+        ("es", 0xC0u8),
+        ("cs", 0xC8),
+        ("ss", 0xD0),
+        ("ds", 0xD8),
+        ("fs", 0xE0),
+        ("gs", 0xE8),
+    ] {
+        let source = format!(
+            "unsigned int rd(void) {{ unsigned int v; __asm__ volatile(\"mov %%{seg}, %0\" \
+             : \"=a\"(v)); return v; }}\n"
+        );
+        let (text, dump) = compile_legacy_asm_object(&format!("asm-mov-seg-{seg}"), &source);
+        assert_bytes_present(&text, &[0x8C, modrm], &format!("mov %{seg}, %eax"));
+        // objdump 的助记符与操作数之间是多个空格，只比操作数本身（寄存器对是判据：
+        // 写反时会成为别的段/别的 r/m，例如 `%es,%edx`）。
+        assert_disasm_present(&dump, &format!("%{seg},%eax"));
+    }
+}
+
+/// `pushq $1f` 的 imm32 是标签的**绝对地址**，ET_REL 产物必须发 R_X86_64_32S
+/// (符号 = .text 节符号, addend = 节内偏移)。旧实现直接写标签的发射坐标，既无
+/// 重定位也无节基址: 链接后 `push $0x86dc`，iretq 弹出垃圾 CS/RIP (同
+/// sync_core.h iret_to_self 现场)。
+#[test]
+fn asm_push_local_label_emits_abs32_relocation() {
+    let source = r#"
+void self_iret(void)
+{
+    __asm__ volatile("pushq $1f\n\t"
+                     "iretq\n\t"
+                     "1:\n\t" ::: "memory", "cc");
+}
+"#;
+    let (output, obj_path) = run_object_test("asm-push-local-label", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let dump = Command::new("objdump")
+        .args(["-dr"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump");
+    let _ = fs::remove_file(&obj_path);
+    assert!(dump.status.success(), "objdump -dr failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        disasm.lines().any(|l| l.contains("R_X86_64_32S") && l.contains(".text+")),
+        "push $1f 必须发 R_X86_64_32S 到 .text 节符号: {disasm}"
+    );
+    assert_disasm_present(&disasm, "iretq");
+}
+
+/// 同一构造在 ET_EXEC 下必须把 imm32 写成**运行期虚拟地址** (entry + 代码偏移)，
+/// 而不是节内偏移。函数不被调用，只验证产物字节与可执行性。
+#[test]
+fn asm_push_local_label_exec_mode_uses_virtual_address() {
+    let source = r#"
+void self_iret(void)
+{
+    __asm__ volatile("pushq $1f\n\t"
+                     "iretq\n\t"
+                     "1:\n\t" ::: "memory", "cc");
+}
+int main(void) { return 0; }
+"#;
+    let (out, exe) = run_compile_and_run_flags("asm-push-local-label-exec", source, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    let dump = Command::new("objdump")
+        .args(["-d"])
+        .arg(&exe)
+        .output()
+        .expect("objdump");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert!(dump.status.success(), "objdump -d failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        disasm.lines().any(|l| l.contains("push") && l.contains("$0x40")),
+        "ET_EXEC 下 push 目标应为 0x400000 段内绝对地址: {disasm}"
+    );
+    assert_eq!(rc, 0);
+}
+
+/// INVLPG 是 0F 01 /7：ModRM.reg 必须为 7。旧实现发 /1（SIDT），
+/// `native_flush_tlb_one_user` 在 fixmap 地址上会因 SIDT 的 10 字节写入 #PF。
+#[test]
+fn asm_invlpg_uses_group7_ext7() {
+    let source = "void flush_one(unsigned long a)\n{\n    __asm__ volatile(\"invlpg (%0)\" :: \"r\"(a) : \"memory\");\n}\n";
+    let (text, dump) = compile_legacy_asm_object("asm-invlpg-ext7", source);
+    assert_bytes_present(&text, &[0x0F, 0x01, 0x38], "invlpg (%rax)");
+    assert_disasm_present(&dump, "invlpg (%rax)");
 }
 
 /// .pushsection non-text section data collection (__bug_table, __ex_table)
@@ -3679,12 +3862,16 @@ int user_read(const int *p) { bar(); return probe((int *)p) + probe((int *)p); }
     let _ = fs::remove_file(&sp);
     let _ = fs::remove_file(&op);
 
-    // 反向判据：C 属性建的 8 字节定长记录节不得被降到 1。
+    // 反向判据：C 属性建的节必须跟随**内容自身**的对齐，不得被 inline asm 的
+    // 「默认 1」规则拖到 1。这里用 `long` 夹具：`.data..percpu` 的 sh_addralign
+    // 应当来自变量类型（8），不是节名，也不是固定 8 —— gcc 给 `int` 的 percpu
+    // 变量就是 4（内核 `SORT_BY_ALIGNMENT(.data..percpu..hot.*)` 依赖这个差别，
+    // 全抬到 8 会让 `__per_cpu_hot_end - __per_cpu_hot_start` 超 64）。
     fs::write(
         &sp,
-        "__attribute__((section(\".data..percpu\"), used)) int pcvar = 3;\n\
+        "__attribute__((section(\".data..percpu\"), used)) long pcvar = 3;\n\
          __attribute__((section(\".my_records\"), used)) long rec[2] = {1, 2};\n\
-         int use(void) { return pcvar + (int)rec[0]; }\n",
+         long use(void) { return pcvar + rec[0]; }\n",
     )
     .expect("write c-section fixture");
     let out2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -3704,6 +3891,9 @@ int user_read(const int *p) { bar(); return probe((int *)p) + probe((int *)p); }
         let c: Vec<&str> = l.split_whitespace().collect();
         let al: u64 = c[c.len() - 1].parse().unwrap_or(0);
         assert!(al >= 8, "{want} 是 8 字节定长记录节，对齐不得降到 1: {l}");
+        // 再加一条同轴的判据：`.my_records` 的 align 必须真的是 8（long 的自然对齐），
+        // 不是靠「无条件抬到 8」碰对的。
+        assert_eq!(al, 8, "{want} 的 sh_addralign 应等于内容自然对齐 8: {l}");
     }
     let _ = fs::remove_file(&sp);
     let _ = fs::remove_file(&op);

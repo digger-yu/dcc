@@ -1,7 +1,7 @@
 foo:
 push %r13
 mov %rsp,%r13
-sub $0x7f0,%rsp
+sub $0x5c0,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 mov %r14,-0x20(%r13)
@@ -669,14 +669,14 @@ mov -0x10(%r13),%rbx
 mov -0x18(%r13),%r12
 mov -0x20(%r13),%r14
 mov -0x28(%r13),%r15
-mov %r13,%rsp
+add $0x5c0,%rsp
 pop %r13
 ret
 <nop padding>
 main:
 push %r13
 mov %rsp,%r13
-sub $0x310,%rsp
+sub $0xe0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov $0x0,%eax
@@ -789,7 +789,7 @@ je <main>
 mov $0x1,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xe0,%rsp
 pop %r13
 ret
 movslq %ebx,%rax
@@ -809,6 +809,6 @@ jmp <main>
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xe0,%rsp
 pop %r13
 ret

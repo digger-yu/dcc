@@ -11,10 +11,12 @@ int test_immediate_constraint(void) {
 
 int test_address_constraint(void) {
     int x = 0;
-    int *p = &x;
-    asm volatile("mov $99, (%0)" : "=p"(p));
-    if (x != 99) return 2;
-    if (p != &x) return 3;
+    int *p = 0;
+    /* "=p" 输出操作数是一个地址值: asm 把 x 的地址写进 %0, 结束后写回 p.
+       旧写法 "mov $99, (%0)" 依赖输出寄存器里预先有 p 的地址, 而 GCC 对写输出
+       不做预装载 (-O2 下即为未定义行为), 也与我们自己的预装载语义相悖. */
+    asm volatile("lea %1, %0" : "=p"(p) : "m"(x));
+    if (p != &x) return 2;
     return 0;
 }
 

@@ -1,7 +1,7 @@
 muladd_f:
 push %r13
 mov %rsp,%r13
-sub $0x300,%rsp
+sub $0xd0,%rsp
 <nop padding>
 movss %xmm0,-0x48(%r13)
 movss %xmm1,-0x50(%r13)
@@ -22,14 +22,14 @@ movss (%rsp),%xmm0
 add $0x8,%rsp
 addss %xmm1,%xmm0
 <nop padding>
-mov %r13,%rsp
+add $0xd0,%rsp
 pop %r13
 ret
 <nop padding>
 muladd_d:
 push %r13
 mov %rsp,%r13
-sub $0x300,%rsp
+sub $0xd0,%rsp
 <nop padding>
 movsd %xmm0,-0x48(%r13)
 movsd %xmm1,-0x50(%r13)
@@ -50,14 +50,14 @@ movsd (%rsp),%xmm0
 add $0x8,%rsp
 addsd %xmm1,%xmm0
 <nop padding>
-mov %r13,%rsp
+add $0xd0,%rsp
 pop %r13
 ret
 <nop padding>
 recip:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 movsd %xmm0,-0x40(%r13)
 movsd 0x0(%rip),%xmm0
@@ -69,6 +69,6 @@ movsd (%rsp),%xmm0
 add $0x8,%rsp
 divsd %xmm1,%xmm0
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret

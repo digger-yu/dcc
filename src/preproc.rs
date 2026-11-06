@@ -245,8 +245,24 @@ struct BufferedDefine {
     new: Option<MacroDef>,
 }
 
+/// 头文件处理期间的 `#pragma pack` 状态快照。
+///
+/// 命中缓存时头文件文本不再被扫一遍, 其中的 `#pragma pack(...)` 也就不会被
+/// `handle_pragma_pack` 执行; 若不回放, `pack_history` 只留主文件那几条, 头文件里
+/// 用 `#pragma pack(1)` 声明的结构体会按默认对齐重新布局 (内核 acpi 的
+/// `struct acpi_table_fadt` 因此从 packed 0x114 变成 unpacked 0x148)。
+#[derive(Default, Debug, Clone)]
+struct PackCacheData {
+    /// 进入头文件时的完整 pack 栈 (校验用: 入栈状态不同则缓存不可复用)
+    entry_stack: Vec<Option<usize>>,
+    /// 处理期间新增的事件, 行号相对头文件首行输出 (0-based)
+    events: Vec<(u32, Option<usize>)>,
+    /// 退出头文件时的完整 pack 栈
+    exit_stack: Vec<Option<usize>>,
+}
+
 /// 头文件缓存内容: (guard 宏名, 宏列表, 依赖文件, (文件, hash), __COUNTER__ 消耗量,
-/// line_map 子区间 (相对 out_start, file, src_start, count))
+/// line_map 子区间 (相对 out_start, file, src_start, count), 身份宏读数, pack 状态)
 type MacroCacheData = (
     String,
     Vec<(String, MacroDef)>,
@@ -255,6 +271,7 @@ type MacroCacheData = (
     u32,
     Vec<(u32, String, u32, u32)>,
     Vec<(String, u64)>,
+    PackCacheData,
 );
 
 /// 每个 TU 都不一样、但**只有少数头文件会看**的「身份宏」。
@@ -4020,13 +4037,17 @@ impl Preprocessor {
                     counter_delta,
                     cached_line_spans,
                     cached_identity,
+                    cached_pack,
                 )) = self.load_from_cache(cp)
                 {
                     // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
                     // 身份宏读数校：条目记的几条读数必须仍等于本轮定义指纹——跳 TU 复用
                     // 能不能用就判在这里（没记任何读数的条目自然总是可复用）。
+                    // pack 栈入栈状态须一致: push/pop 的净效果依赖进入时的栈，
+                    // 不同则回放会算出与冷编译不同的对齐。
                     if self.cache_deps_fresh(&cached_deps)
                         && self.identity_reads_match(&cached_identity)
+                        && cached_pack.entry_stack == self.pack_stack
                     {
                         // 缓存命中: 直接使用缓存的预处理输出和宏
                         self.push_out(&format!("/* #include \"{}\" (cached) */\n", path));
@@ -4085,9 +4106,15 @@ impl Preprocessor {
                         }
                         // 本条输出嵌进了哪些身份宏的值：并入本层，让父条目也继承这条依赖。
                         self.adopt_identity_reads(&cached_identity);
-                        // 缓存输出内嵌了创建时的 __COUNTER__ 值;
-                        // 回放消耗量, 使后续展开的计数器与冷缓存运行一致
+                        // 回放 __COUNTER__ 消耗量, 使后续展开的计数器与冷缓存运行一致
                         self.counter = self.counter.wrapping_add(counter_delta);
+                        // 回放 #pragma pack 事件: 头文件文本没有被重新扫描, 其中的
+                        // pack 指令只能靠这里补进 pack_history, 否则 packed 结构体
+                        // 会按默认对齐布局 (见 PackCacheData 注释)。
+                        for (rel, pack) in cached_pack.events {
+                            self.record_pack_event(cached_out_start + rel, pack);
+                        }
+                        self.pack_stack = cached_pack.exit_stack;
                         return;
                     }
                 }
@@ -4107,6 +4134,10 @@ impl Preprocessor {
         // 记录处理前的 line_map / 输出行数, 用于收集本头文件产生的子区间
         let line_map_before = self.line_map.len();
         let out_lines_before = self.out_lines;
+        // 记录处理前的 pack 栈/历史长度: 处理期间新增的 pack 事件要相对化后落缓存,
+        // 命中时才能按新的输出起点回放 (行号相对头文件首行输出)。
+        let pack_stack_before = self.pack_stack.clone();
+        let pack_hist_before = self.pack_history.len();
         // 记录当前宏表快照 (含值), 用于后续提取该头文件对宏表的
         // 变更集 (新增 + 重新定义 + #undef 删除)。仅记录新增会
         // 丢失覆盖定义 — 如 stddef.h 把内置 NULL 重新定义为内核
@@ -4190,6 +4221,18 @@ impl Preprocessor {
                 let Some(identity_reads) = self.take_identity_for_save() else {
                     return;
                 };
+                // 处理期间的 pack 事件相对化到「头文件首行输出」, 命中回放时
+                // 用 cached_out_start + rel 还原; 退出栈整份保存以恢复 push/pop 深度。
+                let pack_cache = PackCacheData {
+                    entry_stack: pack_stack_before,
+                    events: self.pack_history[pack_hist_before..]
+                        .iter()
+                        .map(|(line, pack)| {
+                            (line.saturating_sub(out_lines_before + 1), *pack)
+                        })
+                        .collect(),
+                    exit_stack: self.pack_stack.clone(),
+                };
                 self.save_to_cache(
                     cp,
                     &new_output,
@@ -4199,6 +4242,7 @@ impl Preprocessor {
                     counter_delta,
                     &cached_line_spans,
                     &identity_reads,
+                    &pack_cache,
                 );
             }
         }
@@ -4631,24 +4675,30 @@ impl Preprocessor {
         // 记录到 pack_history, 供 parser 按位置查询
         // out_line 是当前输出 (预处理后) 的行号, 与 parser 的 lex.line 对齐
         let current_out_line = if line_no > 0 { line_no } else { self.count_out_lines() };
-        if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
-            // 计算当前输出已经写入的行数
-            let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
-            // 记录条件:
-            // 1. 行号严格递增 → 正常记录
-            // 2. 同行号但新值为 None (pack 重置) → 覆盖前一条,
-            //    解决 #pragma pack(1) 和 #pragma pack() 之间无输出
-            //    导致重置被丢弃的问题 (如 ACPI 头文件).
-            if current_out_line > prev_last || (current_out_line == prev_last && new_pack.is_none())
-            {
-                // 同行号重置: 覆盖前一条 (pack(1) → 等效为无操作)
-                if current_out_line == prev_last {
-                    if let Some(last) = self.pack_history.last_mut() {
-                        *last = (current_out_line, new_pack);
-                    }
-                } else {
-                    self.pack_history.push((current_out_line, new_pack));
+        self.record_pack_event(current_out_line, new_pack);
+    }
+
+    /// 把一条 pack 变更记入 `pack_history`（按行号去重/覆盖规则）。
+    ///
+    /// 冷编译与缓存回放共用同一口径:
+    /// 1. 行号严格递增 → 正常记录;
+    /// 2. 同行号但新值为 None (pack 重置) → 覆盖前一条, 解决
+    ///    `#pragma pack(1)` 与 `#pragma pack()` 之间无输出导致重置被丢弃
+    ///    (如 ACPI 头文件);
+    /// 3. 值未变化 → 不记。
+    fn record_pack_event(&mut self, current_out_line: u32, new_pack: Option<usize>) {
+        if self.pack_history.last().map(|(_, p)| *p) == Some(new_pack) {
+            return;
+        }
+        let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
+        if current_out_line > prev_last || (current_out_line == prev_last && new_pack.is_none()) {
+            // 同行号重置: 覆盖前一条 (pack(1) → 等效为无操作)
+            if current_out_line == prev_last {
+                if let Some(last) = self.pack_history.last_mut() {
+                    *last = (current_out_line, new_pack);
                 }
+            } else {
+                self.pack_history.push((current_out_line, new_pack));
             }
         }
     }
@@ -5528,25 +5578,34 @@ impl Preprocessor {
                             self.expanded_macros.borrow_mut().insert(ident.to_string());
                             self.macro_expand_count += 1;
                             let raw_args = self.parse_macro_args(bytes, &mut j);
-                            // 确定哪些参数被 # 或 ## 操作 (这些参数不预展开)
-                            let (stringify_params, paste_params) =
-                                self.find_special_params(&def.body, params);
-                            // 参数预展开: 未被 # / ## 引用的参数先展开。
+                            // 实参在宏体里的两种形态（C11 6.10.3.1/6.10.3.2）：
+                            //   * `#param` / `##` 的操作数 —— 用**原始** token，不预展开；
+                            //   * 普通位置 —— 用**已展开**的实参。
+                            // 同一参数可以同时出现在两种位置（内核 `BUILD_BUG_ON` 的
+                            // `condition` 既被 `#condition` 字符串化又要在断言里求值），
+                            // 所以两份必须并存。旧实现「只要出现过 # 就整份用原始文本」
+                            // 会把普通位置的嵌套宏交给「当前宏已涂蓝」的重扫，于是
+                            // `BUILD_BUG_ON(...)` 原样留在预处理输出里，被当成函数调用发
+                            // 出未定义引用。
+                            let normal_params = self.find_normal_params(&def.body, params);
+                            // 参数预展开：只展开「出现在普通位置」的参数（只被 # / ##
+                            // 使用的参数预展开会白耗 `__COUNTER__`，标准也不要求）。
                             // 必须继承当前 disabled（涂蓝）集，否则 F(F(1))
                             // 这类嵌套会在参数预展开时丢掉外层禁令而无限递归。
                             let mut expanded_args: Vec<String> = Vec::with_capacity(raw_args.len());
                             for (idx, arg) in raw_args.iter().enumerate() {
-                                if stringify_params.contains(&idx) || paste_params.contains(&idx) {
-                                    expanded_args.push(arg.clone());
-                                } else {
+                                if normal_params.contains(&idx) {
                                     expanded_args.push(self.expand_with_disabled(
                                         arg,
                                         disabled,
                                         LineMap::Scalar(map.line(nl)),
                                     ));
+                                } else {
+                                    expanded_args.push(arg.clone());
                                 }
                             }
-                            // 可变参数处理
+                            // 可变参数处理（原始形态与展开形态各拼一份）
+                            let mut final_raw_args = raw_args.clone();
                             let mut final_args = expanded_args.clone();
                             if def.variadic {
                                 // 最后一位是可变参数 (__VA_ARGS__ 或 GNU 命名)
@@ -5571,6 +5630,14 @@ impl Preprocessor {
                                     };
                                     normal.push(va_text);
                                     final_args = normal;
+                                    let mut raw_normal =
+                                        raw_args[..fixed.min(raw_args.len())].to_vec();
+                                    raw_normal.push(if raw_args.len() > fixed {
+                                        raw_args[fixed..].join(", ")
+                                    } else {
+                                        String::new()
+                                    });
+                                    final_raw_args = raw_normal;
                                 }
                             }
                             if final_args.len() == params.len() {
@@ -5587,6 +5654,7 @@ impl Preprocessor {
                                 let substituted = self.substitute_params(
                                     &def.body,
                                     params,
+                                    &final_raw_args,
                                     &final_args,
                                     def.variadic,
                                 );
@@ -5633,6 +5701,7 @@ impl Preprocessor {
                                     &def.body,
                                     params,
                                     &raw_args,
+                                    &raw_args,
                                     def.variadic,
                                 );
                                 let mut new_disabled = disabled.clone();
@@ -5651,8 +5720,8 @@ impl Preprocessor {
                                 // 补齐第二个参数为 "0"，对 __builtin_va_start 无影响。
                                 let mut args = raw_args.clone();
                                 args.push("0".to_string());
-                                let substituted =
-                                    self.substitute_params(&def.body, params, &args, def.variadic);
+                                let substituted = self.substitute_params(
+                                    &def.body, params, &args, &args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.to_string());
                                 let rescanned = self.expand_with_disabled(
@@ -5685,6 +5754,7 @@ impl Preprocessor {
                                 let substituted = self.substitute_params(
                                     &def.body,
                                     params,
+                                    &empty_args,
                                     &empty_args,
                                     def.variadic,
                                 );
@@ -5854,37 +5924,88 @@ impl Preprocessor {
         result
     }
 
-    /// 找出哪些参数被 # 或 ## 引用 (这些参数不做预展开)
-    fn find_special_params(&self, body: &str, params: &[String]) -> (Vec<usize>, Vec<usize>) {
-        let mut stringify = vec![];
-        let mut paste = vec![];
-        // 检查 #: # param
+    /// 找出哪些参数在**普通位置**出现过（既不是 `#param` 的操作数，也不是 `##`
+    /// 的操作数）。
+    ///
+    /// 只有这些参数需要按标准预展开：`#`/`##` 用的那一份必须是原始 token，而
+    /// 普通位置的嵌套宏必须现在就展开——等替换体重新扫描时，当前宏已经进了
+    /// 禁用集（paint blue），嵌在里面的同名宏（`__BUILD_BUG_ON_NOT_POWER_OF_2`
+    /// 里的 `BUILD_BUG_ON`）就再也不会展开。
+    ///
+    /// 旧实现用的是子串匹配（`body.contains("# param")`），既分不清
+    /// 「只被 # 用」与「两种位置都用」，也分不清 `#` 与 `##`。这里改成先切 token
+    /// 再判位置；字符串字面量整体算一个 token（里面的 `#` 不是字符串化算子）。
+    fn find_normal_params(&self, body: &str, params: &[String]) -> Vec<usize> {
+        let toks = Self::macro_body_tokens(body);
+        let mut normal = vec![];
         for (idx, param) in params.iter().enumerate() {
-            let p1 = format!("# {}", param);
-            let p2 = format!("#{}", param);
-            if body.contains(&p1) || body.contains(&p2) {
-                stringify.push(idx);
-            }
-        }
-        // 检查 ##: param ## 或 ## param
-        for (idx, param) in params.iter().enumerate() {
-            // 简单检查: 参数名两侧是否有 ##
-            let patterns = [
-                format!("{} ##", param),
-                format!("{}##", param),
-                format!("## {}", param),
-                format!("##{}", param),
-            ];
-            for pat in &patterns {
-                if body.contains(pat.as_str()) {
-                    if !paste.contains(&idx) {
-                        paste.push(idx);
-                    }
+            for (i, t) in toks.iter().enumerate() {
+                if t != param {
+                    continue;
+                }
+                let prev_hash = i > 0 && (toks[i - 1] == "#" || toks[i - 1] == "##");
+                let next_paste = i + 1 < toks.len() && toks[i + 1] == "##";
+                if !prev_hash && !next_paste {
+                    normal.push(idx);
                     break;
                 }
             }
         }
-        (stringify, paste)
+        normal
+    }
+
+    /// 把宏体切成 token（标识符/数字/字符串或字符字面量/`#`/`##`/其它单字符）。
+    /// 只需要区分「`#` 算不算算子」，不需要完整的翻译阶段 3。
+    fn macro_body_tokens(body: &str) -> Vec<String> {
+        let b = body.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c.is_ascii_whitespace() {
+                i += 1;
+                continue;
+            }
+            if c == b'"' || c == b'\'' {
+                let q = c;
+                let start = i;
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == q {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                out.push(body[start..i].to_string());
+                continue;
+            }
+            if c == b'#' {
+                if i + 1 < b.len() && b[i + 1] == b'#' {
+                    out.push("##".to_string());
+                    i += 2;
+                } else {
+                    out.push("#".to_string());
+                    i += 1;
+                }
+                continue;
+            }
+            if c.is_ascii_alphanumeric() || c == b'_' {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                    i += 1;
+                }
+                out.push(body[start..i].to_string());
+                continue;
+            }
+            out.push((c as char).to_string());
+            i += 1;
+        }
+        out
     }
 
     fn parse_macro_args(&self, bytes: &[u8], pos: &mut usize) -> Vec<String> {
@@ -5965,6 +6086,7 @@ impl Preprocessor {
         &self,
         body: &str,
         params: &[String],
+        raw_args: &[String],
         args: &[String],
         variadic: bool,
     ) -> String {
@@ -5998,10 +6120,11 @@ impl Preprocessor {
                 body = Self::handle_va_opt(&body, va_empty);
             }
         }
-        // 第一步: 处理 # (字符串化) — 必须在 ## 之前, 否则参数名被替换后 # 找不到模式
-        let result = self.handle_stringify(&body, params, args);
-        // 第二步: 处理 ## (令牌拼接)
-        let result = self.handle_paste(&result, params, args, variadic);
+        // 第一步: 处理 # (字符串化) — 按标准用**原始**实参 token（stringify_arg 自己
+        // 负责去掉多余空白）；必须在 ## 之前, 否则参数名被替换后 # 找不到模式
+        let result = self.handle_stringify(&body, params, raw_args);
+        // 第二步: 处理 ## (令牌拼接) — 同样用**原始**实参 token
+        let result = self.handle_paste(&result, params, raw_args, variadic);
         // 第三步: 普通参数替换（单次扫描，实参视为不透明，避免 *d 被二次替换成 **d）
         let mut result = result;
         result = Self::replace_all_params(&result, params, args);
@@ -8843,8 +8966,8 @@ impl Preprocessor {
         let content = fs::read_to_string(cache_path).ok()?;
         let mut lines = content.lines();
     
-        // 第一行: 标记（V8：多了 IDREAD 段，旧条目直接当 miss）
-        if lines.next()? != "DCC_CACHE_V8" {
+        // 第一行: 标记（V9：多了 PACK 段，旧条目直接当 miss）
+        if lines.next()? != "DCC_CACHE_V9" {
             return None;
         }
     
@@ -8930,6 +9053,32 @@ impl Preprocessor {
             }
         }
 
+        // PACK 段: 头文件处理期间的 #pragma pack 状态。
+        // ENTRY\t<栈顶 n|-> 后跟 EVENTS 段 (<rel>\t<n|-> 逐行) 与 STACK 段 (<n|-> 逐行)。
+        let mut pack = PackCacheData::default();
+        if lines.next()? != "PACK" {
+            return None;
+        }
+        let entry_line = lines.next()?;
+        pack.entry_stack = Self::parse_pack_stack(entry_line.strip_prefix("ENTRY\t")?)?;
+        if lines.next()? != "EVENTS" {
+            return None;
+        }
+        for line in lines.by_ref() {
+            if line == "END_EVENTS" {
+                break;
+            }
+            let (rel, val) = line.split_once('\t')?;
+            pack.events
+                .push((rel.trim().parse().ok()?, Self::parse_pack_value(val)?));
+        }
+        for line in lines.by_ref() {
+            if line == "END_PACK" {
+                break;
+            }
+            pack.exit_stack.push(Self::parse_pack_value(line)?);
+        }
+
         // 读取宏定义
         let mut macros = Vec::new();
         for line in lines {
@@ -8972,7 +9121,43 @@ impl Preprocessor {
             counter_delta,
             line_spans,
             identity,
+            pack,
         ))
+    }
+
+    /// 解析缓存里的 pack 值: `-` 表示 None (默认对齐), 其余为十进制对齐。
+    fn parse_pack_value(s: &str) -> Option<Option<usize>> {
+        let s = s.trim();
+        if s == "-" {
+            Some(None)
+        } else {
+            s.parse::<usize>().ok().map(Some)
+        }
+    }
+
+    /// 解析 pack 栈: 逗号分隔的 `-`/十进制值, 空串表示空栈。
+    fn parse_pack_stack(s: &str) -> Option<Vec<Option<usize>>> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut stack = Vec::new();
+        for part in s.split(',') {
+            stack.push(Self::parse_pack_value(part)?);
+        }
+        Some(stack)
+    }
+
+    /// 序列化 pack 栈 (与 `parse_pack_stack` 对称)。
+    fn format_pack_stack(stack: &[Option<usize>]) -> String {
+        stack
+            .iter()
+            .map(|p| match p {
+                Some(n) => n.to_string(),
+                None => "-".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8986,8 +9171,9 @@ impl Preprocessor {
         counter_delta: u32,
         line_spans: &[(u32, String, u32, u32)],
         identity: &[(String, u64)],
+        pack: &PackCacheData,
     ) {
-        let mut content = String::from("DCC_CACHE_V8\n");
+        let mut content = String::from("DCC_CACHE_V9\n");
         content.push_str(&format!("COUNTER_DELTA\t{}\n", counter_delta));
         // 本条输出真读到过的身份宏（名字 + 当时定义指纹），命中时逐项校。
         content.push_str("IDREAD\n");
@@ -9012,6 +9198,27 @@ impl Preprocessor {
             content.push_str(&format!("{}\t{}\t{}\t{}\n", rel, file, src_start, count));
         }
         content.push_str("END_LINESPANS\n");
+        // PACK 段: 命中时据此重建 pack_history 并恢复 pack 栈深度。
+        content.push_str("PACK\n");
+        content.push_str(&format!(
+            "ENTRY\t{}\n",
+            Self::format_pack_stack(&pack.entry_stack)
+        ));
+        content.push_str("EVENTS\n");
+        for (rel, val) in &pack.events {
+            match val {
+                Some(n) => content.push_str(&format!("{}\t{}\n", rel, n)),
+                None => content.push_str(&format!("{}\t-\n", rel)),
+            }
+        }
+        content.push_str("END_EVENTS\n");
+        for val in &pack.exit_stack {
+            match val {
+                Some(n) => content.push_str(&format!("{}\n", n)),
+                None => content.push_str("-\n"),
+            }
+        }
+        content.push_str("END_PACK\n");
 
         for (name, def) in macros {
             // 格式: NAME\tPARAMS\tVARIADIC\tBODY
@@ -10980,6 +11187,71 @@ n\
         // 断言空过。缓存目录由 `init_cache_dir` 惰性创建, 所以只能在事后查。
         let cache_dir = dir.join("home").join(".dcc").join("cache");
         assert!(cache_dir.is_dir(), "缓存根注入失效: {} 不存在", cache_dir.display());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// include 缓存命中时必须回放 `#pragma pack` 历史。
+    ///
+    /// 命中缓存时头文件文本不再被扫描, 其中的 `#pragma pack(1)` 不会被
+    /// `handle_pragma_pack` 执行; 若不回放, `pack_history` 只剩主文件那几条,
+    /// 头文件里的 packed 结构体会按默认对齐布局 (内核 ACPI 的
+    /// `struct acpi_table_fadt` 因此从 0x114 变 0x148, memset 溢出清掉
+    /// `acpi_gbl_root_table_list`)。
+    #[test]
+    fn include_cache_replays_pragma_pack_history() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_cache_pack_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hdr = dir.join("packed.h");
+        fs::write(
+            &hdr,
+            "#pragma pack(1)\nstruct P { char c; int i; };\n#pragma pack()\n",
+        )
+        .unwrap();
+        let src = "#include \"packed.h\"\nint p_size(void) { return sizeof(struct P); }\n";
+        let _cache_root = set_cache_root(&dir.join("home"));
+        let mut histories = Vec::new();
+        for i in 0..2 {
+            let out = preprocess(
+                src.as_bytes(),
+                "cache-pack.c",
+                std::slice::from_ref(&dir),
+                &[],
+                &[],
+                &[],
+                &[],
+                StdMode::Gnu11,
+                &[],
+                false,
+                &PchOptions::default(),
+                false,
+                false,
+                &crate::cli::TargetTriple::host(),
+                &[],
+                128,
+                false,
+                false, // warn_undef
+                0,     // opt_level
+            );
+            let cached = out.text.contains("(cached)");
+            assert_eq!(cached, i == 1, "run {i}: 缓存命中状态不符 (第二遍应命中)\n{}", out.text);
+            assert!(
+                out.pack_history.iter().any(|(_, p)| *p == Some(1)),
+                "run {i}: pack_history 丢了头文件里的 pack(1): {:?}",
+                out.pack_history
+            );
+            histories.push(out.pack_history.clone());
+        }
+        assert_eq!(histories[0], histories[1], "冷/热缓存的 pack_history 不一致");
+        let cache_dir = dir.join("home").join(".dcc").join("cache");
+        assert!(
+            fs::read_dir(&cache_dir)
+                .map(|mut rd| rd.next().is_some())
+                .unwrap_or(false),
+            "{} 里无缓存条目 —— 缓存未启用, 本用例的命中断言将空过",
+            cache_dir.display()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

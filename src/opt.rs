@@ -268,6 +268,22 @@ pub fn optimize_with_full_target(
         function_inline(module, 0);
         dump_after_pass("function_inline#2", module);
     }
+    // 第二轮内联（或它之前的代回）新造的常量形状**没有任何表达式折法看过**：
+    //   * `udelay(10)` 的形参经 `__inlN$_usec` 实体化，于是
+    //     `if (__inlN$_usec >= 20000)` 只能在 `propagate_const_locals_in_conditions`
+    //     之后才能折成 `if (0)`；
+    //   * `X && 常量桩(0)` 要在 `fold_constants` 的 `fold_expr` 里才能吸成
+    //     `(X, 0)`（内核 `static_branch_unlikely(&zoned_enabled) && bdev_is_zoned(...)`，
+    //     `CONFIG_BLK_DEV_ZONED=n` 时右操作数是 0）。
+    // 而这两个 pass 都只跑在第二轮内联**之前** ⇒ 这里按同一顺序补一轮，否则死臂里的
+    // `__bad_udelay()` / `dm_zone_endio()` 全留在产物里（前者是链接期未定义引用，
+    // 后者把整条 `dm_dax_ops` 链的同类问题遮在后面）。
+    if !opt_skipped("fold_constants") {
+        fold_constants(module);
+    }
+    if !opt_skipped("propagate_const_locals_in_conditions") {
+        propagate_const_locals_in_conditions(module);
+    }
     if !opt_skipped("fold_constant_branches") {
         fold_constant_branches(module);
         if !opt_skipped("eliminate_unreachable") {
@@ -286,6 +302,10 @@ pub fn optimize_with_full_target(
             crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
         }
         // M16: 跨函数 DCE (call graph reachability)
+        if !opt_skipped("cross_variable_dce") {
+            cross_variable_dce(module);
+            dump_after_pass("cross_variable_dce", module);
+        }
         if !opt_skipped("cross_function_dce") {
             cross_function_dce(module);
         }
@@ -1836,7 +1856,75 @@ fn expr_has_unsafe_ssa_pattern(e: &Expr, allow_static_locals: bool) -> bool {
     }
 }
 
-/// M16: 跨函数 DCE - 基于 call graph 标记不可达 internal static 函数
+/// 未被引用的 `static` 数据对象的跨函数 DCE。
+///
+/// 为什么必须有：「配置开关关掉后整条数据链失去引用」在内核里是常态，而 gcc 从不
+/// 发射无人引用的 static 数据。实测现场 `drivers/md/dm.c`：`dm_dax_ops` 只由
+/// `alloc_dax(md, &dm_dax_ops)` 引用，而 `CONFIG_DAX=n` 时 `alloc_dax` 是忽略参数的
+/// static inline 桩 ⇒ gcc 把 `dm_dax_ops` 连同它初始化器引用的三个 static 函数
+/// （`dm_dax_direct_access`/`zero_page_range`/`recovery_write`）一起删。dcc 保留了这个
+/// 对象，三个函数随之保活，函数体里的 `dax_get_private(...)` 就成为链接期的未定义
+/// 引用（`CONFIG_DAX=n` 时全树无定义）。
+///
+/// 判据只删「本文件内定义、`static`、且名字在任何保留实体里都没出现过」的对象；
+/// 保守方向一律选择留：
+///   * 非 static / `extern`（可能有外部引用）;
+///   * `used`/`retain`/带 `section`（链接脚本、`__start_`/`__stop_`、gc-sections 语义）；
+///   * `alias_name`/`copy_fn`（符号别名的目标）；
+///   * 任何 asm 文本里点名过的名字（与函数 DCE 共用 `collect_asm_names`）。
+///
+/// 引用集从**所有**实体上收（函数体、变量初始化器、文件级 asm 操作数）。只从活实体
+/// 上收才能删得干净，但那要函数 DCE 先跑一轮；本轮取「全收」的保守口径：最多是
+/// 「只被另一个待删 static 引用的对象也留下」，不会多删。
+fn cross_variable_dce(module: &mut Module) {
+    let prog = module.source_mut();
+    let mut referenced: HashSet<String> = collect_asm_names(prog);
+    let collect = |e: &Expr, out: &mut HashSet<String>| {
+        if let Expr::Ident { name, .. } = e {
+            out.insert(name.name.clone());
+        }
+    };
+    for d in &prog.decls {
+        match d {
+            Decl::Func(f) => {
+                if let Some(b) = &f.body {
+                    walk_block_ref(b, &mut |e| collect(e, &mut referenced));
+                }
+            },
+            Decl::Var(v) => {
+                if let Some(init) = &v.init {
+                    walk_expr_ref(init, &mut |e| collect(e, &mut referenced));
+                }
+            },
+            Decl::GlobalAsm { outputs, inputs, .. } => {
+                for e in outputs.iter().chain(inputs.iter()) {
+                    walk_expr_ref(e, &mut |e| collect(e, &mut referenced));
+                }
+            },
+            _ => {},
+        }
+    }
+    prog.decls.retain(|d| match d {
+        Decl::Var(v) => {
+            if !v.is_static || v.is_extern {
+                return true;
+            }
+            if v.is_used_attr
+                || v.is_retain
+                || v.section.is_some()
+                || v.alias_name.is_some()
+                || v.copy_fn.is_some()
+                || v.asm_label.is_some()
+                || v.is_weak
+            {
+                return true;
+            }
+            referenced.contains(&v.name.name)
+        },
+        _ => true,
+    });
+}
+
 fn cross_function_dce(module: &mut Module) {
     let prog = module.source_mut();
     // **文件里任何 asm 文本提到的名字都当根**（函数体内的 + 文件级 `asm(...)`）。
@@ -2083,6 +2171,16 @@ fn fold_init_items(items: Vec<crate::ast::InitItem>, fenv_access: bool) -> Vec<c
 /// 都算「不能丢」）。这个函数只回答值，**不代表可以整条不发** —— 要不要保留 `l` 的求值
 /// 由调用方按同一个判据决定。
 fn const_eval_through_comma(e: &Expr) -> Option<i128> {
+    // 0) 还挂着**未解析**的 `__builtin_constant_p` ⇒ 这条表达式此刻没有「值」。
+    //    `const_eval` 对它是「实参此刻是不是字面量」，不是「这个局部已被证成常量」：
+    //    `static int probe(int n) { return __builtin_constant_p(n); }` 在这里会被答成 0，
+    //    而 `fold_const_return_calls` 拿这个 0 当替体就把所有 `probe(…)` 折成 0（实测
+    //    `builtin_constant_p_of_inline_temp_still_true` 从 1 变 0）。真正的答案只能由
+    //    `ipa_modref` 用 proven 局部表给（它跑在前面，折完这里就没有调用可问了）——
+    //    与 [`expr_has_unresolved_constp`] 头注里 `arch/x86/.../amd.c` 那个 0 是同一条坑。
+    if expr_has_unresolved_constp(e) {
+        return None;
+    }
     // 先过「不带可观察效果」这一关，理由有两层：
     //   ① `const_eval::eval_full` 对 `Expr::Assign` 走的是**宽松口径**（返回右值，
     //      副作用留给运行期）——那是给全局初始化器用的，在值语境里它不是常量：
@@ -2090,7 +2188,17 @@ fn const_eval_through_comma(e: &Expr) -> Option<i128> {
     //      赋值连同 store 一起消失（实测 lor_branch_order 夹具 v 停在 -1）。
     //   ② 逗号左操作数同样不能有副作用，而 `discarded_value_needs_code` 对 `Comma`
     //      两侧都递归，所以这一条就顺带把它盖住了。
-    if crate::semantics::discarded_value_needs_code(e) {
+    //
+    // 第二个闸门只看「编译期折叠型内建」：`discarded_value_needs_code` 对**任何** `Call`
+    // 都答「要代码」，于是 `__builtin_expect(0, 0)`（内核 `unlikely()` 展开）把整条
+    // `&&` 的定值吸收拦下 —— 实测 `drivers/md/dm.c` 的
+    // `static_branch_unlikely(&zoned_enabled) && unlikely(bdev_is_zoned(…))`
+    // （`CONFIG_BLK_DEV_ZONED=n` 时右操作数是 0）折不掉，死臂里的 `dm_zone_endio()`
+    // 留在产物里。`dropping_value_is_safe` 就是为这种「纯内建调用可以整条不发」
+    // 准备的：它只放行 `const_eval` 能算出常量、且实参各自也安全的直接调用。
+    if crate::semantics::discarded_value_needs_code(e)
+        && !crate::semantics::dropping_value_is_safe(e)
+    {
         return None;
     }
     if let Expr::Comma { r, .. } = e {
@@ -8811,7 +8919,17 @@ fn inline_forced_call_as_stmt_expr(
     // 深度用强制内联自己的线（本函数只接强制内联的 callee，见下面的
     // `is_always_inline || caller_flatten` 判据）：内核准入链本身就有 7 层，
     // 共用 8 层会把最后一层留在外面（外带副本 ⇒ 陷阱引用）。
-    if level < 2 || depth >= INLINE_MAX_DEPTH_FORCED {
+    let f = match funcs.get(callee) {
+        Some(f) => f,
+        None => return None,
+    };
+    let forced = f.is_always_inline || caller_flatten;
+    // 档位闸门只拦「投机展开」：`-O2` 起才有成本模型参与。`__always_inline` 是语义
+    // 要求（GCC 展开不了直接报错），任何档位都得展开。第二轮强制内联
+    // （`function_inline(module, 0)`）正是靠这一条把上一轮内联**新生成**的调用点收干净
+    // ——否则 `field_mask` 展进 caller 后露出的 `field_multiplier(field)` 没人管，
+    // 产物里多一份外带副本，副本体内的 `__bad_mask()` 成为链接期未定义引用。
+    if depth >= INLINE_MAX_DEPTH_FORCED || (level < 2 && !forced) {
         trace_inline_decision(
             callee,
             "REJECT",
@@ -8819,11 +8937,6 @@ fn inline_forced_call_as_stmt_expr(
         );
         return None;
     }
-    let f = match funcs.get(callee) {
-        Some(f) => f,
-        None => return None,
-    };
-    let forced = f.is_always_inline || caller_flatten;
     let body = match f.body.as_ref() {
         Some(b) => b,
         None => {
@@ -8833,8 +8946,17 @@ fn inline_forced_call_as_stmt_expr(
     };
     // 单 `return 表达式;` 的体已由 `try_inline_call` 逐表达式替换做过（更贴源码，
     // 也不多开一个块），这里不抢。
-    if matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return { val: Some(_), .. })]) {
-        return None;
+    //
+    // 但那个「让位」不能无条件：`try_inline_call` 自己还会因为**返回表达式里带标签/
+    // 跳转**（`expr_jumps_out`）而拒——第二轮内联看到的就是这种体：`field_multiplier`
+    // 已在第一轮把 `if (…) __bad_mask();` 展成了带出口标号的语句表达式，于是
+    // `u32_encode_bits` 的体仍是单 `return`，但那个 return 里已经搬不动。此时再让位
+    // 就是两边都不接，调用点留在产物里，`__bad_mask` 成为链接期未定义引用
+    // （实测 `net/mac80211/tx.o`）。
+    if let [BlockItem::Stmt(Stmt::Return { val: Some(ret), .. })] = body.items.as_slice() {
+        if !expr_jumps_out(ret) {
+            return None;
+        }
     }
     // 【本通道只接强制内联 —— 放宽到普通 `static inline` 已经试过并且退回】
     //
@@ -8951,7 +9073,7 @@ fn inline_forced_call_as_stmt_expr(
         None,
         &span,
     )))];
-    if !try_static_inline_general(&mut s, funcs, level, depth) {
+    if !try_static_inline_general(&mut s, funcs, level, depth, allow_effectful_args) {
         trace_inline_decision(callee, "REJECT", "expr-inline: 借道语句被通用臂拒了");
         return None;
     }
@@ -9048,7 +9170,7 @@ fn inline_discarded_call_expr(
         e: e.clone(),
         span: span.clone(),
     };
-    if !try_static_inline_general(&mut s, funcs, level, depth) {
+    if !try_static_inline_general(&mut s, funcs, level, depth, false) {
         return None;
     }
     let Stmt::Block { b, .. } = s else {
@@ -9098,7 +9220,7 @@ fn inline_calls_in_stmt(
     }
     // P13 阶段5：-O2 起的小 `static` 函数体（带控制流）成本模型内联。展开后立刻
     // 递归走进新块（实参里可能还有可调用的直接调用），深度 +1 兜底。
-    if try_static_inline_general(s, funcs, level, depth) {
+    if try_static_inline_general(s, funcs, level, depth, false) {
         inline_calls_in_stmt(
             s,
             funcs,
@@ -11855,7 +11977,13 @@ fn call_site_shape(s: &Stmt) -> Option<(String, Vec<Expr>, Dest)> {
 /// 的 `static inline __always_inline` 助手（内核那族 `switch (size)` 尺寸检查宏）后，
 /// callee 形参的临时量作为选择子就再也回代不成常量，产物里留下对「故意不定义」
 /// 的陷阱函数的重定位，最终 `ld vmlinux` 报 `undefined reference to '__cmpxchg_wrong_size'`。
-fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span: &Span) -> bool {
+fn rewrite_returns_to_dest(
+    s: &mut Stmt,
+    end_label: &str,
+    rv: Option<&str>,
+    rv_ty: Option<&Type>,
+    span: &Span,
+) -> bool {
     match s {
         Stmt::Return { val, .. } => {
             let val = val.take();
@@ -11868,7 +11996,14 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
             };
             let step: Option<Stmt> = match (val, rv) {
                 (Some(e), Some(name)) => {
+                    // 左值类型必须是**结果槽的声明类型**（callee 的 `f.ret_ty`），不是返回
+                    // 表达式的类型：`char *scan(...) { … return scratch; }` 里 `scratch`
+                    // 是 `char[16]`，照抄 `e.ty()` 会把这次写入变成一次 16 字节**聚合拷贝**，
+                    // `__inl$rv` 里躺的是数组内容而不是它的地址（实测 `wrap(v)` 返回
+                    // `0x…656c70`，即 "plain-te" 的字节）。右值保持原类型：数组→指针的
+                    // 退化与整数提升由既有的赋值路径补上（`p = arr;` 本来就走这条路）。
                     let ety = e.ty();
+                    let lty = rv_ty.cloned().unwrap_or_else(|| ety.clone());
                     Some(Stmt::Expr {
                         e: Expr::Assign {
                             op: BinOp::Add,
@@ -11878,11 +12013,11 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
                                     span: span.clone(),
                                 },
                                 span: span.clone(),
-                                ty: ety.clone(),
+                                ty: lty.clone(),
                             }),
                             r: Box::new(e),
                             span: span.clone(),
-                            ty: ety,
+                            ty: lty,
                         },
                         span: span.clone(),
                     })
@@ -11906,20 +12041,20 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
             true
         },
         Stmt::If { then_, else_, .. } => {
-            let mut rewrote = rewrite_returns_to_dest(then_, end_label, rv, span);
+            let mut rewrote = rewrite_returns_to_dest(then_, end_label, rv, rv_ty, span);
             if let Some(e) = else_ {
-                rewrote |= rewrite_returns_to_dest(e, end_label, rv, span);
+                rewrote |= rewrite_returns_to_dest(e, end_label, rv, rv_ty, span);
             }
             rewrote
         },
         Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
-            rewrite_returns_to_dest(body, end_label, rv, span)
+            rewrite_returns_to_dest(body, end_label, rv, rv_ty, span)
         },
         Stmt::Block { b, .. } => {
             let mut rewrote = false;
             for it in b.items.iter_mut() {
                 if let BlockItem::Stmt(st) = it {
-                    rewrote |= rewrite_returns_to_dest(st, end_label, rv, span);
+                    rewrote |= rewrite_returns_to_dest(st, end_label, rv, rv_ty, span);
                 }
             }
             rewrote
@@ -11931,19 +12066,19 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
             let mut rewrote = false;
             for it in prelude.iter_mut() {
                 if let BlockItem::Stmt(st) = it {
-                    rewrote |= rewrite_returns_to_dest(st, end_label, rv, span);
+                    rewrote |= rewrite_returns_to_dest(st, end_label, rv, rv_ty, span);
                 }
             }
             for c in cases.iter_mut() {
                 for it in c.body.items.iter_mut() {
                     if let BlockItem::Stmt(st) = it {
-                        rewrote |= rewrite_returns_to_dest(st, end_label, rv, span);
+                        rewrote |= rewrite_returns_to_dest(st, end_label, rv, rv_ty, span);
                     }
                 }
             }
             rewrote
         },
-        Stmt::Label { stmt, .. } => rewrite_returns_to_dest(stmt, end_label, rv, span),
+        Stmt::Label { stmt, .. } => rewrite_returns_to_dest(stmt, end_label, rv, rv_ty, span),
         _ => false,
     }
 }
@@ -11960,10 +12095,13 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
 /// 之后才写目的地」的次序就是本函数下半部分的内容。仍然不接：嵌在更大表达式里的
 /// 调用（需要语句表达式包装）、`x op= f(...)`（callee 可能改掉 `x`，读-改-写次序要
 /// 重讲）、实参里带调用的点，以及返回 void 却被赋值的情形。
-fn try_static_inline_general(s: &mut Stmt, funcs: &InlineTable, level: u8, depth: u32) -> bool {
-    if level < 2 {
-        return false;
-    }
+fn try_static_inline_general(
+    s: &mut Stmt,
+    funcs: &InlineTable,
+    level: u8,
+    depth: u32,
+    allow_effectful_args: bool,
+) -> bool {
     let (callee_name, args, dest) = match call_site_shape(s) {
         Some(x) => x,
         None => return false,
@@ -11977,6 +12115,11 @@ fn try_static_inline_general(s: &mut Stmt, funcs: &InlineTable, level: u8, depth
         Some(f) => f,
         None => return false,
     };
+    // 档位闸门只拦「投机内联」：成本模型 `-O2` 起才参与。`__always_inline` 是语义
+    // 要求，任何档位都得展开（第二轮强制内联传 level 0，见 [`inline_forced_call_as_stmt_expr`]）。
+    if level < 2 && !f.is_always_inline {
+        return false;
+    }
     // 深度闸门：“强制内联”另有更高的线（[`INLINE_MAX_DEPTH_FORCED`]），
     // 不共用投机的 8 层 —— 撞线的代价不是少一个优化，而是多留一份带
     // `switch (形参) { default: BUILD_BUG(); }` 的外带副本（实测 `mm/memory.o`）。
@@ -12095,7 +12238,16 @@ fn try_static_inline_general(s: &mut Stmt, funcs: &InlineTable, level: u8, depth
     // 摆进形参临时量的声明里；而嵌套的展开（实参里又是一个可内联的调用）要递归多一层
     // 同步，本轮不开这个口子。用 `semantics::expr_has_side_effects` 而不是自己写的
     // 版本：调用/赋值/自增一并挡掉，宁可少内联不引入新的求值次数问题。
-    if needs_rv && args.iter().any(crate::semantics::expr_has_side_effects) {
+    //
+    // 例外（`allow_effectful_args`）：调用点来自 [`inline_forced_call_as_stmt_expr`]，
+    // 那次下探已经把实参里的强制内联调用展开完（`inline_expr` 的「内→外」重试），
+    // 剩下的「副作用」只是原本就在的普通调用。形参临时量仍然**只对实参求值一次、
+    // 按声明的从左到右次序**（C 的实参求值序本就是 unspecified，固定成这一种合法），
+    // 展开前后求值次数逐字相同，所以这里不再拿它否决 —— 否则 `u32_encode_bits(v,
+    // GENMASK(...))` 在 `__ffs(links)` 这种实参上会两边都不接，留一份外带副本，
+    // 副本体里的 `__bad_mask()` 成为链接期未定义引用（实测 `net/mac80211/tx.o`）。
+    if needs_rv && !allow_effectful_args && args.iter().any(crate::semantics::expr_has_side_effects) {
+        trace_inline_decision(&callee_name, "REJECT", "static-inline: 实参有副作用");
         return false;
     }
 
@@ -12169,7 +12321,7 @@ fn try_static_inline_general(s: &mut Stmt, funcs: &InlineTable, level: u8, depth
         for it in moved.drain(..) {
             match it {
                 BlockItem::Stmt(mut st) => {
-                    has_exit_goto |= rewrite_returns_to_dest(&mut st, &end_label, rv, &rspan);
+                    has_exit_goto |= rewrite_returns_to_dest(&mut st, &end_label, rv, Some(&f.ret_ty), &rspan);
                     rewritten.push(BlockItem::Stmt(st));
                 },
                 other => rewritten.push(other),

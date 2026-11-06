@@ -62,7 +62,20 @@ pub const VEC_BAND_SLOTS: i64 = 32;
 /// 这里只决定**带宽**，不改 `vec_temp` 的槽步长：把步长按函数统一会暂探到既有「同一个
 /// 临时槽两侧传不同尺寸」的不一致（实测 `torture/pr93170.c` 从 RUNOK 变错值），那属另一
 /// 条轴上的专项修复，不在本轮范围内。
+///
+/// **没有任何向量类型的函数得 0**：`max_vec_bytes` 是逐表达式 `expr.ty()` 与逐声明
+/// 类型穷举扫出来的（`LateNeed::max_vec_bytes`），为 0 就等价于「本函数不可能走到
+/// `vector_temp_base`」。以前这里无条件返回 512，于是**每帧**白开 512B —— 对用户态
+/// 程序只是浪费，对 16KB 内核栈是硬伤：实测内核 `arch_atomic_read` 这类平函数
+/// `sub $0x390,%rsp`（912B），`start_kernel` 的调用链十几层就见底（dcc 编译 7.1 内核
+/// 首次全量构建时逐对象复核）。改成 0 之后同一函数降到 368B。
+///
+/// 万一将来出现「没扫到向量类型却真用了 vec 槽」的路径，`LayoutMap::vec_temp`
+/// 会在发射期直接报错（而不是静默把值写到帧外）。
 pub fn vec_band_reserve(max_vec_bytes: usize) -> i64 {
+    if max_vec_bytes == 0 {
+        return 0;
+    }
     let slot_bytes = (max_vec_bytes.div_ceil(8) as i64).saturating_mul(8);
     VEC_RESERVE.max(VEC_BAND_SLOTS.saturating_mul(slot_bytes.max(16)))
 }
@@ -365,6 +378,15 @@ impl LayoutMap {
     /// 向量临时槽 `slot`（尺寸 `vec_size`）的偏移。与 `Codegen::vector_temp_base`
     /// 同一条算式，收在这里是为了「帧的坐标只有一个出处」。
     pub fn vec_temp(&self, slot: i64, vec_size: usize) -> i64 {
+        // 带宽 0 = 本函数没有任何向量类型（判据见 [`vec_band_reserve`]）。真走到这里
+        // 说明「扫描漏了一种向量来源」，此时算出来的偏移会落在帧外：宁可当场报错，
+        // 也不要静默写坏相邻帧。`unresolved()` 占位表 frame_size 为 0，不参与本判据。
+        assert!(
+            self.vec_reserve > 0 || self.frame_size == 0,
+            "vec_temp 被调用但本函数没有向量临时带（frame_size={}, vec_size={}）",
+            self.frame_size,
+            vec_size
+        );
         let own = (vec_size.div_ceil(8) as i64).saturating_mul(8);
         self.vec_temp_off + slot * own
     }
@@ -479,8 +501,10 @@ mod tests {
     /// 向量临时带的尺寸判据：单槽步长与带宽同源，且**格数恒为 `VEC_BAND_SLOTS`**。
     #[test]
     fn vec_band_reserve_keeps_slot_count_and_grows_only_for_wide_vectors() {
+        // 无向量：不预留（见 `vec_band_reserve` 的理由——每帧 512B 会压穿内核栈）
+        assert_eq!(vec_band_reserve(0), 0, "无向量类型的函数不得预留向量带");
         // 单槽 ≤ 16B：带宽恰好还是历史的 512（= 32 x 16），帧布局逐字节不变
-        for max in [0usize, 8, 16] {
+        for max in [8usize, 16] {
             assert_eq!(vec_band_reserve(max), VEC_RESERVE, "max_vec_bytes={max} 不得改变带宽");
         }
         // 更宽的向量：带按步长线性拉长，使格数不掉（容量不变是硬要求：格数一掉，

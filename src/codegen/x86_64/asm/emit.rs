@@ -373,13 +373,54 @@ impl Codegen {
                     &outputs[i],
                     binding.reg,
                     binding.xmm_width,
-                    binding.saved_inout_addr_reg,
+                    binding.saved_addr_reg,
+                    binding.saved_addr_slot,
+                    Self::asm_gp_output_mask(&bindings),
                 );
             }
         }
         if clobbers.iter().any(|c| c == "memory") || volatile {
             // memory clobber 或 volatile: 编译器屏障，防止指令重排越过 asm
             self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF0])); // mfence
+        }
+        self.release_asm_mem_scratch(&bindings);
+    }
+
+    /// 写回期可用的暂存号必须避开的号：本句 asm 的 GP 输出寄存器。
+    ///
+    /// 写到一半时它们每个都还持着一个未写回的结果，拿它们当地址暂存就是静默错值
+    /// （命中过的形状：`native_cpuid` 的 `"=a"(*eax)` 需要 scratch，%rax 自己就是
+    /// 还没写回的输出）。自寄存器（205-208）也是 GP 号；xmm/x87/mm/seg/cc 不在此列。
+    pub(crate) fn asm_gp_output_mask(bindings: &[AsmOpBinding]) -> u64 {
+        let mut mask = 0u64;
+        for b in bindings {
+            let gp = b.xmm_width == 0 || (205..=208).contains(&b.xmm_width);
+            if b.is_output && !b.is_mem && gp && b.reg < 64 {
+                mask |= 1u64 << b.reg;
+            }
+        }
+        mask
+    }
+
+    /// 归还本条 asm 预分配的内存操作数地址寄存器（`build_asm_operand_map` 的
+    /// `mem_scratch`）。它们只在 asm 主体期间持值，写回不需要；不还就等于把
+    /// callee-saved 池越用越少（实测 apic.o 的 `call_on_stack` 因此报 impossible
+    /// constraint）。
+    ///
+    /// 同时归还非 Ident 输出的地址驻足号（`saved_addr_reg`）并把写回地址槽占用的
+    /// sret 水位还原 —— 不还就相当于每条带非 Ident 输出的 asm 永久吃掉一个
+    /// callee-saved 号与一块帧空间。
+    pub(crate) fn release_asm_mem_scratch(&mut self, bindings: &[AsmOpBinding]) {
+        for b in bindings {
+            if let Some(reg) = b.mem_addr_reg {
+                self.free_callee_saved(reg);
+            }
+            if let Some(reg) = b.saved_addr_reg {
+                self.free_callee_saved(reg);
+            }
+        }
+        if let Some(mark) = self.asm_pending_sret_mark.take() {
+            self.restore_sret_watermark(mark);
         }
     }
 
@@ -480,12 +521,15 @@ impl Codegen {
                     &outputs[i],
                     binding.reg,
                     binding.xmm_width,
-                    binding.saved_inout_addr_reg,
+                    binding.saved_addr_reg,
+                    binding.saved_addr_slot,
+                    Self::asm_gp_output_mask(&bindings),
                 );
             }
         }
         if clobbers.iter().any(|c| c == "memory") {
             self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF0])); // mfence
         }
+        self.release_asm_mem_scratch(&bindings);
     }
 }

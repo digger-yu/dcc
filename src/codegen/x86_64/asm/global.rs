@@ -72,10 +72,16 @@ impl Codegen {
                     &outputs[i],
                     binding.reg,
                     binding.xmm_width,
-                    binding.saved_inout_addr_reg,
+                    binding.saved_addr_reg,
+                    binding.saved_addr_slot,
+                    Self::asm_gp_output_mask(&bindings),
                 );
             }
         }
         let _ = clobbers;
+        // 文件级 asm 不跟函数帧，但地址暂存号同样要归还（池是逐函数复位的，
+        // 漏归还只会在同一函数外的后续 asm 上表现成号变少）；写回地址槽的
+        // sret 水位标记也在这里一并还原。
+        self.release_asm_mem_scratch(&bindings);
     }
 }

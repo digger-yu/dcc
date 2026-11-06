@@ -1,14 +1,14 @@
 inc_b:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x48(%r13)
 mov %rdi,%rax
-mov %rax,-0xb8(%r13)
+mov %rax,-0x88(%r13)
 mov (%rax),%eax
-mov %rax,-0xc0(%r13)
+mov %rax,-0x90(%r13)
 mov $0x1,%eax
 mov %rax,%rbx
 mov %rdi,%r8
@@ -17,18 +17,18 @@ and $0x7,%r8
 add %r8,%rbx
 mov %rbx,%rax
 and $0x7,%rax
-mov -0xb8(%r13),%rcx
+mov -0x88(%r13),%rcx
 mov (%rcx),%ecx
 and $0xfffffffffffffff8,%rcx
 or %rax,%rcx
-mov -0xb8(%r13),%rdx
+mov -0x88(%r13),%rdx
 mov %ecx,(%rdx)
-mov -0xb8(%r13),%rdx
+mov -0x88(%r13),%rdx
 mov (%rdx),%edx
 and $0x7,%rdx
 mov %rdx,%rax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret

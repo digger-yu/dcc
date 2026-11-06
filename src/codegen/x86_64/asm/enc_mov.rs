@@ -19,6 +19,21 @@ use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 impl Codegen {
+    /// 内联汇编里 RIP-relative 的**符号内存操作数**（`lea/mov/push sym(%rip)`）。
+    ///
+    /// 编译器自造的 `.L` 标号（含 `AsmLocalLabels` 产出的 `.Lasm_local_*`）按
+    /// GAS/ELF 约定不参与未定义符号解析，直接压进 `pending_data_rels` 只会在 Phase 3
+    /// 报 E1103。这类引用延后到 `patch_local_jumps`，按标号真实所在节结算成
+    /// 「节符号 + 节内偏移」的 PC32（`(2f)(%rip)` 的 `2:` 常常定义在
+    /// `.pushsection __bug_table` 里）；其余符号仍走原来的全局变量路径。
+    fn push_asm_symdisp_rel(&mut self, pos: u64, sym: &str) {
+        if self.relocatable && Self::is_internal_label(sym) {
+            self.pending_asm_internal_symdisp_rels
+                .push((pos, sym.to_string()));
+        } else {
+            self.pending_data_rels.push((pos, sym.to_string()));
+        }
+    }
     pub(crate) fn emit_asm_lea(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
         if Self::asm_operand_has_non_gpr_reg(dst) {
             self.emit_unsupported_asm_operands("lea");
@@ -86,7 +101,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw(&[Self::rex(w, *d, 0, 0), 0x8D]));
             self.emit_asm_modrm_mem_only(*d, 0, ASM_BASE_RIP, None, 1);
             let pos = self.pos() - 4;
-            self.pending_data_rels.push((pos, sym.clone()));
+            self.push_asm_symdisp_rel(pos, sym);
         } else {
             self.asm_reject("unsupported lea operand pattern");
         }
@@ -406,7 +421,7 @@ impl Codegen {
                 }
                 self.emit_insn(&Insn::raw(&[0x0F, 0x38, 0xF0, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
                 let pos = self.pos() - 4;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_asm_symdisp_rel(pos, sym);
             },
             _ => {
                 self.asm_reject("unsupported movbe operand pattern");
@@ -490,61 +505,76 @@ impl Codegen {
             return;
         }
         if let (AsmOperand::Seg(seg), AsmOperand::Reg(d, _)) = (src, dst) {
+            // mov %segreg, %reg : 8C /r —— SDM 口径 **reg 字段 = Sreg, r/m 字段 = GPR**。
+            // 旧实现把两边写反 (`modrm_reg_reg(d, seg)` + `rex(.., d, 0, seg)`), 于是
+            // `mov %%ss, %0` 被编成 `mov %es, %edx` (8C C2): reg=0(es)、rm=2(edx)。
+            // 现场: arch/x86/include/asm/sync_core.h 的 iret_to_self 靠它取 SS, 取到 ES
+            // 后 iretq 弹出的 CS 不对 → QEMU 里 text_poke_early 直接 #GP(e=2020)。
             if bits == 64 {
-                // mov %segreg, %reg : 8C /r
-                let rex = Self::rex(false, *d, 0, *seg & 7);
+                let rex = Self::rex(false, *seg & 7, 0, *d);
                 if *d >= 8 || *seg >= 8 {
                     self.emit_insn(&Insn::raw(&[rex]));
                 }
-                self.emit_insn(&Insn::raw(&[0x8C, Self::modrm_reg_reg(*d, *seg)]));
+                self.emit_insn(&Insn::raw(&[0x8C, Self::modrm_reg_reg(*seg, *d)]));
             } else {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
                 self.emit_insn(&Insn::raw(&[
-                    Self::rex(false, *d, 0, *seg & 7),
+                    Self::rex(false, *seg & 7, 0, *d),
                     0x8C,
-                    Self::modrm_reg_reg(*d, *seg),
+                    Self::modrm_reg_reg(*seg, *d),
                 ]));
             }
             return;
         }
         // 控制寄存器: mov %crN, %reg (0F 20 /r) / mov %reg, %crN (0F 22 /r)
+        //
+        // ModRM 口径 (SDM 2B `MOV—Move to/from Control Registers`): **reg 字段 = CRn,
+        // r/m 字段 = 通用寄存器**; REX.R 是 CR 号 bit3 (cr8), REX.B 是 GPR bit3。
+        // 旧实现把两个字段与两个 REX 位全写反, 于是 `mov %cr4,%rax` 被发成
+        // `mov %cr0,%rsp` —— 读到的 CR 恒为 0, 还把 CR 号当 GPR 号写进目标寄存器。
+        // 实测: arch/x86 的 native_read_cr4() 把 CR0 写进 %rsp, PVH 内核在
+        // __startup_64 调它返回时 `add $0x140,%rsp` 得到 0x80000151, `pop %r13`
+        // 读未映射页 → triple fault。夹具 /tmp/cr4fix.c 覆盖 0F 20/21/22/23 四个方向。
         if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (src, dst) {
             if *ss == ASM_REG_CR {
-                self.emit_insn(&Insn::raw(&[
-                    Self::rex(false, *d, 0, *s),
-                    0x0F,
-                    0x20,
-                    Self::modrm_reg_reg(*d, *s),
-                ]));
-                return;
-            }
-            if *ds == ASM_REG_CR {
+                // mov %crS, %d : reg = S(CR), rm = d(GPR)
                 self.emit_insn(&Insn::raw(&[
                     Self::rex(false, *s, 0, *d),
                     0x0F,
-                    0x22,
+                    0x20,
                     Self::modrm_reg_reg(*s, *d),
                 ]));
                 return;
             }
-            // 调试寄存器: mov %dbN, %reg (0F 21 /r) / mov %reg, %dbN (0F 23 /r)
-            if *ss == ASM_REG_DR {
+            if *ds == ASM_REG_CR {
+                // mov %s, %crD : reg = D(CR), rm = s(GPR)
                 self.emit_insn(&Insn::raw(&[
                     Self::rex(false, *d, 0, *s),
                     0x0F,
-                    0x21,
+                    0x22,
                     Self::modrm_reg_reg(*d, *s),
+                ]));
+                return;
+            }
+            // 调试寄存器: mov %dbN, %reg (0F 21 /r) / mov %reg, %dbN (0F 23 /r)
+            // 与上面同构: reg 字段 = DRn, r/m 字段 = 通用寄存器。
+            if *ss == ASM_REG_DR {
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(false, *s, 0, *d),
+                    0x0F,
+                    0x21,
+                    Self::modrm_reg_reg(*s, *d),
                 ]));
                 return;
             }
             if *ds == ASM_REG_DR {
                 self.emit_insn(&Insn::raw(&[
-                    Self::rex(false, *s, 0, *d),
+                    Self::rex(false, *d, 0, *s),
                     0x0F,
                     0x23,
-                    Self::modrm_reg_reg(*s, *d),
+                    Self::modrm_reg_reg(*d, *s),
                 ]));
                 return;
             }
@@ -662,7 +692,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw(&[rex, 0x8B, modrm, 0, 0, 0, 0]));
             }
             let pos = self.pos() - 4;
-            self.pending_data_rels.push((pos, sym.clone()));
+            self.push_asm_symdisp_rel(pos, sym);
             return;
         }
         // mov reg, sym(%rip)
@@ -689,7 +719,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw(&[rex, 0x89, modrm, 0, 0, 0, 0]));
             }
             let pos = self.pos() - 4;
-            self.pending_data_rels.push((pos, sym.clone()));
+            self.push_asm_symdisp_rel(pos, sym);
             return;
         }
         match (src, dst) {
@@ -945,7 +975,7 @@ impl Codegen {
                     self.emit_insn(&Insn::raw(&[rex, 0x89, modrm, 0, 0, 0, 0]));
                 }
                 let pos = self.pos() - 4;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_asm_symdisp_rel(pos, sym);
                 return;
             }
         }
@@ -1107,7 +1137,7 @@ impl Codegen {
                     self.emit_insn(&Insn::raw(&[rex, 0x0F, op, modrm, 0, 0, 0, 0]));
                 }
                 let pos = self.pos() - 4;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_asm_symdisp_rel(pos, sym);
             },
             _ => {
                 self.asm_reject("unsupported movsx operand pattern");
@@ -1192,7 +1222,7 @@ impl Codegen {
                 let modrm = 0x05 | ((d & 7) << 3);
                 self.emit_insn(&Insn::raw(&[rex, 0x0F, op, modrm, 0, 0, 0, 0]));
                 let pos = self.pos() - 4;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_asm_symdisp_rel(pos, sym);
             },
             _ => {
                 self.asm_reject("unsupported movzx operand pattern");
@@ -1350,7 +1380,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw(&[Self::rex(false, 0, 0, 0), 0xFF, 0x35]));
                 self.emit_insn(&Insn::raw(&[0x00, 0x00, 0x00, 0x00]));
                 let pos = self.pos() - 4;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_asm_symdisp_rel(pos, sym);
             },
             _ => {
                 self.asm_reject("unsupported push operand pattern");
@@ -1474,7 +1504,7 @@ impl Codegen {
             // sys mem sym(%rip): 0F 01 /ext + disp32
             self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0x05 | ((ext & 7) << 3), 0, 0, 0, 0]));
             let pos = self.pos() - 4;
-            self.pending_data_rels.push((pos, sym.clone()));
+            self.push_asm_symdisp_rel(pos, sym);
         } else {
             self.asm_reject("unsupported sys mem operand pattern");
         }

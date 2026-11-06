@@ -32,7 +32,7 @@ mov $0x2,%ecx
 rep movsq %ds:(%rsi),%es:(%rdi)
 movups -0x70(%r13),%xmm0
 <nop padding>
-mov %r13,%rsp
+add $0x300,%rsp
 pop %r13
 ret
 <nop padding>
@@ -70,7 +70,7 @@ mov $0x2,%ecx
 rep movsq %ds:(%rsi),%es:(%rdi)
 movups -0x70(%r13),%xmm0
 <nop padding>
-mov %r13,%rsp
+add $0x300,%rsp
 pop %r13
 ret
 <nop padding>
@@ -137,6 +137,6 @@ movss (%rsp),%xmm0
 add $0x8,%rsp
 addss %xmm1,%xmm0
 <nop padding>
-mov %r13,%rsp
+add $0x330,%rsp
 pop %r13
 ret

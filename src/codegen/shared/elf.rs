@@ -65,6 +65,10 @@ pub const SHF_EXECINSTR: u32 = 4;
 pub const SHF_WRITE: u32 = 1;
 pub const SHF_TLS: u32 = 0x400;
 pub const SHF_COMPRESSED: u32 = 0x800;
+/// SHF_EXCLUDE (0x80000000, GNU 扩展): 链接器丢弃该节，不计入孤儿处理。
+/// 用于「表项必须占位（固定节号）但内容为空」的 `.tdata`/`.tbss`：
+/// 只去 ALLOC 时 ld `--orphan-handling=error` 仍报 unplaced orphan section。
+pub const SHF_EXCLUDE: u32 = 0x8000_0000;
 pub const SHF_INFO_LINK: u32 = 0x40;
 /// SHF_GROUP: section is a member of a COMDAT group
 pub const SHF_GROUP: u32 = 0x200;
@@ -1662,12 +1666,21 @@ pub fn build_elf_rel_x86_64(
     // .modinfo .tdata .tbss`，前面还带着 6 条 orphan 警告（来源 `vmlinux.o` /
     // `.vmlinux.export.o` / `init/version-timestamp.o`）—— 即**未定义引用清零也过不了
     // 这一道**：内核的 TLS 输出节归 `PT_TLS`，被孤儿处理排到 LOAD 段末尾直接报错。
+    //
+    // 11-04 补：只去 ALLOC 还不够。ld 2.42 的 `--orphan-handling=error`（本配置
+    // `CONFIG_LD_ORPHAN_WARN_LEVEL=error`）仍会把名为 `.tdata`/`.tbss` 的非 ALLOC
+    // 输入节当孤儿报错（实现在 bfd 的 `lang_place_orphans`，只跳过 SEC_EXCLUDE 与
+    // debug 节；实测 `init/main.o` 的 `.tdata`/`.tbss` 报 unplaced orphan section）。
+    // 所以空节带 `SHF_EXCLUDE`（0x80000000，GNU 扩展，ld 直接丢弃）：节类型与节名
+    // 保持原样（`gnu_stack_note_section_matches_gas` / `tls_model_attr…` 按名断言
+    // 节号 6 与 `.tdata` 是 PROGBITS），只把「进入链接」这件事关掉。
+    let tdata_empty = tdata.is_empty();
     write_section_header(
         &mut out,
         26,
         SHT_PROGBITS,
-        if tdata.is_empty() {
-            0
+        if tdata_empty {
+            SHF_EXCLUDE
         } else {
             SHF_ALLOC | SHF_WRITE | SHF_TLS
         },
@@ -1682,12 +1695,13 @@ pub fn build_elf_rel_x86_64(
     );
 
     // [6] .tbss
+    let tbss_empty = tbss_size == 0;
     write_section_header(
         &mut out,
         33,
         SHT_NOBITS,
-        if tbss_size == 0 {
-            0
+        if tbss_empty {
+            SHF_EXCLUDE
         } else {
             SHF_ALLOC | SHF_WRITE | SHF_TLS
         },
@@ -1701,9 +1715,43 @@ pub fn build_elf_rel_x86_64(
         false,
     );
 
+    // 节名在 `.shstrtab` 里的偏移：**前缀和一次算完**。
+    //
+    // 以前每个节都现场累加「前面所有节名的长度」（下面 `shstrtab_name_offset` 是 O(i)），
+    // 对普通 TU 无所谓，但 `.vmlinux.export.o` 是 1.4 万个导出符号 × 3 个
+    // `.section "___ksymtab+…"/"___kcrctab+…"/"___kflagstab+…"` ⇒ **4.2 万个自定义节**：
+    // 求和变成 O(n²)，实测这个 TU 单文件烧 17 分钟 100% CPU 还没吐出 .o（gcc 同文件
+    // 约 1 分钟）。改成前缀和是 O(n)。顺序必须与 `build_shstrtab_with_tls` 逐字一致：
+    // base(39) + extra_sections + comdat_groups + extra_rela_sections。
+    let mut off = 39u32;
+    let extra_name_offsets: Vec<u32> = extra_sections
+        .iter()
+        .map(|s| {
+            let at = off;
+            off += s.name.len() as u32 + 1;
+            at
+        })
+        .collect();
+    let comdat_name_offsets: Vec<u32> = comdat_groups
+        .iter()
+        .map(|g| {
+            let at = off;
+            off += format!(".group.{}", g.signature).len() as u32 + 1;
+            at
+        })
+        .collect();
+    let rela_name_offsets: Vec<u32> = extra_rela_sections
+        .iter()
+        .map(|s| {
+            let at = off;
+            off += s.name.len() as u32 + 1;
+            at
+        })
+        .collect();
+
     // [7..7+N] 自定义节
     for (i, sec) in extra_sections.iter().enumerate() {
-        let name_off = shstrtab_name_offset(extra_sections, i);
+        let name_off = extra_name_offsets[i];
         // Add SHF_GROUP flag if this section belongs to a COMDAT group
         let flags = if sec.group_name.is_some() {
             sec.flags | SHF_GROUP
@@ -1730,7 +1778,7 @@ pub fn build_elf_rel_x86_64(
     for (i, group) in comdat_groups.iter().enumerate() {
         // Section name: .group.<signature>
         let _group_name = format!(".group.{}", group.signature);
-        let name_off = shstrtab_comdat_name_offset(extra_sections, comdat_groups, i);
+        let name_off = comdat_name_offsets[i];
         // sh_info: index of the signature symbol in .symtab
         // For simplicity, we use 0 (no signature symbol)
         // A proper implementation would find the symbol index for group.signature
@@ -1752,7 +1800,7 @@ pub fn build_elf_rel_x86_64(
 
     // [7+N+G..7+N+G+M] 额外 .rela 节
     for (i, ers) in extra_rela_sections.iter().enumerate() {
-        let name_off = shstrtab_extra_rela_name_offset(extra_sections, extra_rela_sections, i);
+        let name_off = rela_name_offsets[i];
         write_section_header(
             &mut out,
             name_off,
@@ -1770,12 +1818,10 @@ pub fn build_elf_rel_x86_64(
     }
 
     // [.rela.text]
-    let extra_names_len: u32 = extra_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
-    let extra_rela_names_len: u32 = extra_rela_sections
-        .iter()
-        .map(|s| s.name.len() as u32 + 1)
-        .sum();
-    let base_off: u32 = 39 + extra_names_len + extra_rela_names_len;
+    // `off` 此刻正好是「base + extra + comdat + rela」的全部长度（上面三段前缀和累加的
+    // 结果），直接当固定节名的起点。旧写法自己重算了一遍且**漏了 comdat**，只要有
+    // COMDAT group，`.rela.text` 之后的名字就会指向字符串表中间。
+    let base_off: u32 = off;
     let rela_text_name_off = base_off;
     let rela_data_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
     let symtab_name_off = rela_data_name_off + ".rela.data".len() as u32 + 1;
@@ -1943,50 +1989,6 @@ fn build_shstrtab(
     comdat_groups: &[ComdatGroup],
 ) -> Vec<u8> {
     build_shstrtab_with_tls(extra_sections, extra_rela_sections, comdat_groups)
-}
-
-/// 计算自定义节名在 .shstrtab 中的偏移
-fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
-    // \0(1) + .text\0(6) + .rodata\0(8) + .data\0(6) + .bss\0(5) + .tdata\0(7) + .tbss\0(6) = 39
-    let mut off = 39u32;
-    for sec in &extra_sections[..idx] {
-        off += sec.name.len() as u32 + 1;
-    }
-    off
-}
-
-/// 计算 COMDAT group 节名在 .shstrtab 中的偏移
-fn shstrtab_comdat_name_offset(
-    extra_sections: &[ElfSection],
-    comdat_groups: &[ComdatGroup],
-    comdat_idx: usize,
-) -> u32 {
-    let mut off = 39u32;
-    for sec in extra_sections {
-        off += sec.name.len() as u32 + 1;
-    }
-    // Add COMDAT group names before this index
-    for group in &comdat_groups[..comdat_idx] {
-        let group_name = format!(".group.{}", group.signature);
-        off += group_name.len() as u32 + 1;
-    }
-    off
-}
-
-/// 计算额外 .rela 节名在 .shstrtab 中的偏移
-fn shstrtab_extra_rela_name_offset(
-    extra_sections: &[ElfSection],
-    extra_rela_sections: &[ExtraRelaSection],
-    idx: usize,
-) -> u32 {
-    let mut off = 39u32;
-    for sec in extra_sections {
-        off += sec.name.len() as u32 + 1;
-    }
-    for sec in &extra_rela_sections[..idx] {
-        off += sec.name.len() as u32 + 1;
-    }
-    off
 }
 
 /// 构建 .strtab (符号名字符串表)

@@ -115,13 +115,19 @@ impl Codegen {
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
             let Some(&dst) = self.labels.get(&p.target) else {
-                if self.relocatable && !p.is_push_imm {
+                if self.relocatable {
+                    // `push $sym` 的 imm32 是绝对地址 (R_X86_64_32S)；普通跳转是 PC32。
+                    let (rel_type, addend) = if p.is_push_imm {
+                        (R_X86_64_32S, 0)
+                    } else {
+                        (R_X86_64_PC32, -4)
+                    };
                     let rel_off = p.disp_offset;
                     self.pending_code_rels.push(PendingCodeRel {
                         offset: rel_off,
                         symbol: p.target,
-                        rel_type: R_X86_64_PC32,
-                        addend: -4,
+                        rel_type,
+                        addend,
                     });
                     continue;
                 }
@@ -145,8 +151,11 @@ impl Codegen {
             };
             let off = p.disp_offset as usize;
             if p.is_push_imm {
-                // push $label: imm32 = absolute address (lower 32 bits)
-                self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
+                // push $label: imm32 = 绝对地址（低 32 位）。ET_EXEC 的代码偏移 0
+                // 对应虚拟地址 `self.entry`；直接写 `dst` 会把一个节内偏移当地址压栈
+                // （见 codegen.rs `patch_local_jumps` 同名分支的现场说明）。
+                let addr = self.entry + dst;
+                self.code[off..off + 4].copy_from_slice(&(addr as i32).to_le_bytes());
             } else {
                 let rel = (dst as i64) - (p.next_ip as i64);
                 let rel_off = p.disp_offset as usize;
@@ -888,9 +897,18 @@ impl Codegen {
             .chain(self.pushsection_code_ranges.iter().copied())
             .collect();
         for mut rel in self.relocations.drain(..) {
+            // 区间**嵌套**：可执行 pushsection 的代码（`.altinstr_replacement` /
+            // `.altinstr_aux`）是嵌在函数发射流里的，同一个重定位地址同时落在函数区间和
+            // pushsection 区间内。必须取最内层（长度最小）那一层 —— 用 `.find` 取第一个
+            // 会把 aux/replacement 的重定位全留进 `.rela.<函数节>` 的 NOP 洞里
+            // （实测 map_kernel.o：`.rela.init.text` 里 offset 0x1e2/0x1e8/0x1ef/0x1f4
+            // 四条本该属于 `.rela.altinstr_replacement` / `.rela.altinstr_aux`，于是
+            // objtool 在 aux 里看到 `jmp +0`、在 replacement 里看到 `jmp +5`，报
+            // `can't find jump dest instruction at .altinstr_replacement+0x5`）。
             if let Some((emitted_start, _emitted_size, sec_idx, sec_off)) = move_ranges
                 .iter()
-                .find(|(s, sz, _, _)| rel.offset >= *s && rel.offset < *s + *sz)
+                .filter(|(s, sz, _, _)| rel.offset >= *s && rel.offset < *s + *sz)
+                .min_by_key(|(_, sz, _, _)| *sz)
                 .copied()
             {
                 rel.offset = sec_off + (rel.offset - emitted_start);
@@ -925,22 +943,14 @@ impl Codegen {
         // 前), 现在把最终机器码覆盖到自定义节副本并将 .text 原位置 NOP。
         // (自 monolith compile_rel 尾部恢复: 缺失时 .fixup 等可执行
         // pushsection 节只有对齐填充, 真实代码留在 .text。)
-        for (_, emitted_start, emitted_size, sec_idx, sec_off) in custom_func_ranges {
-            let src_start = *emitted_start as usize;
-            let src_end = (*emitted_start + *emitted_size as u64) as usize;
-            // Skip if already moved (parallel codegen: chunk already placed
-            // correct code in extra_sections, leaving NOPs in .text)
-            let src = &self.code[src_start..src_end];
-            if src.iter().all(|&b| b == 0x90) {
-                continue;
-            }
-            let src = src.to_vec();
-            let dst_start = *sec_off as usize;
-            let dst_end = dst_start + *emitted_size;
-            self.extra_sections[*sec_idx as usize].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[src_start..src_end].fill(0x90);
-        }
-        // 可执行 pushsection (.fixup/.altinstr_replacement) 代码区间同样搬迁
+        // 顺序不能反：可执行 pushsection（`.altinstr_replacement`/`.fixup`）的代码是
+        // **嵌在函数发射流里**的（open 时就在 self.code 当前位置继续发），它天然落在
+        // 某个 `custom_func_ranges` 区间内部。先搬函数会把整段（连同 replacement 的
+        // 真实字节）复制进目标节、再把原位填 0x90；随后 pushsection 段看到「已全 0x90」
+        // 直接 continue，目标节里只剩对齐垫出来的 8 个 0x90 —— 实测 `pvclock.o` 的
+        // `.altinstr_replacement` 就是这样丢掉了 `lfence; rdtsc`/`rdtscp`，objtool 报
+        // `weirdly overlapping alternative!`。先搬 pushsection 再搬函数，函数副本里
+        // 只留下 0x90 洞（与 GAS 把 replacement 排除在函数外的效果等价）。
         let pushsection_ranges = std::mem::take(&mut self.pushsection_code_ranges);
         for (emitted_start, emitted_size, sec_idx, sec_off) in &pushsection_ranges {
             let src_start = *emitted_start as usize;
@@ -958,6 +968,21 @@ impl Codegen {
             self.code[src_start..src_end].fill(0x90);
         }
         self.pushsection_code_ranges = pushsection_ranges;
+        for (_, emitted_start, emitted_size, sec_idx, sec_off) in custom_func_ranges {
+            let src_start = *emitted_start as usize;
+            let src_end = (*emitted_start + *emitted_size as u64) as usize;
+            // Skip if already moved (parallel codegen: chunk already placed
+            // correct code in extra_sections, leaving NOPs in .text)
+            let src = &self.code[src_start..src_end];
+            if src.iter().all(|&b| b == 0x90) {
+                continue;
+            }
+            let src = src.to_vec();
+            let dst_start = *sec_off as usize;
+            let dst_end = dst_start + *emitted_size;
+            self.extra_sections[*sec_idx as usize].data[dst_start..dst_end].copy_from_slice(&src);
+            self.code[src_start..src_end].fill(0x90);
+        }
         // 代码已入各自定义节: 捕获函数最终字节供 -S 输出分组 (monolith 同位)
         self.finalize_func_asm_layout(prog, custom_func_ranges);
     }

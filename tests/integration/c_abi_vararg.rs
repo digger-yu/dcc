@@ -742,3 +742,40 @@ fn va_arg_vla_agg_via_va_arg_matches_gcc_at_all_levels() {
         );
     }
 }
+
+/// `-mno-sse` 下变参序言**一条 XMM 都不许发**，save area 只剩 48B 的 GP 槽（双向锁）。
+///
+/// 现场是 PVH 启动：内核所有 C TU 都带 `-mno-sse -mno-mmx -mno-sse2 …`（目标是
+/// `CR4.OSFXSR=0` 的启动早期也要能跑）。包装器曾把这族旗标整个吞掉（注释写着「dcc
+/// 后端始终使用 SSE」），于是 dcc 按 SSE 档位在 `early_printk` 序言里连发 8 条
+/// `movups %xmmN,-0x5d0(%r13)` —— 第一条就 #UD，QEMU 串口一个字符都没有。
+/// 两个方向都钉住：关 SSE 必须 0 条，开 SSE 必须真有 spill（否则测试对「旗标被吞」
+/// 这件事完全失明，正是修复前的形态）。
+#[test]
+fn va_arg_prologue_omits_xmm_under_mno_sse() {
+    let src = "int pick(int n, ...) { return n; }\n";
+    for (tag, flags, want_xmm) in [
+        ("va-nosse", &["-mno-sse"][..], false),
+        ("va-sse", &[][..], true),
+    ] {
+        let (out, obj) = run_object_test_flags(tag, src, flags);
+        assert!(
+            out.status.success(),
+            "{tag}: compile stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let dump = Command::new("objdump")
+            .arg("-d")
+            .arg(&obj)
+            .output()
+            .expect("objdump -d");
+        assert!(dump.status.success(), "{tag}: objdump -d failed");
+        let text = String::from_utf8_lossy(&dump.stdout).into_owned();
+        let _ = fs::remove_file(&obj);
+        assert_eq!(
+            text.contains("%xmm"),
+            want_xmm,
+            "{tag}: 变参序言的 XMM spill 形态不符\n{text}"
+        );
+    }
+}

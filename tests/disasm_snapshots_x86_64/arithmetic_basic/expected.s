@@ -1,7 +1,7 @@
 arith_basic:
 push %r13
 mov %rsp,%r13
-sub $0x350,%rsp
+sub $0x120,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 mov %r14,-0x20(%r13)
@@ -61,14 +61,14 @@ mov -0x10(%r13),%rbx
 mov -0x18(%r13),%r12
 mov -0x20(%r13),%r14
 mov -0x28(%r13),%r15
-mov %r13,%rsp
+add $0x120,%rsp
 pop %r13
 ret
 <nop padding>
 arith_unsigned:
 push %r13
 mov %rsp,%r13
-sub $0x300,%rsp
+sub $0xd0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x48(%r13)
@@ -82,6 +82,6 @@ or %r8d,%ebx
 mov %rbx,%rax
 mov %eax,%eax
 mov -0x10(%r13),%rbx
-mov %r13,%rsp
+add $0xd0,%rsp
 pop %r13
 ret

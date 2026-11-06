@@ -130,7 +130,12 @@ impl Codegen {
         }
         false
     }
-    pub(crate) fn asm_memory_operand_str(&mut self, expr: &Expr) -> Option<String> {
+    /// 内存操作数（`"m"` / `"+m"`）的地址形态。
+    ///
+    /// `dst` 是调用方预分配并已登记所有权的地址暂存号（见
+    /// `build_asm_operand_map` 的预扫描）：地址必须在整条 asm 期间活着，
+    /// 模板里直接展开成 `(%reg)`。
+    pub(crate) fn asm_memory_operand_str(&mut self, expr: &Expr, dst: u8) -> Option<String> {
         if let Expr::Ident { name, .. } = expr {
             // 局部优先: 与全局同名的参数/局部变量必须走栈槽而非 rip
             if self.is_global_not_local(&name.name) {
@@ -142,19 +147,24 @@ impl Codegen {
             let off = self.var_offset(&name.name);
             return Some(format!("{off}(%r13)"));
         }
-        // 指针解引用/成员/下标/转型: 求值地址到 r12, 返回 (%r12)
-        // 注意 Deref/Cast 求值得到的是指针值, Member/Index 求值得到元素地址
-        match expr {
-            Expr::Deref { e, .. } | Expr::Cast { e, .. } => {
-                self.gen_expr(e, 12);
-                Some("(%r12)".to_string())
-            },
-            Expr::Member { .. } | Expr::Index { .. } => {
-                self.gen_expr(expr, 12);
-                Some("(%r12)".to_string())
-            },
-            _ => None,
+        let reg = Self::gp_reg_name(dst).unwrap_or("r12");
+        // 指针解引用/转型: 解引用地址就是指针值本身, 走右值求值.
+        if let Expr::Deref { e, .. } | Expr::Cast { e, .. } = expr {
+            self.gen_expr(e, dst);
+            return Some(format!("({reg})"));
         }
+        // 成员/下标: 必须走 lvalue 取址路径. `gen_expr` 的约定是**取值**,
+        // 旧实现把字段值当成 `(%reg)` 里的地址去解引用: 内核
+        // `atomic_inc(&css->online_cnt)` 的 `"+m"(v->counter)` 实测编成
+        // `movslq (%r12),%r12; lock incl (%r12)`, r12=0 → CR2=0, 启动期
+        // triple fault. 取址只有 `gen_lvalue_addr` 这一条正确路径.
+        if matches!(expr, Expr::Member { .. } | Expr::Index { .. }) {
+            if !self.gen_lvalue_addr(expr, dst) {
+                return None;
+            }
+            return Some(format!("({reg})"));
+        }
+        None
     }
     pub(crate) fn asm_mmx_name(idx: usize) -> &'static str {
         const NAMES: [&str; 8] = ["mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7"];
@@ -351,7 +361,6 @@ impl Codegen {
     }
     pub(crate) fn parse_asm_data_expr(
         expr: &str,
-        labels: &HashMap<String, u64>,
         locals: &AsmLocalLabels,
         line_idx: usize,
         numeric_label_map: &std::collections::HashMap<String, String>,
@@ -407,15 +416,22 @@ impl Codegen {
                         Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
                     return (0, Some((sym, shared_elf::R_X86_64_PC32, -n)), None);
                 }
-                // Both operands are symbols: resolve and compute difference
+                // Both operands are symbols: **一律**延后结算（调用方落一条
+                // `DeferredPushsectionFixup`，由 `resolve_deferred_pushsection_fixups`
+                // 用最终标号表求差）。
+                //
+                // 旧写法在这里就地查一张「全量标号坐标表」，于是每个数据伪指令行都得
+                // 让调用方先重建整张表：`emit_pushsection_data` 里那句
+                // `let labels_adj = self.asm_label_coords();` 是**逐行**执行的，复杂度
+                // O(行数 × 标号数)。实测 7.1 内核 `.vmlinux.export.c`（14 000 个导出
+                // 符号、4.2 万个自定义节、5.6 万行 asm）在这一步吃了 20 分钟，perf 里
+                // 23% 在 `asm_label_coords` 的 HashMap 重建、19% 在 SipHash、15% 在
+                // memcmp、12% 在 malloc。延后结算的算术与原来逐位相同（同一张表、同一个
+                // `(lv as i64) - (rv as i64)`），只是把查表挪到全部标号都已定义之后。
                 let left_sym =
                     Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
                 let right_sym =
                     Self::resolve_asm_data_symbol(right, locals, line_idx, numeric_label_map);
-                if let (Some(&lv), Some(&rv)) = (labels.get(&left_sym), labels.get(&right_sym)) {
-                    return ((lv as i64) - (rv as i64), None, None);
-                }
-                // Forward reference: defer resolution
                 return (0, None, Some((left_sym, right_sym)));
             }
         }
@@ -777,6 +793,34 @@ impl Codegen {
         Self::parse_asm_number(s.trim().trim_end_matches(','))
     }
     fn parse_asm_mem(s: &str) -> AsmOperand {
+        // `(sym)(%rip)`：GAS 允许把符号包在括号里。内核 `__WARN_bug_entry()` 的
+        // `lea (2f)(%rip), %reg` 正是这种形状（`2:` 定义在 `__bug_table` 段）。
+        // 旧解析把首个 `(...)` 当寄存器间接，inner 变成 `sym)(%rip`，
+        // `parse_asm_reg` 失败后回落到默认 `%rbp`，符号被整个丢掉 —— 实测
+        // WARN 传给 `__WARN_trap` 的 bug_entry 指针恒为 0，report_bug_entry()
+        // 解引用空指针二次 #PF。与 operand.rs 中的同名解析器保持同一口径。
+        if let Some(stripped) = s.strip_prefix('(') {
+            if let Some(close) = stripped.find(')') {
+                let head = stripped[..close].trim();
+                let tail = stripped[close + 1..].trim();
+                let symbol_like = head
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '.' || c == '_' || c == '$');
+                if symbol_like
+                    && !head.starts_with('%')
+                    && Self::parse_asm_reg(head).is_none()
+                    && tail.starts_with('(')
+                    && tail.ends_with(')')
+                {
+                    let base = tail[1..tail.len() - 1].trim();
+                    if base == "%rip" || base == "rip" {
+                        return AsmOperand::SymDisp(head.to_string(), 0);
+                    }
+                }
+            }
+        }
+
         // 格式: [disp](%base[,%idx[,scale]])
         let paren_pos = s.find('(').unwrap_or(s.len());
         let disp_str = s[..paren_pos].trim();

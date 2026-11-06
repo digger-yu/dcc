@@ -43,7 +43,14 @@ impl Codegen {
             // P4: 虚数内型沿用其标量通道。IL D 已在 gen_imaginary_binop_ld
             // 与 gen_unary 中把 rvalue 放到 st(0), 不应被当成 int 经 fild 重写。
             Type::Imaginary(inner) => self.float_in_st0(&inner.base),
-            _ => !self.target.sse,
+            // `-mno-sse` 只把 float/double 改道 x87；整数/指针/聚合/向量仍走
+            // GP 寄存器。旧写法用 `_ => !self.target.sse` 兜底，`-mno-sse` 下把
+            // **任何**类型都判成「结果在 st(0)」：`gen_call_result_move` 因此
+            // 跳过 `mov dst, %rax`，`arr[f()]` 这类把返回值要求到 %rcx 的调用点
+            // 拿到的是调用前的垃圾（实测 PVH 启动在
+            // `per_cpu_ptr(&cpu_stopper, task_cpu(task))` 处以 CR2=垃圾 收场）。
+            Type::Float | Type::Double => !self.target.sse,
+            _ => false,
         }
     }
 

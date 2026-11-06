@@ -320,6 +320,36 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
 
 /// Parse AT&T memory operand
 fn parse_asm_mem(s: &str) -> AsmOperand {
+    // `(sym)(%rip)`：GAS 允许把符号包在括号里。内核 `__WARN_bug_entry()` 的
+    // `lea (2f)(%rip), %reg` 正是这种形状（`2:` 在 `__bug_table` 段）。旧解析把
+    // 第一个 `(...)` 当寄存器间接，inner 变成 `sym)(%rip`，`parse_asm_reg` 失败后
+    // 回落到默认 `%rbp`，符号被整个丢掉 —— 实测 WARN 传给 `__WARN_trap` 的
+    // bug_entry 指针恒为 0，`report_bug_entry()` 解引用空指针二次 #PF。
+    // 这里识别「首个括号组不是寄存器」且紧跟 `(%rip)` 的形式，按符号 PC32 处理。
+    if let Some(stripped) = s.strip_prefix('(') {
+        if let Some(close) = stripped.find(')') {
+            let head = stripped[..close].trim();
+            let tail = stripped[close + 1..].trim();
+            // head 必须是符号样子的名字：纯数字 `(8)(%rip)` 是绝对地址，
+            // 不能当符号发重定位。
+            let symbol_like = head
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '.' || c == '_' || c == '$');
+            if symbol_like
+                && !head.starts_with('%')
+                && parse_asm_reg(head).is_none()
+                && tail.starts_with('(')
+                && tail.ends_with(')')
+            {
+                let base = tail[1..tail.len() - 1].trim();
+                if base == "%rip" || base == "rip" {
+                    return AsmOperand::SymDisp(head.to_string(), 0);
+                }
+            }
+        }
+    }
+
     // Format: [disp](%base[,%idx[,scale]])
     let paren_pos = s.find('(').unwrap_or(s.len());
     let disp_str = s[..paren_pos].trim();

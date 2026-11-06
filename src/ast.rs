@@ -836,7 +836,21 @@ pub fn count_init_elements(elem_ty: &Type, inits: &[InitItem]) -> usize {
     let sub = init_scalar_capacity(elem_ty);
     if sub <= 1 {
         // 元素是标量 (或容量未知): 一项一个元素
-        return inits.len();
+        // **但指定下标 [N] 项例外**: 它把光标推到 N+1, 长度至少 N+1
+        // (C11 6.7.9p22 的「最大下标 + 1」口径)。`[(' ')-32] = 1`
+        // 这类稀疏表 (内核 lib/vsprintf.c 的 spec_flag_array) 若按
+        // 项数算长度, 后续越界元素全部读 0。
+        let mut count = 0usize;
+        for item in inits {
+            if let InitItem::Designated { designator, .. } = item {
+                if let Some(next) = designator_outer_next_index(designator) {
+                    count = count.max(next);
+                    continue;
+                }
+            }
+            count += 1;
+        }
+        return count;
     }
     let mut count = 0usize;
     let mut cursor = 0usize; // 当前元素内已吞的标量数
@@ -850,6 +864,17 @@ pub fn count_init_elements(elem_ty: &Type, inits: &[InitItem]) -> usize {
         _ => false,
     };
     for item in inits {
+        // 指定下标 [N] / [F ... L]: 光标先跳到该下标, 该元素计为一个。
+        if let InitItem::Designated { designator, .. } = item {
+            if let Some(next) = designator_outer_next_index(designator) {
+                if cursor > 0 {
+                    count += 1;
+                    cursor = 0;
+                }
+                count = count.max(next);
+                continue;
+            }
+        }
         // 自完结项: 显式花括号 / 指定初始化器 / (字符数组元素的) 字符串
         let self_contained = match item {
             InitItem::Designated { .. } => true,
@@ -875,6 +900,27 @@ pub fn count_init_elements(elem_ty: &Type, inits: &[InitItem]) -> usize {
         count += 1;
     }
     count
+}
+
+/// 指定符驱动的「外层下标下一个位置」: `[N]` → `N+1`, `[F ... L]` → `L+1`。
+/// 只认**最外层**的首个 designator: `.field` (结构体成员) 不影响所在数组的长度,
+/// `Chain([Index(n), .field])` 的 `n` 仍然算外层下标。
+/// 常量表达式求值失败时返回 None (调用方退回「一项一个元素」口径)。
+fn designator_outer_next_index(d: &Designator) -> Option<usize> {
+    let bump = |e: &Expr| -> Option<usize> {
+        let v = crate::const_eval::eval(e).ok()?;
+        usize::try_from(v).ok().map(|n| n + 1)
+    };
+    match d {
+        Designator::Index(e) => bump(e),
+        Designator::Range(_, last) => bump(last),
+        Designator::Chain(items) => match items.first() {
+            Some(Designator::Index(e)) => bump(e),
+            Some(Designator::Range(_, last)) => bump(last),
+            _ => None,
+        },
+        Designator::Field(_) => None,
+    }
 }
 
 /// 由初始化器补齐不完整数组维度（C11 6.7.9p22）。推导规则只有这一处：

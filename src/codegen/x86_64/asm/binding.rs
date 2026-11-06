@@ -29,14 +29,19 @@ pub struct AsmOpBinding {
     ///   204 = 条件码 (reg 字段为 cc ASCII 字母)
     ///   205-208 = 显式子寄存器 (reg 字段为 GP 索引, 205=8b 206=16b 207=32b 208=64b)
     pub(crate) xmm_width: u8,
-    /// For inout (`+r`) operands whose lvalue is a non-Ident expression (e.g.
-    /// `*bar()`), `prepare_asm_binding` evaluates the expression once to load
-    /// the current value into the bound register.  On writeback, re-running
-    /// `gen_lvalue_addr` would re-evaluate side-effecting sub-expressions
-    /// (e.g. call `bar()` a second time).  When `Some`, writeback uses this
-    /// pre-computed address pointer (held in a callee-saved scratch register
-    /// across the asm) instead of recomputing it.
-    pub(crate) saved_inout_addr_reg: Option<u8>,
+    /// 非 Ident 输出左值（`*p` / `a[i]` / `s.f`，含 `+r` inout）的写回地址驻足号。
+    ///
+    /// 地址在模板之前算好并整条 asm 期间持有：写回时重跑 `gen_lvalue_addr` 既会
+    /// 二次求值副作用子表达式（`+r"(*bar())` 把 bar() 调两次，990130-1.c），
+    /// 也会踩掉还没写回的输出寄存器（求值固定用 %rax/%rcx/%rdx 当暂存）。
+    pub(crate) saved_addr_reg: Option<u8>,
+    /// 驻足池（rbx/r12/r14/r15）被变量的家与本句 asm 的固定操作数占满时，地址改落
+    /// 一个 sret 帧槽（`alloc_sret_slot(8)`）。写回只做 `load_stack` + store，不再求值。
+    pub(crate) saved_addr_slot: Option<i64>,
+    /// 内存操作数（`"m"` / `"+m"`）的地址暂存号：模板里展开成 `(%reg)`，整条 asm
+    /// 期间持着地址。asm 编完（含写回）后必须 `free_callee_saved` 归还，否则同一
+    /// 函数里每多一条带内存操作数的 asm，就永久少一个可用的 callee-saved 号。
+    pub(crate) mem_addr_reg: Option<u8>,
 }
 
 /// `parse_asm_data_expr` 的求值结果:

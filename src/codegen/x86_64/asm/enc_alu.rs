@@ -1330,11 +1330,17 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(0, *disp, ASM_BASE_RIP, None, 1);
                 // disp32 就压在刚写的 ModRM 后面：重定位位置要在立即数之前算。
                 let pos = self.pos() - 4;
+                // addend 必须按「disp32 后面还有没有字节」算：PC32 的 A = off - 4 - imm_size。
+                // testb/testl 的立即数紧跟在 disp32 后面，CPU 从 P+4+imm_size 处取 RIP：
+                // 沿用 `-4` 会让有效地址整体偏 imm_size（实测 `_static_cpu_has` 的
+                // `testb $1, boot_cpu_data+114` 得到 `boot_cpu_data+0x73`，GCC 是 `+0x72` ——
+                // 读的是相邻的另一个 capability bit，运行期 CPU 特性判定就错了）。
+                let imm_size: i64 = if bits == 8 { 1 } else { 4 };
                 self.pending_code_rels.push(PendingCodeRel {
                     offset: pos,
                     symbol: sym.clone(),
                     rel_type: R_X86_64_PC32,
-                    addend: -4,
+                    addend: -4 - imm_size,
                 });
                 if bits == 8 {
                     self.emit_insn(&Insn::raw(&[*v as u8]));

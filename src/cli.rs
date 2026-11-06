@@ -112,7 +112,12 @@ pub struct Config {
     pub sse: bool,
     pub kernel_code_model: bool,
     pub auto_var_init_zero: bool, // -ftrivial-auto-var-init=zero
-    pub stack_protector: bool,    // -fstack-protector / -fstack-protector-all
+    pub stack_protector: bool, // -fstack-protector / -fstack-protector-all / -fstack-protector-strong
+    /// `-fstack-protector-strong`：插桩范围按 GCC 的 strong 判据**逐函数**判定
+    /// （数组局部 / 局部地址被取 / VLA），而不是把每个函数都插桩。
+    /// 内核早启动路径（`native_write_cr4()` 在 GS 基址建立前执行）依赖这一点：
+    /// 它只有标量局部，GCC 不插 canary，dcc 若无条件插就会在 `%gs:0x28` 上 #PF。
+    pub stack_protector_strong: bool,
     pub unwind_tables: bool,      // -fno-asynchronous-unwind-tables / -fno-unwind-tables
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
@@ -228,6 +233,13 @@ pub struct Config {
     pub instrument_functions: bool,
     /// 栈保护 guard 寄存器 (-mstack-protector-guard-reg=)
     pub stack_protector_guard_reg: StackGuardReg,
+    /// `-mstack-protector-guard-symbol=<sym>`：canary 符号名。
+    ///
+    /// 内核 x86_64 传的就是 `-mstack-protector-guard-symbol=__ref_stack_chk_guard`
+    /// （arch/x86/Makefile 在 CONFIG_STACKPROTECTOR + SMP 下无条件追加），GCC 因此发
+    /// `%gs:sym(%rip)` 而不是 `%gs:0x28`；后者要 GS 基址已指向 per-cpu 区，而早启动
+    /// 路径（`native_write_cr4()`）在 GS 基址为 0 时就执行了。
+    pub stack_protector_guard_symbol: Option<String>,
     /// -fstack-clash-protection: 大块栈分配逐页探测
     pub stack_clash_protection: bool,
     /// 严格别名假设（默认 true，与 gcc 一致）。
@@ -1025,8 +1037,7 @@ fn is_known_m_option(opt: &str) -> bool {
         "-mstack-protector-guard-reg=",
         "-mstack-protector-guard-offset=",
         // `-mstack-protector-guard-symbol=__ref_stack_chk_guard`：指定 canary 符号名。
-        // dcc 不实现栈保护插桩（内核那一侧的 `-fstack-protector-strong` 同样被接受但
-        // 不产生代码），所以指定哪个符号对产物没有可观察差别；带值的旗标按前缀固定。
+        // 真语义在解析臂里（发 `%gs:sym(%rip)`），这里只负责让「带值旗标」不报未知。
         "-mstack-protector-guard-symbol=",
         // `-mstack-alignment=N`：clang 的栈对齐粒度。dcc 的帧布局与对齐由自己的
         // `Target`/帧预算规则决出（内核实际传 8/4，都是比默认对齐更宽的要求），
@@ -1492,6 +1503,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut kernel_code_model = false;
     let mut auto_var_init_zero = false;
     let mut stack_protector = false;
+    let mut stack_protector_strong = false;
     let mut unwind_tables = true;
     let mut function_return_thunk_extern = false;
     let mut indirect_branch_thunk_extern = false;
@@ -1562,6 +1574,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut ftrace_mode = FtraceMode::None;
     let mut instrument_functions = false;
     let mut stack_protector_guard_reg = StackGuardReg::Fs;
+    let mut stack_protector_guard_symbol: Option<String> = None;
     let mut stack_clash_protection = false;
     let mut strict_aliasing = true;
     let mut strict_overflow = true;
@@ -2554,11 +2567,20 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-mno-apx" => cpu_feature_overrides.apx_f = Some(false),
             "-mcmodel=kernel" => kernel_code_model = true,
             "-ftrivial-auto-var-init=zero" => auto_var_init_zero = true,
-            "-fstack-protector" | "-fstack-protector-all" | "-fstack-protector-strong" => {
-                stack_protector = true
+            "-fstack-protector" | "-fstack-protector-all" => {
+                stack_protector = true;
+                stack_protector_strong = false;
+            }
+            // strong 不是「更强的 all」：GCC 对它的定义是
+            // 「basic 的判据 + 数组局部 + 取局部地址」，没有脆弱对象的函数
+            // （例如 `native_write_cr4()` 这种只有标量的早启动代码）根本不插桩。
+            "-fstack-protector-strong" => {
+                stack_protector = true;
+                stack_protector_strong = true;
             }
             "-fno-stack-protector" => {
                 stack_protector = false;
+                stack_protector_strong = false;
             }
             a if a.starts_with("-ffile-prefix-map=") => {
                 let mapping = &a["-ffile-prefix-map=".len()..];
@@ -2654,6 +2676,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-mstack-protector-guard-reg=fs" => {
                 stack_protector_guard_reg = StackGuardReg::Fs;
+            }
+            a if a.starts_with("-mstack-protector-guard-symbol=") => {
+                let sym = &a["-mstack-protector-guard-symbol=".len()..];
+                if !sym.is_empty() {
+                    stack_protector_guard_symbol = Some(sym.to_string());
+                }
             }
             // Stack clash protection
             "-fstack-clash-protection" => stack_clash_protection = true,
@@ -3294,6 +3322,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             kernel_code_model,
             auto_var_init_zero,
             stack_protector,
+            stack_protector_strong,
             unwind_tables,
             function_return_thunk_extern,
             indirect_branch_thunk_extern,
@@ -3354,6 +3383,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             ftrace_mode,
             instrument_functions,
             stack_protector_guard_reg,
+            stack_protector_guard_symbol,
             stack_clash_protection,
             strict_aliasing,
             strict_overflow,
@@ -3429,6 +3459,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             kernel_code_model,
             auto_var_init_zero,
             stack_protector,
+            stack_protector_strong,
             unwind_tables,
             function_return_thunk_extern,
             indirect_branch_thunk_extern,
@@ -3489,6 +3520,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             ftrace_mode,
             instrument_functions,
             stack_protector_guard_reg,
+            stack_protector_guard_symbol,
             stack_clash_protection,
             strict_aliasing,
             strict_overflow,

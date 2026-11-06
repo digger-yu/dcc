@@ -1,0 +1,1 @@
+flags = "-O2 -std=gnu11 -fstack-protector-strong -mstack-protector-guard-reg=gs -mstack-protector-guard-symbol=__ref_stack_chk_guard"

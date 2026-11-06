@@ -1187,6 +1187,21 @@ fn struct_abi_extended() {
     let _ = fs::remove_file(&exe);
 }
 
+/// 小尺寸 struct (<= 8B) 在块内用复合字面量初始化:
+/// 复合字面量的值通道是**缓冲地址**, 必须整块拷贝进变量槽 —— 不能把
+/// `size > 8` 当成聚合拷贝的唯一判据 (内核 `pgprot_t`/APIC fixmap 踩过:
+/// 地址被当 pte 值, 启动 #PF -> #GP -> #DF). 覆盖块内声明与语句表达式两条路径.
+#[test]
+#[cfg(unix)]
+fn struct_small_compound_init_in_block() {
+    let src = include_str!("../fixtures/c/struct_small_compound_init.c");
+    let (out, exe) = run_compile_and_run("struct-small-compound-init", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "small struct compound-literal init stored an address");
+    let _ = fs::remove_file(&exe);
+}
+
 /// a6 本体：80-bit `long double` 的对象表示 + 算术 + 比较。
 /// 夹具自己要求双层判据：stdout 的 `%Lf` 文本与 gcc 逐字符一致（防“退出码对了
 /// 但数字不同”的部分实现），退出码独立表达失败（拿 gcc 实测的 80-bit 位型做
@@ -1821,6 +1836,72 @@ fn m2_2_struct_layout() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(code, 0, "struct layout checks failed (exit={code})");
+}
+
+/// `t[i]->flex[j]`: 指针数组元素上的箭头 + 柔性数组成员下标。
+///
+/// 描述符里 `t[i]` 的基址是 StackSlotLoad (指针值已加载) 再叠 `i*8`, 物化
+/// 结果是**第 i 个指针槽的地址**; 箭头臂旧判据只认 StackFrame /
+/// GlobalSymbolAddr / ExprAddr, 把它误当成「指针值」, 于是漏掉一次解引用,
+/// 发成 `t + i*8 + off(sym) + j`。字段偏移为 0 时 (`->len`) 恰好被掩盖,
+/// 只有柔性数组/非首字段才暴露 —— 内核 scripts/kallsyms 的
+/// insert_real_symbols_in_table 因此在 O2 内联后读栈垃圾, 生成的 token 表
+/// 含控制字符, 汇编期报 unterminated string。
+///
+/// 同时钉住 `p->next->v` 与 `t[i]->field` (字段偏移 0): 前者描述符已是
+/// 指针值, 修这条时若把 Member 也算进「槽地址」就会多一次解引用。
+#[test]
+#[cfg(unix)]
+fn arrow_on_pointer_array_element_loads_slot() {
+    let src = "struct se {\n\
+               unsigned long long addr;\n\
+               unsigned int len;\n\
+               unsigned int start_pos;\n\
+               unsigned int percpu_absolute;\n\
+               unsigned char sym[] __attribute__((aligned(8)));\n\
+               };\n\
+               struct node { struct node *next; int v; };\n\
+               static unsigned char seen[256];\n\
+               static void fill(struct se **t, unsigned int n)\n\
+               {\n\
+                   unsigned int i, j;\n\
+                   for (i = 0; i < n; i++)\n\
+                       for (j = 0; j < t[i]->len; j++)\n\
+                           seen[t[i]->sym[j]] = 1;\n\
+               }\n\
+               static int tail(struct node *p) { return p->next->v; }\n\
+               int main(void)\n\
+               {\n\
+                   unsigned char raw[64];\n\
+                   struct se *s = (struct se *)raw;\n\
+                   struct se *tab[2];\n\
+                   struct node n1, n2;\n\
+                   unsigned int k;\n\
+                   for (k = 0; k < sizeof(raw); k++) raw[k] = 0;\n\
+                   s->len = 3;\n\
+                   s->sym[0] = 'A'; s->sym[1] = 'B'; s->sym[2] = 'C';\n\
+                   tab[0] = s; tab[1] = s;\n\
+                   fill(tab, 2);\n\
+                   if (!seen['A'] || !seen['B'] || !seen['C']) return 1;\n\
+                   if (seen['D']) return 2;\n\
+                   for (k = 0; k < 256; k++)\n\
+                       if (k != 'A' && k != 'B' && k != 'C' && seen[k]) return 3;\n\
+                   n2.next = 0; n2.v = 42; n1.next = &n2; n1.v = 7;\n\
+                   if (tail(&n1) != 42) return 4;\n\
+                   if (tab[1]->len != 3) return 5;\n\
+                   return 0;\n\
+               }\n";
+    for flag in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("flex-ptr-slot-deref", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 应能编译: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{flag}: 指针数组元素箭头解引用错 (exit={rc})");
+    }
 }
 
 /// 前向声明的 struct 在使用点回填完整定义 (运行期)。

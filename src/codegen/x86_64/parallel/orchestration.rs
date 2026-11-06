@@ -217,6 +217,7 @@ impl Codegen {
             pending_custom_sec_rels: cg.pending_custom_sec_rels,
             pushsection_code_ranges: cg.pushsection_code_ranges,
             pushsection_label_offsets: cg.pushsection_label_offsets,
+            pending_asm_internal_symdisp_rels: cg.pending_asm_internal_symdisp_rels,
             extra_sections: cg.extra_sections,
             custom_sec_indices: cg.custom_sec_indices,
             // C++ 零成本异常: CFI 事实与受保护调用点必须随 chunk 带回主 Codegen,
@@ -436,6 +437,9 @@ impl Codegen {
         }
         for (pos, lbl) in chunk.label_addr_refs {
             self.label_addr_refs.push((base + pos, lbl));
+        }
+        for (pos, lbl) in chunk.pending_asm_internal_symdisp_rels {
+            self.pending_asm_internal_symdisp_rels.push((base + pos, lbl));
         }
         let mut sec_map = HashMap::new();
         // old_chunk_idx → (global_sec_idx, data_offset_delta)
@@ -855,6 +859,7 @@ mod tests {
             pending_custom_sec_rels: vec![],
             pushsection_code_ranges: vec![],
             pushsection_label_offsets: HashMap::new(),
+            pending_asm_internal_symdisp_rels: vec![],
             extra_sections: vec![],
             custom_sec_indices: HashMap::new(),
             func_cfi: None,

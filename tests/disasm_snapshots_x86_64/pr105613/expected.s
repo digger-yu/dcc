@@ -33,11 +33,10 @@ mov %rdi,%rax
 mov %rax,%rdi
 lea -0x2d8(%r13),%rsi
 mov $0x10,%ecx
-cld
 rep movsb %ds:(%rsi),%es:(%rdi)
 xor %eax,%eax
 <nop padding>
-mov %r13,%rsp
+add $0x310,%rsp
 pop %r13
 ret
 <nop padding>

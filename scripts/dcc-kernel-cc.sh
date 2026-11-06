@@ -251,13 +251,18 @@ fi
 if ! printf '%s\n' "$@" | grep -q -- '-DCC_USING_FENTRY'; then
     set -- -DCC_USING_FENTRY "$@"
 fi
-# 过滤 -mno-sse 系列: dcc 后端始终使用 SSE
+# `-mno-sse` 系列必须**原样透传**：dcc 后端以前无条件用 SSE，所以这里曾把它们吞掉。
+# 但内核是所有 C TU 都带 `-mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -mno-sse4a`
+# 编的，目标是 `CR4.OSFXSR=0` 的启动早期也要能跑：变参序言里那 8 条 `movups %xmmN`
+# 一旦发出来就是 #UD（实测 PVH 启动在 `early_printk` 的第一条 movups 上死循环）。
+# dcc 的 `target.sse` 已经把 va save area / va_arg XMM 槽 / float 参数登记 / x87 选择
+# 都按它分叉，透传后序言只存 48B 的 GP 槽，与 gcc 的 `-mno-sse` 产物同形。
+#
 # 过滤 -Werror=implicit-function-declaration: dcc 不识别部分内核函数声明,
 # 降级为 warning 以避免编译失败
 out=()
 for a in "$@"; do
     case "$a" in
-        -mno-sse*|-mno-mmx|-mno-3dnow*|-mno-avx*|-mno-sse4*) ;;
         -Werror=implicit-function-declaration) ;;
         *) out+=("$a") ;;
     esac

@@ -153,7 +153,10 @@ fn read_config(case_dir: &Path) -> String {
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("flags") {
-            if let Some(eq) = rest.strip_prefix('=').map(|s| s.trim()) {
+            // `flags = "..."` 的 `=` 前允许有空格（本目录所有 config.toml 都这么写）；
+            // 不 trim 就永远匹配不上 `=`，会静默回落到缺省旗标 —— 新增用例的
+            // `-fstack-protector-strong` 之类旗标就全被吞掉了。
+            if let Some(eq) = rest.trim_start().strip_prefix('=').map(|s| s.trim()) {
                 let unquoted = eq.trim_matches('"').trim_matches('\'');
                 return unquoted.to_string();
             }
@@ -325,6 +328,21 @@ const CASES: &[&str] = &[
     // 白名单内一条 cmp/test + 一条 jcc；白名单外（浮点/位域/值语境）必须仍是
     // setcc + movzbq + test 材料化。本用例是那条放行判据的唯一产物级证据。
     "direct_cond_branch",
+    // --- 控制/调试寄存器 mov 的 ModRM 口径锁 (0F 20/21/22/23) ---
+    // reg 字段 = CRn/DRn, r/m 字段 = GPR。写反时 `mov %cr4,%rax` 变成
+    // `mov %cr0,%rsp`, 执行层只在寄存器被硬件约束时才暴露 (内核 PVH 启动即
+    // triple fault), 因此必须由反汇编文本层独立盯住。
+    "ctrl_regs",
+    // --- 栈保护插桩的两条口径锁 ---
+    // stackprot_strong: `-fstack-protector-strong` 的逐函数判据 (GCC 语义)。
+    // 只有数组局部 / 取过局部地址的函数有 canary, 纯标量函数一条都没有 ——
+    // 内核 native_write_cr4() 属于后者, 无条件插桩会在 GS 基址尚未建立的
+    // 早期启动窗口里读线性地址 0x28 (#PF -> #DF, PVH triple fault)。
+    "stackprot_strong",
+    // stackprot_guard_gs: 内核 x86_64 的真实旗标组合, canary 寻址必须是
+    // `mov %gs:sym(%rip)` / `xor %gs:sym(%rip),%r11` (链接期解析到 .data 的
+    // __stack_chk_guard), 不能退化成绝对偏移 `%gs:0x28`。
+    "stackprot_guard_gs",
 ];
 
 #[test]

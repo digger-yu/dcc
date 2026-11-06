@@ -62,6 +62,9 @@ pub struct Target {
     pub kernel_code_model: bool,
     pub auto_var_init_zero: bool,
     pub stack_protector: bool,
+    /// `-fstack-protector-strong`: 插桩范围按 GCC 的 strong 判据逐函数收窄,
+    /// 而不是「所有函数都插」。见 `x86_64::emit::functions::compile_func` 的准入判据。
+    pub stack_protector_strong: bool,
     pub unwind_tables: bool,
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
@@ -74,6 +77,10 @@ pub struct Target {
     pub instrument_functions: bool,
     /// Stack protector guard register
     pub stack_protector_guard_reg: StackGuardReg,
+    /// `-mstack-protector-guard-symbol=<sym>`：canary 存在该符号处，
+    /// `Some(name)` 时发 `mov/xor seg:name(%rip), ...`（内核的形态），
+    /// `None` 时退回固定偏移 `seg:0x28`（TLS canary 的形态）。
+    pub stack_protector_guard_symbol: Option<String>,
     /// -fstack-clash-protection
     pub stack_clash_protection: bool,
     /// -fno-strict-aliasing
@@ -215,6 +222,7 @@ impl Target {
             kernel_code_model: false,
             auto_var_init_zero: false,
             stack_protector: false,
+            stack_protector_strong: false,
             unwind_tables: true,
             function_return_thunk_extern: false,
             indirect_branch_thunk_extern: false,
@@ -223,6 +231,7 @@ impl Target {
             ftrace_mode: crate::cli::FtraceMode::None,
             instrument_functions: false,
             stack_protector_guard_reg: StackGuardReg::Fs,
+            stack_protector_guard_symbol: None,
             stack_clash_protection: false,
             strict_aliasing: true,
             strict_overflow: true,

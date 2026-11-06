@@ -201,6 +201,8 @@ impl IncrementalCache {
         cfg.sanitizers.cov_pc_table.hash(&mut hasher);
         // Stack protector
         cfg.stack_protector.hash(&mut hasher);
+        cfg.stack_protector_strong.hash(&mut hasher);
+        cfg.stack_protector_guard_symbol.hash(&mut hasher);
         // Unwind tables
         cfg.unwind_tables.hash(&mut hasher);
         // Bounds check
@@ -370,6 +372,7 @@ mod tests {
             kernel_code_model: false,
             auto_var_init_zero: false,
             stack_protector: false,
+            stack_protector_strong: false,
             unwind_tables: true,
             function_return_thunk_extern: false,
             indirect_branch_thunk_extern: false,
@@ -427,6 +430,7 @@ mod tests {
             linker_script: None,
             ftrace_mode: crate::cli::FtraceMode::None,
             stack_protector_guard_reg: crate::cli::StackGuardReg::Fs,
+            stack_protector_guard_symbol: None,
             stack_clash_protection: false,
             strict_aliasing: true,
             strict_overflow: true,

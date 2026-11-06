@@ -1,7 +1,7 @@
 frame_probe:
 push %r13
 mov %rsp,%r13
-sub $0x3a0,%rsp
+sub $0x170,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 <nop padding>
@@ -77,6 +77,6 @@ mov %rbx,%rax
 mov -0x10(%r13),%rbx
 mov -0x18(%r13),%r12
 <nop padding>
-mov %r13,%rsp
+add $0x170,%rsp
 pop %r13
 ret

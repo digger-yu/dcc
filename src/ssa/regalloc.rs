@@ -526,6 +526,8 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     // 就是静默错值 —— 这条是 `tests::user_bound_local_reserves_its_register` 逼出来的。
     let mut taken = ctx.taken_regs.clone();
     taken.extend(sc.user_bound_regs.iter().copied());
+    // 固定约束号一样让开：见 `Scan::asm_fixed_regs` 的实测记录。
+    taken.extend(sc.asm_fixed_regs.iter().copied());
     let spans = base_spans(func);
     // 形参入候选（`Ctx::home_params` 非空时）。需要两件配套事，缺一即错值：
     //  1. `infos` 里得有它（否则下面的循环根本看不到这个名字）；类型取 IR 的形参表；
@@ -988,6 +990,15 @@ struct Scan {
     shadowed: HashSet<String>,
     /// 出现在内联汇编操作数里的根对象名
     asm_names: HashSet<String>,
+    /// 内联汇编**固定寄存器约束**钉住的 GP 号（`a/b/c/d/S/D` 与 `{eax}` 这类显式寄存器）。
+    ///
+    /// 这些号不能拿来当变量的家：后端在 asm 之后不会把被固定约束覆盖的家重新装载回来
+    /// （写回只把结果落到栈槽/绑定表，见 `writeback_asm_operand`），于是一条
+    /// `"=b"` 就把住在 %rbx 的循环变量毁掉且再也没人恢复。实测内核
+    /// `arch/x86/kernel/cpu/scattered.c`：`cpuid` 的 `"=b"` 毁掉 `cb` 的 %rbx 家，
+    /// 下一轮把 CPUID 厂商串 `0x68747541`("Auth") 当指针读，PVH 启动第一次 #PF。
+    /// 规则 3（操作数根名拒绑）覆盖不到它 —— `cb` 本身不是任何操作数。
+    asm_fixed_regs: HashSet<u8>,
     /// 函数体里有没有嵌套函数
     has_nested_fn: bool,
     /// 用户手写 `register asm` 占住的、属于本 pass 池子的号
@@ -1102,10 +1113,19 @@ fn scan_stmt(s: &Stmt, sc: &mut Scan) {
         Stmt::Label { stmt: inner, .. } => scan_stmt(inner, sc),
         Stmt::GotoIndirect { expr, .. } => scan_expr(expr, sc),
         Stmt::AsmGoto {
-            outputs, inputs, ..
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            ..
         } => {
             for o in outputs.iter().chain(inputs.iter()) {
                 collect_asm_operand(o, &mut sc.asm_names);
+            }
+            for c in output_constraints.iter().chain(input_constraints.iter()) {
+                if let Some(reg) = asm_constraint_fixed_gp(c) {
+                    sc.asm_fixed_regs.insert(reg);
+                }
             }
         },
         Stmt::Invoke { call, .. } => scan_stmt(call, sc),
@@ -1187,13 +1207,83 @@ fn scan_expr(e: &Expr, sc: &mut Scan) {
         Expr::VaArg { ap, .. } => scan_expr(ap, sc),
         Expr::VaArgPack { .. } => {},
         Expr::AsmExpr {
-            outputs, inputs, ..
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            ..
         } => {
             for o in outputs.iter().chain(inputs.iter()) {
                 collect_asm_operand(o, &mut sc.asm_names);
             }
+            for c in output_constraints.iter().chain(input_constraints.iter()) {
+                if let Some(reg) = asm_constraint_fixed_gp(c) {
+                    sc.asm_fixed_regs.insert(reg);
+                }
+            }
         },
     }
+}
+
+/// 内联汇编约束里的**固定寄存器**号：GCC 约束字母 `a/b/c/d/S/D`，或 `{eax}` 这类
+/// 显式寄存器。None = 这条约束不钉死某个号。
+///
+/// 口径与后端规划器一致（`a→rax, b→rbx, c→rcx, d→rdx, S→rsi, D→rdi`；
+/// `r/R/g` 通用类与 `q/Q` 不钉号）。本函数只服务「变量的家不得落在固定约束号上」
+/// 这一个判据，不参与发号——所以这里不复制规划器的分配逻辑，只复制它的字母表。
+fn asm_constraint_fixed_gp(c: &str) -> Option<u8> {
+    if let (Some(s), Some(e)) = (c.find('{'), c.find('}')) {
+        if e > s + 1 {
+            return gp_reg_number(&c[s + 1..e]);
+        }
+    }
+    let core = c.trim_start_matches(['=', '+', '&', '%']);
+    if core.starts_with("@cc") || core.contains('{') {
+        return None;
+    }
+    let letters: Vec<char> = core.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if letters.iter().any(|&ch| matches!(ch, 'r' | 'R' | 'g')) {
+        return None;
+    }
+    if letters.contains(&'a') {
+        Some(0)
+    } else if letters.contains(&'b') {
+        Some(3)
+    } else if letters.contains(&'c') {
+        Some(1)
+    } else if letters.contains(&'d') {
+        Some(2)
+    } else if letters.contains(&'S') {
+        Some(6)
+    } else if letters.contains(&'D') {
+        Some(7)
+    } else {
+        None
+    }
+}
+
+/// 显式寄存器名（`{eax}`/`{cl}`/`{r12}`…）→ GP 号。段寄存器、`rip` 等返回 None。
+fn gp_reg_number(name: &str) -> Option<u8> {
+    let n = name.strip_prefix('%').unwrap_or(name);
+    Some(match n {
+        "rax" | "eax" | "ax" | "al" | "ah" => 0,
+        "rcx" | "ecx" | "cx" | "cl" | "ch" => 1,
+        "rdx" | "edx" | "dx" | "dl" | "dh" => 2,
+        "rbx" | "ebx" | "bx" | "bl" | "bh" => 3,
+        "rsp" | "esp" | "sp" | "spl" => 4,
+        "rbp" | "ebp" | "bp" | "bpl" => 5,
+        "rsi" | "esi" | "si" | "sil" => 6,
+        "rdi" | "edi" | "di" | "dil" => 7,
+        _ => {
+            let rest = n.strip_prefix('r')?;
+            let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            let v: u8 = digits.parse().ok()?;
+            if (8..=15).contains(&v) {
+                return Some(v);
+            }
+            return None;
+        },
+    })
 }
 
 /// 一个 asm 操作数表达式的根对象名（`x`、`x[i]`、`p->f`、`(*p).f` 都算 `x`/`p`）。

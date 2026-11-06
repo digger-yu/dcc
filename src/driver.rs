@@ -407,6 +407,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let preprocessed = pp_out.text;
     let line_map = pp_out.line_map;
     let pack_history = pp_out.pack_history;
+    if std::env::var_os("DCC_DEBUG_PACK").is_some() {
+        eprintln!("pack_history ({} entries): {:?}", pack_history.len(), pack_history);
+    }
     let weak_symbols = pp_out.weak_symbols;
     let include_deps = pp_out.deps;
     let pp_macros = pp_out.macros;
@@ -1091,6 +1094,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.kernel_code_model = cfg.kernel_code_model;
     target.auto_var_init_zero = cfg.auto_var_init_zero;
     target.set_stack_protector(cfg.stack_protector);
+    target.stack_protector_strong = cfg.stack_protector_strong;
     target.unwind_tables = cfg.unwind_tables;
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;
     target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
@@ -1099,6 +1103,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.ftrace_mode = cfg.ftrace_mode;
     target.instrument_functions = cfg.instrument_functions;
     target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
+    target.stack_protector_guard_symbol = cfg.stack_protector_guard_symbol.clone();
     target.stack_clash_protection = cfg.stack_clash_protection;
     // -fno-strict-aliasing: 优化器当前不做类型双关假设 (TBAA), 标志
     // 存储于 target 供未来优化 pass 参考.
@@ -2644,6 +2649,7 @@ fn emit_native_program(
     target.kernel_code_model = cfg.kernel_code_model;
     target.auto_var_init_zero = cfg.auto_var_init_zero;
     target.set_stack_protector(cfg.stack_protector);
+    target.stack_protector_strong = cfg.stack_protector_strong;
     target.unwind_tables = cfg.unwind_tables;
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;
     target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
@@ -2652,6 +2658,7 @@ fn emit_native_program(
     target.ftrace_mode = cfg.ftrace_mode;
     target.instrument_functions = cfg.instrument_functions;
     target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
+    target.stack_protector_guard_symbol = cfg.stack_protector_guard_symbol.clone();
     target.stack_clash_protection = cfg.stack_clash_protection;
     target.strict_aliasing = cfg.strict_aliasing;
     target.strict_overflow = cfg.strict_overflow;

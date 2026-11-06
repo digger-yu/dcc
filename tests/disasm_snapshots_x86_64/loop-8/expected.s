@@ -1,7 +1,7 @@
 bar:
 push %r13
 mov %rsp,%r13
-sub $0x300,%rsp
+sub $0xd0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x48(%r13)
@@ -31,14 +31,13 @@ add $0x10,%rsp
 jmp <bar>
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xd0,%rsp
 pop %r13
 ret
-<nop padding>
 main:
 push %r13
 mov %rsp,%r13
-sub $0x300,%rsp
+sub $0xd0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov $0x0,%eax
@@ -105,6 +104,6 @@ add $0x20,%rsp
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xd0,%rsp
 pop %r13
 ret

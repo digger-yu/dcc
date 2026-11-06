@@ -1,7 +1,7 @@
 j_signed:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov %rsi,-0x48(%r13)
@@ -10,7 +10,7 @@ movslq %esi,%r8
 cmp %r8d,%eax
 jge <j_signed>
 mov $0x1,%eax
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 movslq -0x40(%r13),%rax
@@ -19,19 +19,19 @@ cmp %r8d,%eax
 jl <j_signed>
 mov $0x2,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov $0x3,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 <nop padding>
 j_unsigned:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov %rsi,-0x48(%r13)
@@ -41,7 +41,7 @@ cmp %r8d,%eax
 jbe <j_unsigned>
 mov $0x1,%eax
 mov %eax,%eax
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov -0x40(%r13),%eax
@@ -51,20 +51,20 @@ ja <j_unsigned>
 mov $0x2,%eax
 mov %eax,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov $0x3,%eax
 mov %eax,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 <nop padding>
 j_narrow:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 movzbl %dil,%eax
@@ -72,26 +72,26 @@ movzbq %al,%rax
 cmp $0xc8,%eax
 jle <j_narrow>
 mov $0x1,%eax
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov $0x0,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 <nop padding>
 j_ptr:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov %rdi,%rax
 test %rax,%rax
 je <j_ptr>
 mov $0x1,%eax
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov -0x40(%r13),%rax
@@ -99,19 +99,19 @@ test %rax,%rax
 jne <j_ptr>
 mov $0x2,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov $0x3,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 <nop padding>
 j_ternary:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov %rsi,-0x48(%r13)
@@ -124,14 +124,14 @@ jmp <j_ternary>
 mov $0x16,%eax
 movslq %eax,%rax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 <nop padding>
 j_dowhile:
 push %r13
 mov %rsp,%r13
-sub $0x310,%rsp
+sub $0xe0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x60(%r13)
@@ -161,14 +161,14 @@ jmp <j_dowhile>
 movslq %ebx,%rax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xe0,%rsp
 pop %r13
 ret
 <nop padding>
 j_float_still_materializes:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movsd %xmm0,-0x40(%r13)
@@ -190,19 +190,19 @@ je <j_float_still_materializes>
 mov $0x1,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 j_bitfield_still_materializes:
 push %r13
 mov %rsp,%r13
-sub $0x2f0,%rsp
+sub $0xc0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov %rdi,%rax
@@ -214,19 +214,19 @@ movzbq %al,%rax
 test %eax,%eax
 je <j_bitfield_still_materializes>
 mov $0x1,%eax
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 mov $0x0,%eax
 <nop padding>
-mov %r13,%rsp
+add $0xc0,%rsp
 pop %r13
 ret
 <nop padding>
 j_nested_value_still_materializes:
 push %r13
 mov %rsp,%r13
-sub $0x310,%rsp
+sub $0xe0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x58(%r13)
@@ -241,14 +241,14 @@ movslq %eax,%rax
 mov %eax,%ebx
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
-mov %r13,%rsp
+add $0xe0,%rsp
 pop %r13
 ret
 <nop padding>
 j_bool_result_still_materializes:
 push %r13
 mov %rsp,%r13
-sub $0x310,%rsp
+sub $0xe0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x50(%r13)
@@ -264,12 +264,12 @@ test %eax,%eax
 je <j_bool_result_still_materializes>
 mov $0x1,%eax
 mov -0x10(%r13),%rbx
-mov %r13,%rsp
+add $0xe0,%rsp
 pop %r13
 ret
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-mov %r13,%rsp
+add $0xe0,%rsp
 pop %r13
 ret

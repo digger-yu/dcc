@@ -81,20 +81,27 @@ impl Codegen {
 
     /// 把一个 `.text` 发射位置翻译成它最终所在的 ELF 节与节内偏移。
     ///
-    /// 可执行 pushsection（`.fixup` / `.altinstr_replacement`）的代码会整段搬到自己的
-    /// 节里，所以落在已搬走区间内的标号必须指向那个节，不能继续指 `.text`。
+    /// 两类区间会整段搬走：
+    ///   * 可执行 pushsection（`.fixup` / `.altinstr_replacement`）——`pushsection_code_ranges`；
+    ///   * 带 `__section` 属性 / `-ffunction-sections` 的函数——`custom_func_move_ranges`。
+    /// 落在区间内的标号必须指向目标节，不能继续指 `.text`：函数搬走后原位只剩 0x90，
+    /// `__jump_table` 的 `code` 字段引用函数体内 `1:` 时会指进 NOP 洞（运行时
+    /// `insn_decode` 读到 `length=1`，`arch_jump_entry_size` 触发 BUG_ON）。
+    ///
+    /// 先查 pushsection（可执行 pushsection 常常嵌套在函数体内，是更内层的区间）；
     /// 区间边界取左闭右开：`pos == start + size` 是「区间后的下一个 `.text` 字节」，
-    /// 归 `.text`。区间**内部**的标号应当已经进了 `pushsection_label_offsets`（在
-    /// `close_exec_pushsection` / `emit_pushsection_data` 登记），调用方会先查那张表，
-    /// 不会走到这里。
+    /// 归 `.text`。
     pub(crate) fn pushsection_sym_loc(&self, pos: u64) -> (u16, u64) {
-        self.pushsection_code_ranges
+        for (start, size, sec_idx, sec_off) in self
+            .pushsection_code_ranges
             .iter()
-            .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
-            .map(|(start, _size, sec_idx, sec_off)| {
-                ((*sec_idx + 7) as u16, *sec_off + (pos - start))
-            })
-            .unwrap_or((1u16, pos))
+            .chain(self.custom_func_move_ranges.iter())
+        {
+            if pos >= *start && pos < *start + *size {
+                return ((*sec_idx + 7) as u16, *sec_off + (pos - start));
+            }
+        }
+        (1u16, pos)
     }
 
     /// Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
@@ -951,6 +958,36 @@ impl Codegen {
                 ty: STT_SECTION,
                 visibility: STV_DEFAULT,
             });
+        }
+
+        // 内联 asm 跨节引用 pushsection 里的标号：GAS 对 `lea (2f)(%rip)`（`2:` 定义在
+        // `.pushsection __bug_table`）发的是「目标节符号 + 节内偏移」的 PC32，节符号
+        // 必须存在。这里只为本 TU 里**真被 pending_code_rels 引用的自定义节**补
+        // STT_SECTION：范围最小，不改变其余对象的符号表。
+        {
+            let referenced_secs: std::collections::HashSet<&str> = self
+                .pending_code_rels
+                .iter()
+                .map(|r| r.symbol.as_str())
+                .collect();
+            let mut have: std::collections::HashSet<String> =
+                local_syms.iter().map(|s| s.name.clone()).collect();
+            for (sec_idx, sec) in self.extra_sections.iter().enumerate() {
+                if sec.data.is_empty() || !referenced_secs.contains(sec.name.as_str()) {
+                    continue;
+                }
+                if have.insert(sec.name.clone()) {
+                    local_syms.push(ElfSym {
+                        name: sec.name.clone(),
+                        section: (7 + sec_idx) as u16,
+                        value: 0,
+                        size: sec.data.len() as u64,
+                        bind: STB_LOCAL,
+                        ty: STT_SECTION,
+                        visibility: STV_DEFAULT,
+                    });
+                }
+            }
         }
 
         // C++ 零成本异常: `.gcc_except_table` 的节符号 (LOCAL)。FDE 里的 LSDA

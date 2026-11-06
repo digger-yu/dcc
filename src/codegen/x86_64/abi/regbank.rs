@@ -217,6 +217,24 @@ impl RegBank {
         self.alloc_temp_except(None)
     }
 
+    /// 按号发临时值：号在池内、当前未被占用且未被禁用时占用它。
+    ///
+    /// 与 `alloc_temp` 的唯一区别是**选择权在调用方**。内联 asm 的内存操作数地址
+    /// 寄存器必须避开本条 asm 的 clobber 名单（模板会毁掉它），而 `alloc_temp` 只按
+    /// 池序发号；调用方拿到 clobber 号后再退让，若用 `claim` 钉住就等于把号永久占掉
+    /// （实测 apic.o 的 `call_on_stack` 被前面几条 asm 占掉 callee-saved 号后报
+    /// impossible constraint）。这里只占用 `allocated`，asm 编完可 `release` 归还。
+    pub fn alloc_temp_named(&mut self, reg: u8) -> bool {
+        match self.bit_of(reg) {
+            Some(bit) if self.allocated & bit == 0 && self.banned & bit == 0 => {
+                self.allocated |= bit;
+                self.used_by_self |= bit;
+                true
+            },
+            _ => false,
+        }
+    }
+
     /// 同上，但跳过 `except`。
     ///
     /// 需要它的场景只有一个：Binop 的「右操作数不会写 dst，所以左值不必搬走」

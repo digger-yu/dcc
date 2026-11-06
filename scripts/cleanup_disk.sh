@@ -9,6 +9,12 @@
 #   bash scripts/cleanup_disk.sh --only 1 # 只清指定项（逗号分隔，如 --only 1,2）
 #                                         # 全树构建中途腾磁盘请用这一条：默认模式会连
 #                                         # 项 6（.work_tmp/，文档里引用的复现夹具）一起清
+#   bash scripts/cleanup_disk.sh --cache-prune-minutes 90
+#                                         # 只删 ~/.dcc 里超过 N 分钟没写过的条目。
+#                                         # 全树构建**正在跑**时腾磁盘用这一条：本次构建
+#                                         # 刚写下的缓存（正在命中）全部保留，只清旧编译器/
+#                                         # 旧构建留下的死重量（缓存指纹里混了编译器二进制
+#                                         # 内容，换 dcc 后旧条目必然失效）。
 #
 # 重要提示:
 #   「改完前端必须手工清缓存」已经是**机制而不是纪律**：`incremental::hash_compiler_binary`
@@ -193,6 +199,27 @@ echo ""
 
 # ── 模式判断 ──────────────────────────────────────────
 MODE="${1:-interactive}"
+# 只删旧缓存条目（按 mtime 截断）。构建进行中腾磁盘时，比 `--only 1` 温和：本次构建
+# 正在命中的条目全都留着，不会把预处理缓存打成冷读。
+if [[ "$MODE" == "--cache-prune-minutes" ]]; then
+    PRUNE_MIN="${2:?--cache-prune-minutes 需要分钟数，例如 90}"
+    if [[ ! "$PRUNE_MIN" =~ ^[0-9]+$ ]]; then
+        echo "分钟数必须是正整数：$PRUNE_MIN" >&2
+        exit 2
+    fi
+    echo -e "${YELLOW}清理 ~/.dcc 中超过 ${PRUNE_MIN} 分钟未写入的条目 ...${NC}"
+    if [[ ! -d "$DCC_CACHE" ]]; then
+        echo "  跳过（目录不存在）"
+        exit 0
+    fi
+    before=$(dir_size "$DCC_CACHE")
+    # 只删文件，保留目录骨架（init_cache_dir 依赖它存在，重建也便宜）。
+    find "$DCC_CACHE" -type f ! -newermt "-${PRUNE_MIN} minutes" -delete 2>/dev/null || true
+    after=$(dir_size "$DCC_CACHE")
+    echo -e "  ${GREEN}已释放${NC} $(human_size $((before - after)))（现占用 $(human_size "$after")）"
+    echo ""
+    exit 0
+fi
 # `--only 1,3` 只跑指定项。全树构建中途要腾磁盘时只能用这一条（或 `--dry`）：默认模式
 # 连项 6（`.work_tmp/`）一起清，而那里现在放着从文档里引用过的复现夹具与量测装置
 # （`repro/jl*.c`、`kw*.sh`），清掉等于把文档里的证据链剪断。

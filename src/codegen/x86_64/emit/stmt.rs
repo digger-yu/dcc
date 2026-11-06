@@ -1871,7 +1871,20 @@ impl Codegen {
                                 | Type::Array(_, ArraySize::Const(_))
                                 | Type::Atomic(_)
                         ) && v.ty.size() > 8;
-                        if matches!(&v.ty, Type::Vector(_, _)) || is_agg {
+                        // CompoundLit 求值后 rax 里是**缓冲地址**而不是数据。
+                        // 8 字节及以下的 struct/union 装得进一个寄存器，
+                        // 但值模型仍是「地址」，直接 `mov_to_stack` 存下去就是
+                        // 把指针字节写进变量。内核 `pgprot_t prot = PAGE_KERNEL_IO;`
+                        // （1×u64 struct，内联展开成 `__inlN$_flags`）正是此形：
+                        // APIC fixmap PTE 得到 `0xFFFFFFFF87DFF398`，启动 #PF→#DF。
+                        // 判据与 `functions.rs` 顶层声明、`dispatch.rs` 语句表达式
+                        // 三处必须同步（同一份知识，不允许任一处另写一套）。
+                        let needs_compound_copy = matches!(init, Expr::CompoundLit { .. })
+                            && matches!(
+                                &v.ty,
+                                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+                            );
+                        if matches!(&v.ty, Type::Vector(_, _)) || is_agg || needs_compound_copy {
                             let dst_ty = v.ty.clone();
                             let dst_name = v.name.name.clone();
                             self.gen_aggregate_assign(&dst_name, &dst_ty, init);

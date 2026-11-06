@@ -12,6 +12,16 @@ use crate::diagnostics::Span;
 impl Codegen {
     /// gen_expr 中 Expr::Deref arm 的搬迁体, 逐字复制, 未改逻辑。
     pub fn gen_expr_deref_rvalue(&mut self, e: &Expr, ty: &Type, dst: u8) {
+        // C11 6.3.2.1p4: 函数指示符在值上下文退化为指向函数的指针。
+        // `*fp`（fp 是函数指针）的类型是**函数类型**, 它的值就是 fp 本身,
+        // 不得按对象大小再 load 一次 —— 那会把目标函数入口的头几个字节当指针。
+        // 现场: `static_call_update(key, *apic->wakeup_secondary_cpu)` 多出一条
+        // `mov (%rax),%rax`, `apic->wakeup_secondary_cpu` 为 NULL 时在
+        // arch/x86/kernel/apic/init.c 的 update_static_calls() 里直接 #PF。
+        if matches!(ty, Type::Func(_, _)) {
+            self.gen_expr(e, dst);
+            return;
+        }
         // *e: 求值内部表达式得到地址, 然后按结果类型大小加载
         let load_ty = ty.clone();
         let load_size = load_ty.size().max(1);

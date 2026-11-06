@@ -2631,13 +2631,15 @@ impl<'a> Parser<'a> {
             };
             names.push(name);
             // GCC 约束字符串，实际表达式位于随后的括号中。
-            let constraint = if self.cur.kind == TokKind::StringLit {
-                let c = Self::decode_string_literal(&self.cur.text);
+            // 相邻字符串字面量按 C 语义拼接：内核 `__pcpu_reg_8(mod, x)` 展开成
+            // `"=" "r" (pfo_val__)`，只取第一个字面量会把 `"r"` 当成函数名、
+            // 把输出左值解析成 `Call{callee:"r"}` —— 非 Ident 左值让写回静默丢弃，
+            // `this_cpu_read()` 于是读到从未写过的栈槽（内核早期启动实测）。
+            let mut constraint = String::new();
+            while self.cur.kind == TokKind::StringLit {
+                constraint.push_str(&Self::decode_string_literal(&self.cur.text));
                 self.advance();
-                c
-            } else {
-                String::new()
-            };
+            }
             constraints.push(constraint);
             let expr = if self.cur.kind == TokKind::LParen {
                 self.advance();
@@ -6663,7 +6665,30 @@ impl<'a> Parser<'a> {
                             Some(ty)
                         } else {
                             let e = self.parse_expr()?;
-                            Some(e.ty())
+                            // typeof("...") 的口径是**字符数组** char[N]（C11 6.5.2.5
+                            // 字符串字面量类型为数组，数组不在此处衰变），而
+                            // Expr::String 携带的 ty 是供右值使用的衰减指针。
+                            // 内核 include/linux/elfnote.h 的 ELFNOTE 用
+                            // `typeof(desc) _desc`，desc 为空串时 gcc 给 char[1]；
+                            // dcc 若按 char* 推，_desc 变成 8 字节并带一条
+                            // R_X86_64_64 重定位，链接后覆盖相邻 ELF note 的
+                            // namesz —— QEMU 因此读不到 Xen PHYS32_ENTRY note
+                            // （报 Error loading uncompressed kernel without PVH
+                            // ELF Note）。宽/u/U 字面量按元素字节数折算长度。
+                            let ty = match &e {
+                                Expr::String { data, ty, .. } => match ty {
+                                    Type::Ptr(elem) => {
+                                        let esz = elem.base.size().max(1);
+                                        Type::Array(
+                                            elem.clone(),
+                                            ArraySize::Const(data.len() / esz),
+                                        )
+                                    },
+                                    _ => ty.clone(),
+                                },
+                                _ => e.ty(),
+                            };
+                            Some(ty)
                         };
                         self.decl_storage = saved_storage;
                         self.decl_attrs = saved_attrs;
@@ -7140,6 +7165,12 @@ impl<'a> Parser<'a> {
                 } else {
                     // 优先级: __attribute__((packed)) > 当前 #pragma pack(n) > 自然对齐
                     let max_align = self.pack_at_line(struct_line);
+                    if std::env::var_os("DCC_DEBUG_PACK").is_some() {
+                        eprintln!(
+                            "[pack] struct {} line {} -> {:?}",
+                            nm, struct_line, max_align
+                        );
+                    }
                     Type::layout_struct_with_pack(&mut fields, is_u, max_align);
                 }
                 // __attribute__((aligned(n))) only raises the struct's
