@@ -185,6 +185,12 @@ selftest() {
         fi
     done
 
+    # 临时目录必须在函数返回前就地清掉：`wd` 是本函数的 local，返回后 EXIT trap
+    # 里再引用它就会在 `set -u` 下报「未绑定的变量」，目录也留在 /tmp 里。
+    # 主路径（reduce）没有这个问题，因为那里的 `WD` 是全局变量，见上面的注释。
+    rm -rf "$wd"
+    trap - EXIT
+
     echo "=== selftest: pass=$ok fail=$bad ==="
     (( bad == 0 ))
 }
