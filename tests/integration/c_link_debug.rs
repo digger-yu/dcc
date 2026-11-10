@@ -4259,3 +4259,234 @@ fn gnu_stack_note_section_matches_gas() {
     let _ = fs::remove_file(&src3);
     let _ = fs::remove_file(&asm_path);
 }
+
+/// `-fPIC -shared` 必须产出**真能加载**的共享库：dcc 自己出 `.o`，链接交给宿主
+/// `ld -shared` 直驱（`via host ld`，不启动 gcc/cc）。
+///
+/// 为什么这条要钉住：`-shared` 此前被当成 `-fbuiltin-linker` 的别名（解析到
+/// `output_kind = Shared` 的同时把 `built_link` 置真），而内置链接器的 `.so` 写器
+/// 没有导出表 —— `.dynsym` 条目的符号名全写 0、`.dynamic` 里也没有 DT_HASH/
+/// DT_GNU_HASH，产物 `dlopen` 成功但 `dlsym` 一个符号也找不到。Lua 的 C 模块
+/// （`luaopen_*`）正是这一形，所以判据必须是「运行时 dlsym 拿得到并调用正确」，
+/// 只看退出码与文件存在会把静默坏产物放过去。
+#[test]
+#[cfg(unix)]
+fn shared_library_is_loadable_and_exports_symbols() {
+    let dir = std::env::temp_dir();
+    let tag = temp_tag();
+    let src = dir.join(format!("dcc-shared-mod-{tag}.c"));
+    let so = dir.join(format!("dcc-shared-mod-{tag}.so"));
+    fs::write(
+        &src,
+        "int shared_add(int a, int b) { return a + b; }\nstatic int hidden_helper(void) { return 1; }\n",
+    )
+    .expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fPIC", "-shared", "-o"])
+        .arg(&so)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "dcc -fPIC -shared 失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("via host ld"),
+        "`-shared` 的链接必须由宿主 ld 直驱（不得回退到 gcc/cc），实际 stderr: {stderr}"
+    );
+
+    // 产物形态：ET_DYN + 有 `--hash-style=gnu` 形的动态表，且不是可执行文件。
+    let bytes = fs::read(&so).expect("read .so");
+    assert_eq!(&bytes[0..4], b"\x7fELF", "不是 ELF 产物");
+    assert_eq!(
+        u16::from_le_bytes([bytes[16], bytes[17]]),
+        3,
+        "共享库 e_type 必须是 ET_DYN(3)"
+    );
+    let names = elf64_section_names(&bytes);
+    assert!(
+        names.iter().any(|n| n == ".dynsym"),
+        "共享库缺 `.dynsym`（导出表），节表: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == ".dynamic"),
+        "共享库缺 `.dynamic`，节表: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == ".interp"),
+        "共享库不得带 `.interp`（那是可执行/PIE 的 PT_INTERP），节表: {names:?}"
+    );
+
+    // 宿主程序：dlopen 绝对路径 + dlsym + 真调用。`run_exe_bounded` 不传 argv，
+    // 所以路径只能编进 C 字符串字面量。
+    let host_src = dir.join(format!("dcc-shared-host-{tag}.c"));
+    let host_exe = dir.join(format!("dcc-shared-host-{tag}"));
+    fs::write(
+        &host_src,
+        format!(
+            "#include <dlfcn.h>\n\
+             #include <stdio.h>\n\
+             int main(void) {{\n\
+             \x20   void *h = dlopen(\"{so}\", RTLD_NOW);\n\
+             \x20   if (!h) {{ printf(\"dlopen: %s\\n\", dlerror()); return 1; }}\n\
+             \x20   int (*fn)(int, int) = (int (*)(int, int))dlsym(h, \"shared_add\");\n\
+             \x20   if (!fn) {{ printf(\"dlsym: %s\\n\", dlerror()); return 2; }}\n\
+             \x20   printf(\"shared_add=%d\\n\", fn(20, 22));\n\
+             \x20   return 0;\n\
+             }}\n",
+            so = so.display()
+        ),
+    )
+    .expect("write host fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-o")
+        .arg(&host_exe)
+        .arg(&host_src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "编宿主程序失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, stdout, err) = run_exe_bounded(&host_exe);
+    assert_eq!(
+        code,
+        0,
+        "加载 dcc 产出的 .so 失败 (rc={code}): {}{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).trim(),
+        "shared_add=42",
+        "dlsym 出来的函数调用结果不对"
+    );
+
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&so);
+    let _ = fs::remove_file(&host_src);
+    let _ = fs::remove_file(&host_exe);
+}
+
+/// 共享库对**宿主未定义符号**必须放行，留给加载期绑定。
+///
+/// 这是 Lua C 模块的常态：`luaopen_lib1_sub` 里调 `lua_gettop` 等 12 个 `lua_*`，
+/// 它们都只存在于主程序（`-Wl,-E` 导出）里。旧路径（`-shared` ⇒ 内置链接器）
+/// 在这里直接报一串 E0302 未定义符号，于是模块根本链不出来；`ld -shared`
+/// 则按规范保留 `U` 形态。这里连「宿主符号真的在运行时被解析」一起验。
+#[test]
+#[cfg(unix)]
+fn shared_library_leaves_undefined_symbols_for_runtime_binding() {
+    let dir = std::env::temp_dir();
+    let tag = temp_tag();
+    let src = dir.join(format!("dcc-shared-undef-{tag}.c"));
+    let so = dir.join(format!("dcc-shared-undef-{tag}.so"));
+    fs::write(
+        &src,
+        "extern int host_export(void);\nint shared_call_host(void) { return host_export() + 1; }\n",
+    )
+    .expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fPIC", "-shared", "-o"])
+        .arg(&so)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "未定义宿主符号不得阻止 .so 链接: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 宿主定义 `host_export` 并以 `-Wl,-E` 导出（与 lua 主程序的构建同形）。
+    let host_src = dir.join(format!("dcc-shared-undef-host-{tag}.c"));
+    let host_exe = dir.join(format!("dcc-shared-undef-host-{tag}"));
+    fs::write(
+        &host_src,
+        format!(
+            "#include <dlfcn.h>\n\
+             #include <stdio.h>\n\
+             int host_export(void) {{ return 41; }}\n\
+             int main(void) {{\n\
+             \x20   void *h = dlopen(\"{so}\", RTLD_NOW);\n\
+             \x20   if (!h) {{ printf(\"dlopen: %s\\n\", dlerror()); return 1; }}\n\
+             \x20   int (*fn)(void) = (int (*)(void))dlsym(h, \"shared_call_host\");\n\
+             \x20   if (!fn) {{ printf(\"dlsym: %s\\n\", dlerror()); return 2; }}\n\
+             \x20   printf(\"from_host=%d\\n\", fn());\n\
+             \x20   return 0;\n\
+             }}\n",
+            so = so.display()
+        ),
+    )
+    .expect("write host fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-Wl,-E", "-o"])
+        .arg(&host_exe)
+        .arg(&host_src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "编宿主程序失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, stdout, err) = run_exe_bounded(&host_exe);
+    assert_eq!(
+        code,
+        0,
+        "加载期绑定失败 (rc={code}): {}{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).trim(),
+        "from_host=42",
+        "模块没调用到主程序导出的符号"
+    );
+
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&so);
+    let _ = fs::remove_file(&host_src);
+    let _ = fs::remove_file(&host_exe);
+}
+
+/// `-fbuiltin-linker -shared` 必须**硬错**，不能产出「dlopen 成功、dlsym 全空」的
+/// 静默坏产物。
+///
+/// 内置链接器的 `.so` 写器缺整块导出能力（`st_name` 全 0、无 hash 表），修它需要
+/// 重写 dynsym/hash/相对重定位，属于独立工程；在补齐之前，唯一符合「链上 ⇒ 产物
+/// 必须能跑」底线的行为就是拒绝。报错里要指出去掉该选项即可（改由宿主 ld 链）。
+#[test]
+#[cfg(unix)]
+fn builtin_linker_rejects_shared_output() {
+    let dir = std::env::temp_dir();
+    let tag = temp_tag();
+    let src = dir.join(format!("dcc-shared-builtin-{tag}.c"));
+    let so = dir.join(format!("dcc-shared-builtin-{tag}.so"));
+    fs::write(&src, "int builtin_add(int a, int b) { return a + b; }\n").expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fPIC", "-shared", "-fbuiltin-linker", "-o"])
+        .arg(&so)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        !out.status.success(),
+        "内置链接器必须拒绝 -shared（它写不出可加载的导出表）"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot emit a loadable shared object"),
+        "报错要说清是内置链接器不能产出共享库，实际: {stderr}"
+    );
+    assert!(
+        !so.exists(),
+        "拒绝时必须不留半成品产物: {}",
+        so.display()
+    );
+    let _ = fs::remove_file(&src);
+}

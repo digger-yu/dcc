@@ -215,9 +215,22 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         );
     }
 
-    // -pie / -shared / -fbuiltin-linker / .o 自动链接：走内置全链接器
+    // -pie / -fbuiltin-linker / .o 自动链接：走内置全链接器
     if cfg.built_link {
         return run_builtin_linker(&cfg);
+    }
+
+    // -shared（未显式要求 -fbuiltin-linker）：产出 ET_DYN 共享库。
+    // 编译段仍是 dcc 自己的 codegen（逐个 TU 出 .o，`-fPIC` 由 codegen 读取），
+    // 链接段交给宿主 `ld -shared` 直驱（不起 gcc/cc）。
+    if cfg.output_kind == LinkerOutputKind::Shared
+        && !cfg.relocatable
+        && !cfg.emit_asm
+        && !cfg.preprocess_only
+        && !cfg.dep_no_compile
+        && !cfg.syntax_only
+    {
+        return run_shared_link(&cfg);
     }
 
     // Multi-file parallel compilation: -c/-S/-E/-M/-MM/-fsyntax-only with
@@ -2839,13 +2852,29 @@ fn dynamic_linker_path(arch: crate::debug::ArchKind) -> String {
     .to_string()
 }
 
-/// 内置全链接器：合并多个 .o → 写 ET_EXEC / ET_DYN（PIE / .so）
+/// 内置全链接器：合并多个 .o → 写 ET_EXEC / ET_DYN（PIE）
+///
+/// `.so` 不在支持范围：`-shared` 现在走正常链接（宿主 ld 直驱，`run_shared_link`）。
+/// 内置链接器的 `.so` 输出缺 `.dynsym` 导出这一整块（导入符号的 `st_name` 全为 0、
+/// `.dynamic` 里也没有 DT_HASH/DT_GNU_HASH），产物能 `dlopen` 但 `dlsym` 一个符号也
+/// 找不到 —— 那是「链上 ⇒ 产物必须能跑」所禁的静默坏产物，所以这里硬错而不是降级。
 fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.inputs.is_empty() {
         return Err(vec![Diagnostic::err(
             "E0300",
             "no input files for built-in linker",
             crate::diagnostics::Span::point("", 0, 0),
+        )]);
+    }
+    if cfg.output_kind == LinkerOutputKind::Shared {
+        return Err(vec![Diagnostic::err(
+            "E0320",
+            "built-in linker cannot emit a loadable shared object (-shared): its .so writer \
+             has no dynamic symbol exports (imported .dynsym entries are written with st_name=0 \
+             and .dynamic carries no DT_HASH/DT_GNU_HASH), so dlopen() succeeds while dlsym() \
+             finds nothing. Drop -fbuiltin-linker to link the .so through the host ld (dcc still \
+             compiles every translation unit itself).",
+            crate::diagnostics::Span::point(&cfg.output.display().to_string(), 0, 0),
         )]);
     }
     // 源文件输入 (.c/.i/.S 等): 先编译为临时 .o 再交给内置链接器,
@@ -3306,6 +3335,8 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 &search_paths,
                 dynamic_linker.as_deref(),
                 &host_sanitizer_flags(&cfg),
+                false,
+                None,
             ) {
                 r?;
                 eprintln!("dcc: {} (via host ld)", final_output.display());
@@ -3321,6 +3352,8 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
             verbose,
             &cfg.host_link_args,
             &host_sanitizer_flags(&cfg),
+            false,
+            None,
         );
         if link_result.is_ok() {
             eprintln!("dcc: {}", final_output.display());
@@ -3405,6 +3438,8 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
             &search_paths,
             dynamic_linker.as_deref(),
             &sanitizer_flags,
+            false,
+            None,
         ) {
             r?;
             eprintln!("dcc: {} (via host ld)", final_output.display());
@@ -3681,30 +3716,7 @@ fn host_cc_command() -> (String, Vec<String>) {
 /// 给定的 .o/.a 一起委托 host cc 链接 —— 与手动 workaround (`dcc -c` 逐个 +
 /// `dcc *.o -o`) 完全等价。临时 .o 由 `TmpObjCleanup` RAII 清理 (编译失败也删净)。
 fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
-    let mut tmp_guard = TmpObjCleanup(Vec::new());
-    let mut objs: Vec<std::path::PathBuf> = Vec::with_capacity(cfg.inputs.len());
-    for inp in &cfg.inputs {
-        let is_obj =
-            matches!(inp.extension().and_then(|e| e.to_str()), Some("o") | Some("a") | Some("obj"));
-        if is_obj {
-            objs.push(inp.clone());
-            continue;
-        }
-        let tmp_o = std::env::temp_dir().join(format!(
-            "dcc-multilink-{}-{}.o",
-            std::process::id(),
-            objs.len()
-        ));
-        let mut c = cfg.clone();
-        c.inputs = vec![inp.clone()];
-        c.output = tmp_o.clone();
-        c.relocatable = true;
-        c.built_link = false;
-        c.output_explicit = true;
-        tmp_guard.0.push(tmp_o.clone());
-        run(c)?;
-        objs.push(tmp_o);
-    }
+    let (objs, _tmp_guard) = compile_inputs_to_objects(cfg, "multilink")?;
     if host_ld_target_supported(cfg) {
         if let Some(r) = try_host_ld_link(
             &objs,
@@ -3717,6 +3729,8 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             &cfg.lib_search_paths,
             parse_dynamic_linker(&cfg.raw_args).as_deref(),
             &host_sanitizer_flags(cfg),
+            false,
+            None,
         ) {
             r?;
             if cfg.verbose {
@@ -3734,10 +3748,94 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         cfg.verbose,
         &cfg.host_link_args,
         &host_sanitizer_flags(cfg),
+        false,
+        None,
     )?;
     if cfg.verbose {
         eprintln!("dcc: {} (via host cc)", cfg.output.display());
     }
+    Ok(())
+}
+
+/// 把 `cfg.inputs` 里的每个源文件编成临时 `.o`（`-c` 语义，复用单文件 `run()`），
+/// `.o`/`.a`/`.obj` 原样透传。返回（目标文件列表，临时文件清理守卫）。
+///
+/// 可执行文件的多文件链接与 `-shared`（共享库）两条路共用这一段"逐 TU 出 .o"：
+/// 两条路只在**链接那一步**不同（`-shared` 与否），编译段没有理由各写一遍。
+fn compile_inputs_to_objects(
+    cfg: &Config,
+    tag: &str,
+) -> Result<(Vec<std::path::PathBuf>, TmpObjCleanup), Vec<Diagnostic>> {
+    let mut tmp_guard = TmpObjCleanup(Vec::new());
+    let mut objs: Vec<std::path::PathBuf> = Vec::with_capacity(cfg.inputs.len());
+    for inp in &cfg.inputs {
+        let is_obj =
+            matches!(inp.extension().and_then(|e| e.to_str()), Some("o") | Some("a") | Some("obj"));
+        if is_obj {
+            objs.push(inp.clone());
+            continue;
+        }
+        let tmp_o = std::env::temp_dir().join(format!(
+            "dcc-{}-{}-{}.o",
+            tag,
+            std::process::id(),
+            objs.len()
+        ));
+        let mut c = cfg.clone();
+        c.inputs = vec![inp.clone()];
+        c.output = tmp_o.clone();
+        c.relocatable = true;
+        c.built_link = false;
+        c.output_explicit = true;
+        tmp_guard.0.push(tmp_o.clone());
+        run(c)?;
+        objs.push(tmp_o);
+    }
+    Ok((objs, tmp_guard))
+}
+
+/// `-shared`：把输入编成 `.o` 后链成共享库（ET_DYN）。
+///
+/// 与可执行路径同构（`compile_inputs_to_objects` + 宿主链接），差别全在链接一条：
+/// 产物无 crt1、无 PT_INTERP，且**允许未定义符号**（`ld -shared` 语义）——
+/// 动态模块的 `lua_*` 就是靠这条在加载时从主程序已导出的符号里解析。
+/// 链接器优先宿主 `ld` 直驱（不起 gcc/cc），环境不满足时才退回 host cc。
+fn run_shared_link(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
+    let (objs, _tmp_guard) = compile_inputs_to_objects(cfg, "shared")?;
+    let soname = cfg.soname.as_deref();
+    if host_ld_target_supported(cfg) {
+        if let Some(r) = try_host_ld_link(
+            &objs,
+            &cfg.output,
+            &cfg.link_libs,
+            &cfg.whole_archive_libs,
+            cfg.sysroot.as_deref(),
+            cfg.verbose,
+            &cfg.host_link_args,
+            &cfg.lib_search_paths,
+            None,
+            &host_sanitizer_flags(cfg),
+            true,
+            soname,
+        ) {
+            r?;
+            eprintln!("dcc: {} (shared, via host ld)", cfg.output.display());
+            return Ok(());
+        }
+    }
+    link_objects_with_host_cc(
+        &objs,
+        &cfg.output,
+        &cfg.link_libs,
+        &cfg.whole_archive_libs,
+        cfg.sysroot.as_deref(),
+        cfg.verbose,
+        &cfg.host_link_args,
+        &host_sanitizer_flags(cfg),
+        true,
+        soname,
+    )?;
+    eprintln!("dcc: {} (shared, via host cc)", cfg.output.display());
     Ok(())
 }
 
@@ -3766,6 +3864,8 @@ fn try_host_ld_link(
     search_paths: &[PathBuf],
     dynamic_linker: Option<&str>,
     sanitizer_flags: &[String],
+    shared: bool,
+    soname: Option<&str>,
 ) -> Option<Result<(), Vec<Diagnostic>>> {
     // ASan/UBSan 运行时是 cc 驱动替我们补的（-lasan + crt 钩子）；直驱未建模，
     // 不去猜库名，直接交回 cc。
@@ -3785,6 +3885,8 @@ fn try_host_ld_link(
         dynamic_linker,
         sysroot,
         verbose,
+        shared,
+        soname,
     };
     match link::host_ld::link(&req) {
         Ok(link::host_ld::Outcome::Linked) => Some(Ok(())),
@@ -3905,6 +4007,8 @@ fn link_objects_with_host_cc(
     verbose: bool,
     host_link_args: &[String],
     sanitizer_flags: &[String],
+    shared: bool,
+    soname: Option<&str>,
 ) -> Result<(), Vec<Diagnostic>> {
     let (cc, cc_args) = host_cc_command();
     let mut cmd = Command::new(&cc);
@@ -3923,6 +4027,17 @@ fn link_objects_with_host_cc(
         cmd.arg("-lstdc++");
     }
     cmd.arg("-o").arg(output);
+    if shared {
+        // `-shared`：不夹 `-no-pie`/`-z norelro`（那是给可执行文件写的），
+        // 并透传 DT_SONAME。
+        cmd.arg("-shared");
+        if let Some(name) = soname {
+            cmd.arg(format!("-Wl,-soname,{}", name));
+        }
+    } else {
+        cmd.arg("-no-pie");
+        cmd.arg("-z").arg("norelro");
+    }
     if let Some(sr) = sysroot {
         cmd.arg(format!("--sysroot={}", sr.display()));
     }

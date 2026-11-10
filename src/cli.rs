@@ -1679,9 +1679,16 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 output_kind = LinkerOutputKind::PIE;
                 built_link = true;
             }
+            // `-shared` 只决定**产物形态**（ET_DYN 共享库），不决定用哪个链接器。
+            //
+            // 旧实现把它和 `-fbuiltin-linker` 绑在一起（`built_link = true`），于是
+            // `dcc -fPIC -shared -o lib.so lib.c` 只能走内置链接器 —— 而内置链接器的
+            // `.so` 输出没有 `.dynsym` 导出（符号名 st_name=0、无 hash 表），`dlopen`
+            // 成功但 `dlsym` 一个符号也找不到，正是「链上 ⇒ 产物必须能跑」所禁的静默
+            // 坏产物。现在与 gcc 同口径：`-shared` 走正常链接（宿主 ld 直驱，见
+            // `driver::run_shared_link`），内置链接器仍只由 `-fbuiltin-linker` 显式选中。
             "-shared" => {
                 output_kind = LinkerOutputKind::Shared;
-                built_link = true;
             }
             // PIC: 只影响稠密 switch 跳表（表项是绝对地址）能不能用，见 `Config::pic`
             "-fpic" | "-fPIC" => pic = true,
@@ -1699,7 +1706,6 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-flinker-output=so" => {
                 output_kind = LinkerOutputKind::Shared;
-                built_link = true;
             }
             "-fbuiltin-linker" => {
                 built_link = true;

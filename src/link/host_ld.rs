@@ -31,6 +31,11 @@ pub struct LinkRequest<'a> {
     pub dynamic_linker: Option<&'a str>,
     pub sysroot: Option<&'a Path>,
     pub verbose: bool,
+    /// `-shared`：产出 ET_DYN 共享库。与可执行的区别不只是少一个 `-shared`：
+    /// 不要 crt1、不要 PT_INTERP，用的是 crtbeginS/crtendS 而不是 crtbegin/crtend。
+    pub shared: bool,
+    /// `-Wl,-soname,<name>`：写进 DT_SONAME。只在 `shared` 下有语义。
+    pub soname: Option<&'a str>,
 }
 
 pub enum Outcome {
@@ -49,6 +54,10 @@ struct Toolchain {
     crtn: PathBuf,
     crtbegin: Option<PathBuf>,
     crtend: Option<PathBuf>,
+    /// 共享库专用的 PIC 版启动对象（crtbeginS.o / crtendS.o）。
+    /// 与 crtbegin/crtend 不是同一套：`S` 版没有可执行文件那套 entry/prologue。
+    crtbegin_s: Option<PathBuf>,
+    crtend_s: Option<PathBuf>,
     /// libgcc.a 所在目录；cc 驱动会自动把 `-lgcc` 加两次，直驱必须自己补
     libgcc_dir: Option<PathBuf>,
     interp: Option<String>,
@@ -123,12 +132,35 @@ fn find_crt_dir(sysroot: Option<&Path>) -> Option<(PathBuf, Option<PathBuf>)> {
 /// `scripts/sign-file`/`objtool` 报 `undefined reference to __dso_handle`。
 /// 找不到**不判失败**（静态桩场景仍可链），只是少了 ABI 支撑对象。
 fn find_crt_begin_end(crt_dir: &Path, sysroot: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    find_crt_begin_end_named(crt_dir, sysroot, "")
+}
+
+/// 按后缀找 crtbegin/crtend：`""` 是可执行文件那一套（crtbegin.o/crtend.o），
+/// `"S"` 是共享库那一套（crtbeginS.o/crtendS.o）。
+///
+/// 为什么要分：`gcc -shared` 用的是 `crtbeginS.o`。用错不会立刻报错，但会把
+/// 可执行文件那套 `__libc_csu_init`/entry 语义塞进 .so（且不给 `crtbeginS` 提供的
+/// `__dso_handle` 弱定义形状）—— 形状对不上才是真问题。
+fn find_crt_begin_end_named(
+    crt_dir: &Path,
+    sysroot: Option<&Path>,
+    suffix: &str,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let bn = format!("crtbegin{}.o", suffix);
+    let en = format!("crtend{}.o", suffix);
     let ok = |d: &Path| {
-        let b = d.join("crtbegin.o");
-        let e = d.join("crtend.o");
+        let b = d.join(&bn);
+        let e = d.join(&en);
         (b.is_file() && e.is_file()).then(|| (b, e))
     };
-    if let Some(d) = env_nonempty("DCC_HOST_CRT_BEGIN_DIR") {
+    // 环境变量覆盖按后缀区分：`DCC_HOST_CRT_BEGIN_DIR` 依旧只管可执行文件那套，
+    // 免得旧用法被静默改到 .so 上。
+    let env_name = if suffix.is_empty() {
+        "DCC_HOST_CRT_BEGIN_DIR"
+    } else {
+        "DCC_HOST_CRT_BEGIN_S_DIR"
+    };
+    if let Some(d) = env_nonempty(env_name) {
         if let Some(pair) = ok(Path::new(&d)) {
             return (Some(pair.0), Some(pair.1));
         }
@@ -236,6 +268,12 @@ fn probe(req: &LinkRequest<'_>) -> Result<Toolchain, String> {
     let (crt_dir, ld_sysroot) = find_crt_dir(req.sysroot)
         .ok_or_else(|| "找不到 crt1.o/crti.o/crtn.o（可用 DCC_HOST_CRT_DIR 指定）".to_string())?;
     let (crtbegin, crtend) = find_crt_begin_end(&crt_dir, req.sysroot);
+    // `S` 版只给 -shared 用：可执行路径不该在这里多做一次目录扫描。
+    let (crtbegin_s, crtend_s) = if req.shared {
+        find_crt_begin_end_named(&crt_dir, req.sysroot, "S")
+    } else {
+        (None, None)
+    };
     let libgcc_dir = find_libgcc_dir();
     let interp = find_interp(req.dynamic_linker, req.sysroot);
     let ld = env_nonempty("DCC_LD").unwrap_or_else(|| "ld".to_string());
@@ -247,6 +285,8 @@ fn probe(req: &LinkRequest<'_>) -> Result<Toolchain, String> {
         crt_dir,
         crtbegin,
         crtend,
+        crtbegin_s,
+        crtend_s,
         libgcc_dir,
         interp,
         ld_sysroot,
@@ -279,25 +319,53 @@ pub fn link(req: &LinkRequest<'_>) -> Result<Outcome, String> {
         Ok(tc) => tc,
         Err(why) => return Ok(Outcome::Unavailable(why)),
     };
-    let Some(interp) = tc.interp.clone() else {
-        return Ok(Outcome::Unavailable(
-            "找不到动态解释器（可用 DCC_HOST_DYN_LINKER 指定）".into(),
-        ));
+    // `.so` 没有 PT_INTERP，也不需要解释器：只有可执行文件路径才要求它。
+    let interp = if req.shared {
+        None
+    } else {
+        match tc.interp.clone() {
+            Some(i) => Some(i),
+            None => {
+                return Ok(Outcome::Unavailable(
+                    "找不到动态解释器（可用 DCC_HOST_DYN_LINKER 指定）".into(),
+                ));
+            },
+        }
     };
 
     let mut cmd = Command::new(&tc.ld);
     cmd.arg("-o").arg(req.output);
     cmd.arg("--eh-frame-hdr");
     cmd.arg("-m").arg("elf_x86_64");
-    cmd.arg("-no-pie");
-    cmd.arg("-z").arg("norelro");
-    cmd.arg("-dynamic-linker").arg(&interp);
+    if req.shared {
+        // `-shared`：ET_DYN、无 crt1、无 `-dynamic-linker`（.so 不写 PT_INTERP）。
+        // 未定义符号默认允许（与 `ld -shared` / gcc 同口径）——动态模块的
+        // `lua_*` 正是靠这条在加载时从主程序已导出的符号里解析。
+        cmd.arg("-shared");
+        if let Some(name) = req.soname {
+            cmd.arg("-soname").arg(name);
+        }
+    } else {
+        cmd.arg("-no-pie");
+        cmd.arg("-z").arg("norelro");
+        cmd.arg("-dynamic-linker").arg(interp.as_deref().unwrap_or_default());
+    }
     if let Some(sr) = &tc.ld_sysroot {
         cmd.arg(format!("--sysroot={}", sr.display()));
     }
-    cmd.arg(&tc.crt1).arg(&tc.crti);
-    if let Some(b) = &tc.crtbegin {
-        cmd.arg(b);
+    if req.shared {
+        // gcc `-shared` 的启动对象是 crti + crtbeginS（+ 末尾 crtendS + crtn）。
+        // crtbeginS 提供 `__dso_handle` / `.init_array` 支撑，缺了它 `atexit` 一族
+        // 在 .so 里会报 `undefined reference to __dso_handle`。
+        cmd.arg(&tc.crti);
+        if let Some(b) = &tc.crtbegin_s {
+            cmd.arg(b);
+        }
+    } else {
+        cmd.arg(&tc.crt1).arg(&tc.crti);
+        if let Some(b) = &tc.crtbegin {
+            cmd.arg(b);
+        }
     }
     for o in req.objects {
         cmd.arg(o);
@@ -337,13 +405,21 @@ pub fn link(req: &LinkRequest<'_>) -> Result<Outcome, String> {
         cmd.arg("-lgcc");
     }
     cmd.arg("-lc");
-    if let Some(e) = &tc.crtend {
-        cmd.arg(e);
+    if req.shared {
+        // .so 末尾同 gcc：crtendS + crtn（不需要第二份 -lgcc）。
+        if let Some(e) = &tc.crtend_s {
+            cmd.arg(e);
+        }
+        cmd.arg(&tc.crtn);
+    } else {
+        if let Some(e) = &tc.crtend {
+            cmd.arg(e);
+        }
+        if tc.libgcc_dir.is_some() {
+            cmd.arg("-lgcc");
+        }
+        cmd.arg(&tc.crtn);
     }
-    if tc.libgcc_dir.is_some() {
-        cmd.arg("-lgcc");
-    }
-    cmd.arg(&tc.crtn);
 
     if req.verbose {
         eprintln!("dcc: invoking {}: {:?}", tc.ld, cmd);
