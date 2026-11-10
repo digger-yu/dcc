@@ -131,7 +131,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | host wrapper dependency errors | `dcc-host-wrapper.sh` fails the host build when fixdep dependency generation fails instead of writing a stub `.d` file |
 | `-fprofile-values` | 启用 PGO value sampling 插桩，在函数入口生成 `__dcc_pgo_value_sample(site)` 调用；driver 自动落盘 `<stem>.pgort.c`，运行时维护 per-site value histogram 并写入 profraw v2 的 value profile section |
 | 增量预处理 (PCH) | `-fpch-include=` / `-fpch-create=` / `-fpch-include-only=`；`PchBundle` 序列化 + 宏状态哈希校验；加载/写入失败、hash 不一致和预处理错误均 warning 后回退 |
-| Linux 内核头预处理 E2E | `compiler_types.h` / `rwonce.h` / `autoconf.h` 真实内核头预处理 + 依赖图闭包追踪（`linux_header_compiler_types_preprocess_e2e` / `linux_header_rwonce_preprocess_e2e` / `linux_header_autoconf_preprocess_e2e` / `linux_header_graph_dependency_closure`） |
+| 内核风格头预处理 E2E | 测试现场生成 `compiler_types.h` / `rwonce.h` / `autoconf.h` 形态的自包含夹具（include guard、嵌套 include、`READ_ONCE`/`WRITE_ONCE`、`CONFIG_*`），零第三方文件：`kernel_style_header_compiler_types_preprocess_e2e` / `kernel_style_header_rwonce_preprocess_e2e` / `kernel_style_header_autoconf_preprocess_e2e` / `kernel_style_header_graph_dependency_closure`；真实内核头的覆盖由 `scripts/kernel_full_check.sh` 全树构建负责 |
 
 ## GCC Builtin
 

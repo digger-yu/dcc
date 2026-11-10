@@ -197,16 +197,16 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | 指标 | 实测值 |
 |------|--------|
 | 主题子文件（`tests/integration/*.rs`） | 20 |
-| 主题子文件里的 `#[test]` | 1085 |
+| 主题子文件里的 `#[test]` | 1083 |
 | 顶层 target（`tests/*.rs`，含壳） | 6 |
 | 顶层 target 里的 `#[test]`（不含主题） | 100 |
-| 索引数据行合计 | 1185 |
+| 索引数据行合计 | 1183 |
 
 ### 判据分布
 
 | 判据 | 用例数 |
 |------|--------|
-| compile | 730 |
+| compile | 728 |
 | cross-check | 170 |
 | report-only | 1 |
 | run | 275 |
@@ -216,7 +216,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | Tier | 用例数 |
 |------|--------|
-| T0 | 1180 |
+| T0 | 1178 |
 | T3 | 5 |
 
 ### C++ ABI 夹具族（磁盘真值 + 代码真值，与人工小节逐条对账）
@@ -576,8 +576,6 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_kernel.rs` | `static_key_maybe_compiles` | \`fixtures/c/skey_maybe.c\` | compile | T0 |
 | `tests/integration/c_kernel.rs` | `static_key_chain_compiles` | \`fixtures/c/skey_chain.c\` | compile | T0 |
 | `tests/integration/c_kernel.rs` | `static_key_decl_compiles` | \`fixtures/c/skey_decl.c\` | compile | T0 |
-| `tests/integration/c_kernel.rs` | `kernel_config_has_serial_console_for_qemu_boot` | (inline) | compile | T0 · cfg(unix) |
-| `tests/integration/c_kernel.rs` | `qemu_boot_real_kernel_produces_boot_log` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `kernel_object_corpus_arch_x86_kernel` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `kernel_object_corpus_kernel_sched` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `kernel_object_corpus_lib` | (inline) | compile | T0 |
@@ -594,10 +592,10 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_kernel.rs` | `tsan_with_kasan_emits_both_checks` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `kasan_store_check_on_postinc_deref_emitted` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `kasan_aggregate_load_store_above_16_bytes` | (inline) | compile | T0 |
-| `tests/integration/c_kernel.rs` | `linux_header_compiler_types_preprocess_e2e` | (inline) | compile | T0 |
-| `tests/integration/c_kernel.rs` | `linux_header_rwonce_preprocess_e2e` | (inline) | compile | T0 |
-| `tests/integration/c_kernel.rs` | `linux_header_autoconf_preprocess_e2e` | (inline) | compile | T0 |
-| `tests/integration/c_kernel.rs` | `linux_header_graph_dependency_closure` | (inline) | compile | T0 |
+| `tests/integration/c_kernel.rs` | `kernel_style_header_compiler_types_preprocess_e2e` | (inline) | compile | T0 |
+| `tests/integration/c_kernel.rs` | `kernel_style_header_rwonce_preprocess_e2e` | (inline) | compile | T0 |
+| `tests/integration/c_kernel.rs` | `kernel_style_header_autoconf_preprocess_e2e` | (inline) | compile | T0 |
+| `tests/integration/c_kernel.rs` | `kernel_style_header_graph_dependency_closure` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `kernel_opt_volatile_not_eliminated_at_o2` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `kernel_opt_barrier_prevents_reordering_at_o2` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `ftrace_modes_compile` | (inline) | compile | T0 · cfg(unix) |
