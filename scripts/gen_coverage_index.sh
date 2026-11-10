@@ -8,10 +8,10 @@
 # 依赖: 仅 bash + coreutils + awk/sed/grep/find —— 不使用 python/perl/ruby/jq
 #
 # 输入:
-#   tests/integration/*.rs        15 个主题子文件（被壳 include!，非独立 target）
-#   tests/*.rs                    6 个顶层 target（含壳 tests/integration.rs）
+#   tests/integration/*.rs        24 个主题子文件（被壳 include!，非独立 target）
+#   tests/*.rs                    7 个顶层 target（含壳 tests/integration.rs）
 #   tests/common/harness.rs       公共 harness —— 判据面的真值来源
-#   tests/common/harness/*.rs     harness 子模块（elf / cpp_frontend / driver_cli）
+#   tests/common/harness/*.rs     harness 子模块（elf / cpp_frontend / driver_cli / probe）
 #   tests/fixtures/               磁盘真值（fixture 解析与存在性）
 # 输出:
 #   只重写 docs/test_coverage.md 中
@@ -100,6 +100,30 @@
 #              seg_asm_body 同类。它们钉的是「发射层发了哪条指令」，而这条问题的
 #              真值只有产物本身；算对没有仍由调用方的 `_matches_gcc_at_all_levels`
 #              那一族负责，不会被这些标签抬高或掩盖。
+#
+# 第二批量：`tests/integration/` 的主题子文件只能有 `#[test] fn`（§14 / STRUCT-HELPER），
+# 所以原先写在子文件里的 17 个助手统一上移到 `tests/common/harness/probe.rs`：
+#   run        cold_outline_pair / param_home_run / run_exe_and_check：编译后真的把
+#              夹具跑起来读退出码与 stdout（两档对照），运行时行为就是判据本身。
+#   compile    compile_only / compile_s1_with / region_obj_with_env /
+#              param_home_objects：只编到 .o/.s 并取字节或文本；
+#              elf_section_names / elf_dump_section / elf_readelf：只解析产物
+#              （readelf 文本），与 elf64_* 一族同类；
+#              frame_loads_in_asm / insn_count / call_site_rsp_offsets / has_insn_line：
+#              只从 `.s` 文本取读数（与 count_mnemonic 同类）；
+#              assert_cold_same_value：只对照已取得的退出码/stdout（与
+#              assert_bytes_present / assert_all_identical 同类）。
+#   aux        cg_wrap：只把夹具体包成「带计算转移的 main」，是源文本准备；
+#              regex_like_numeric_ref：纯字符串谓词。
+#
+# 顶层 target 的本地助手同样要登记（JAC-UNMAPPED 拦）：
+#   tests/disasm_snapshot.rs    snapshots_root / is_hex_byte / read_config /
+#                               unified_diff → aux（路径、字符串谓词、配置解析、
+#                               文本 diff 渲染）；run_case → compile（编译 +
+#                               objdump + 快照文本比对，不跑产物）。
+#   tests/g10_snapshot_baseline.rs  sha256 / sha256_hex / sha256_path → aux（纯计算）；
+#                               elf64_text → compile（解析 ELF 文本节）；
+#                               compile_to_o → compile（只编到 .o 取字节）。
 #
 # Tier 推断（§9 权威表；本脚本只区分 0/3 两档 —— Tier 1/2 是 CI job 的划分，
 # 不是用例本身的属性）:
@@ -356,6 +380,33 @@ run_compile_and_run_env run
 run_compile_object_env compile
 run_gcc_cross_check_both_opts cross-check
 temp_tag aux
+compile_only compile
+has_insn_line compile
+regex_like_numeric_ref aux
+frame_loads_in_asm compile
+insn_count compile
+compile_s1_with compile
+region_obj_with_env compile
+elf_section_names compile
+elf_dump_section compile
+elf_readelf compile
+run_exe_and_check run
+call_site_rsp_offsets compile
+cg_wrap aux
+cold_outline_pair run
+assert_cold_same_value compile
+param_home_run run
+param_home_objects compile
+snapshots_root aux
+is_hex_byte aux
+read_config aux
+run_case compile
+unified_diff aux
+sha256 aux
+sha256_hex aux
+elf64_text compile
+sha256_path aux
+compile_to_o compile
 '
 declare -A CRIT
 while IFS=' ' read -r h lab; do
