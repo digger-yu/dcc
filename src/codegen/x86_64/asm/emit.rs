@@ -271,6 +271,7 @@ impl Codegen {
     ) {
         let mut bindings = Vec::new();
         let op_map = self.build_asm_operand_map(
+            asm_str,
             outputs,
             output_names,
             output_constraints,
@@ -411,9 +412,22 @@ impl Codegen {
     /// sret 水位还原 —— 不还就相当于每条带非 Ident 输出的 asm 永久吃掉一个
     /// callee-saved 号与一块帧空间。
     pub(crate) fn release_asm_mem_scratch(&mut self, bindings: &[AsmOpBinding]) {
+        // 借来的号按 LIFO 弹回：`push` 发生在操作数预扫描，顺序与 `bindings` 一致，
+        // 所以这里反过来走。借出时的 `sub rsp,8` 与这里的 `add rsp,8` 成对，
+        // 区间内的 `%rsp` 依然 16 字节对齐（模板里的 call 点依赖这条不变式）。
+        for b in bindings.iter().rev() {
+            if b.mem_addr_borrowed {
+                if let Some(reg) = b.mem_addr_reg {
+                    self.pop(reg);
+                    self.emit_add_rsp(8);
+                }
+            }
+        }
         for b in bindings {
             if let Some(reg) = b.mem_addr_reg {
-                self.free_callee_saved(reg);
+                if !b.mem_addr_borrowed {
+                    self.free_callee_saved(reg);
+                }
             }
             if let Some(reg) = b.saved_addr_reg {
                 self.free_callee_saved(reg);
@@ -441,6 +455,7 @@ impl Codegen {
     ) {
         let mut bindings = Vec::new();
         let op_map = self.build_asm_operand_map(
+            asm_str,
             outputs,
             output_names,
             output_constraints,
@@ -497,7 +512,18 @@ impl Codegen {
         // `call_clobbers` 这一参传 `false`：本条路径不插守护，把 ABI 的 caller-saved 名单
         // 并进来只会多报 E0317；而带 `asm goto` 的函数进不了 SSA、根本没有延伸池家，
         // `call_label` 的 E1136 守卫在那里也不会误拦。
-        let unguardable = self.asm_clobber_held_regs(clobbers, &bindings, false);
+        let mut unguardable = self.asm_clobber_held_regs(clobbers, &bindings, false);
+        // 借来的地址 scratch 要在 asm 之后 `pop` 才能把活值还回去；跳出路径不经过
+        // 那段代码，值就丢了（`%rsp` 也会永久下移）。与 clobber 守护同一条判据：点名。
+        for b in &bindings {
+            if b.mem_addr_borrowed {
+                if let Some(reg) = b.mem_addr_reg {
+                    unguardable.push(reg);
+                }
+            }
+        }
+        unguardable.sort_unstable();
+        unguardable.dedup();
         self.asm_reject_reserved_clobber(clobbers);
         if !unguardable.is_empty() {
             self.asm_unguardable(&unguardable);

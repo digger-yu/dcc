@@ -2008,7 +2008,31 @@ impl Codegen {
             _ => self.load_stack(reg, off),
         }
     }
+    /// 名字是否是 `_Bool` 对象（含 `_Atomic(_Bool)`）。
+    ///
+    /// store 侧必须问这个：C11 6.3.1.2p1 要求任何标量存入 `_Bool` 对象时先归
+    /// 一化为 0/1，而 `_Bool` 只占 1 字节 —— 「按宽度截断」在 `movzbq` 上看
+    /// 像同一个转换，实际把 0x200 存成 0（§5.30 的内核停点）。
+    fn var_is_bool(&self, name: &str) -> bool {
+        let t = self
+            .var_map
+            .get(name)
+            .map(|(_, t)| t)
+            .or_else(|| self.homes.get(name).map(|(_, t)| t));
+        match t {
+            Some(Type::Bool) => true,
+            Some(Type::Atomic(b)) => matches!(&b.base, Type::Bool),
+            _ => false,
+        }
+    }
     pub(crate) fn mov_to_stack(&mut self, reg: u8, name: &str) {
+        // `_Bool` 目标的 store 先归一化（C11 6.3.1.2p1）。具名变量的**所有**
+        // store 都经过这里：声明初始化（stmt.rs / functions.rs 两处）、普通赋值、
+        // ++/--、opmap 路径 —— 逐个站点补必然漏，而漏掉的那条通道就是
+        // §5.30 的内核停点（`bool b = 0x200;` 的初值原先连截断都没有）。
+        if self.var_is_bool(name) {
+            self.emit_normalize_bool(reg);
+        }
         let (sz, _, _, _) = self.var_access_shape(name);
         // 与读出侧共用同一个读入口；按声明宽度截断成规范形态与下面栈槽路径的
         // 「按宽度 store」同口径（缺陷与实测见 `var_access_shape`）。

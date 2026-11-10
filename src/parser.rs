@@ -1013,8 +1013,10 @@ impl<'a> Parser<'a> {
                     TokKind::Shl => l << r,
                     _ => l >> r,
                 },
-                (Some(l), None) => l,
-                (None, _) => 0,
+                // 任一侧求不出常量 ⇒ 整个表达式无法求值。旧写法把
+                // `1 << <unknown>` 折成 1（见 §5.23 的 `1 << PWQ_SHIFT`），
+                // 对齐被静默降级成自然对齐，比「放弃提升对齐」更危险。
+                _ => return None,
             };
             return self.parse_aligned_rest(depth, acc);
         }
@@ -1024,20 +1026,20 @@ impl<'a> Parser<'a> {
     fn parse_aligned_rest(&mut self, depth: &mut i32, acc: usize) -> Option<usize> {
         if self.cur.kind == TokKind::Plus {
             self.advance();
-            let rhs = self.parse_aligned_term(depth);
-            return self.parse_aligned_rest(depth, acc + rhs.unwrap_or(0));
+            let rhs = self.parse_aligned_term(depth)?;
+            return self.parse_aligned_rest(depth, acc + rhs);
         } else if self.cur.kind == TokKind::Minus {
             self.advance();
-            let rhs = self.parse_aligned_term(depth);
-            return self.parse_aligned_rest(depth, acc - rhs.unwrap_or(0));
+            let rhs = self.parse_aligned_term(depth)?;
+            return self.parse_aligned_rest(depth, acc - rhs);
         } else if self.cur.kind == TokKind::Shl {
             self.advance();
-            let rhs = self.parse_aligned_term(depth);
-            return self.parse_aligned_rest(depth, acc << rhs.unwrap_or(0));
+            let rhs = self.parse_aligned_term(depth)?;
+            return self.parse_aligned_rest(depth, acc << rhs);
         } else if self.cur.kind == TokKind::Shr {
             self.advance();
-            let rhs = self.parse_aligned_term(depth);
-            return self.parse_aligned_rest(depth, acc >> rhs.unwrap_or(0));
+            let rhs = self.parse_aligned_term(depth)?;
+            return self.parse_aligned_rest(depth, acc >> rhs);
         }
         Some(acc)
     }
@@ -1048,12 +1050,18 @@ impl<'a> Parser<'a> {
             let op = self.cur.kind;
             self.advance();
             let rhs = self.parse_aligned_atom(depth);
-            if let (Some(l), Some(r)) = (result, rhs) {
-                result = Some(if op == TokKind::Star {
-                    l * r
-                } else {
-                    l.checked_div(r).unwrap_or(l)
-                });
+            match (result, rhs) {
+                (Some(l), Some(r)) => {
+                    result = Some(if op == TokKind::Star {
+                        l * r
+                    } else if r != 0 {
+                        l / r
+                    } else {
+                        l
+                    });
+                },
+                // `a op <unknown>` 不可求值: 整体作废, 不能退回 `a`。
+                _ => result = None,
             }
         }
         result
@@ -1095,6 +1103,20 @@ impl<'a> Parser<'a> {
                 return Some(al);
             }
             return Some(8); // fallback
+        }
+        // 枚举常量（内核 `__aligned(1 << PWQ_SHIFT)`）。
+        // 标识符在预处理后原样留下，而枚举体解析时已把值登记进
+        // `enum_consts`；旧实现在这里落到「Unknown token」返回 None，
+        // 再被 `(Some(l), None) => l` 折成 `1`，于是
+        // `struct pool_workqueue { … } __aligned(1 << WORK_STRUCT_PWQ_SHIFT)`
+        // 只剩自然对齐 4 ⇒ KMEM_CACHE 传 `.align = 8` ⇒ `init_pwq`
+        // 的 BUG_ON 触发（报告 §5.23）。
+        if self.cur.kind == TokKind::Ident {
+            if let Some((v, _)) = self.enum_consts.get(&self.cur.text) {
+                let v = *v;
+                self.advance();
+                return Some(v.max(1) as usize);
+            }
         }
         // Numeric literal
         if self.cur.kind == TokKind::Number {
@@ -11721,7 +11743,17 @@ impl<'a> Parser<'a> {
             TokKind::LParen if self.peek.kind == TokKind::LBrace => {
                 self.advance(); // (
                 self.advance(); // {
+                // 语句表达式自成一个**块作用域** (gcc: "the declarations are scoped
+                // to the block")。不 push 的话块内声明落进外层作用域,
+                // `rename_shadow_var` 的 `exists_in_outer_scopes` 看不到「外层已有
+                // 同名对象」⇒ 不重命名, 两个不同对象共用一个名字。后端 var_map 按名
+                // 唯一, 内层类型会顶掉外层: 实测 kernel/fork.c 的 `this_cpu_xchg`
+                // 展开里, 外层 `TYPEOF_UNQUAL(...) pscr2_ret__` (指针) 被内层
+                // `bool pscr2_ret__` 顶成 1 字节 ⇒ 存取都走 `_Bool` 归一化, 指针值
+                // 退化成 0/1 (`alloc_thread_stack_node` 拿 1 当 vm_area 解引用)。
+                self.locals.push_scope();
                 let b = self.parse_block();
+                self.locals.pop_scope();
                 if !self.expect(TokKind::RBrace, "'}'") {
                     return None;
                 }

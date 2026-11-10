@@ -565,6 +565,28 @@ fn float_cmp_does_not_clobber_register_home() {
     }
 }
 
+/// 内联 asm 输出操作数的绑定必须穿过 SSA→AST 往返。
+///
+/// 两个缺陷（docs/dcc-kernel-build-verify-report.md §5.11）：
+///   * `InstKind::InlineAsm::output_vars` 只为 Ident 输出 push 一项，重建时按 `idx`
+///     代回就把命名 `"+m"(*v)` 换成了不可见 `"=@ccz"(c)` 的名字 —— 内核
+///     `arch_atomic_try_cmpxchg()` 因此写错地址，dcc-only vmlinux 在 0.15 s #GP；
+///   * asm 的输出版本是基名唯一的 dest，SCCP 于是把 `int v = 5` 折成常量并删掉
+///     存储，`"+m"` / `"+r"` 的旧值因此丢失。
+/// 四档均须与 gcc 同值（退出码 0）。
+#[test]
+#[cfg(unix)]
+fn ssa_asm_output_operand_binding_survives_roundtrip() {
+    let src = include_str!("../fixtures/opt/ssa_asm_output_slot_alignment.c");
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("ssa-asm-binding", src, &[level]);
+        assert!(out.status.success(), "compile {level}: {}", String::from_utf8_lossy(&out.stderr));
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "{level}: inline asm output bound to the wrong slot/register");
+        let _ = fs::remove_file(&exe);
+    }
+}
+
 /// 循环优化 (Tiling / IVOP / Interchange)
 #[test]
 #[cfg(unix)]
@@ -1781,6 +1803,73 @@ fn inline_void_switch_trap_matches_gcc_at_all_levels() {
     }
 }
 
+/// `return f(...);` 且 `f` 返回 **void**：展开后必须仍是「调完就返回」。
+///
+/// 缺陷现场（kbuild22 的 `--boot`）：`lib/maple_tree.c::mas_topiary_replace` 里
+/// `if (mte_is_leaf(old_enode)) return mas_free(mas, old_enode);`（`mas_free` 为
+/// `static inline void`）被 `try_static_inline_general` 的 `Dest::ReturnValue` 臂
+/// 整条吞掉：它假设「callee 的 return 就是本层的 return」，而 void callee 的体里
+/// 一条 return 也没有 ⇒ 释放旧叶后落入第二循环，用死叶做 `mas_find_child`，
+/// `ma_data_end` 对满叶返回 15 ⇒ 读 `slots[15]`（leaf 的 meta 区，NULL）⇒
+/// `mte_parent(NULL)` 解引用地址 0，early_irq_init 期间 panic。
+///
+/// 五种形状（A 两级 inline、B 带分支、C 直接调用、D 体无调用、E if/else 体）各自
+/// 经 volatile 函数指针独立发射，否则整体内联会把调用点抹平，缺陷看不见。
+#[test]
+#[cfg(unix)]
+fn inline_void_callee_behind_return_keeps_returning() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = r#"
+#include <stdio.h>
+static int c1, c2, c3, c4, c5;
+
+static void fa(void *n) { (void)n; c1 += 1; }
+static inline void ga(void *u) { fa(u); }
+static void ta(int leaf, void *p) { if (leaf) return ga(p); c1 += 100; }
+
+static void fb(void *n) { if (*(void **)n != n) c2 += 50; c2 += 1; }
+static inline void gb(void *u) { fb(u); }
+static void tb(int leaf, void *p) { if (leaf) return gb(p); c2 += 100; }
+
+static void fc(void *n) { (void)n; c3 += 1; }
+static void tc(int leaf, void *p) { if (leaf) return fc(p); c3 += 100; }
+
+static inline void gd(void *u) { c4 += *(int *)u; }
+static void td(int leaf, void *p) { if (leaf) return gd(p); c4 += 100; }
+
+static inline void ge(int x) { if (x) c5 += 1; else c5 += 2; }
+static void te(int leaf) { if (leaf) return ge(leaf); c5 += 100; }
+
+static void (*volatile pa)(int, void *) = ta;
+static void (*volatile pb)(int, void *) = tb;
+static void (*volatile pc)(int, void *) = tc;
+static void (*volatile pd)(int, void *) = td;
+static void (*volatile pe)(int) = te;
+
+int main(void)
+{
+	struct { void *parent; } nd;
+	int v = 7;
+	nd.parent = &nd;
+	pa(1, &nd); pb(1, &nd); pc(1, &nd); pd(1, &v); pe(1);
+	printf("%d %d %d %d %d\n", c1, c2, c3, c4, c5);
+	pa(0, &nd); pb(0, &nd); pc(0, &nd); pd(0, &v); pe(0);
+	printf("%d %d %d %d %d\n", c1, c2, c3, c4, c5);
+	return 0;
+}
+"#;
+    for flag in ["-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("inline-void-return", src, &[flag]),
+            0,
+            "{flag}: `return void_callee(...)` 的展开丢了返回 ⇒ leaf=1 时落进后面的\
+             `+= 100`（maple_tree 那条 boot panic 的最小形状）",
+        );
+    }
+}
+
 /// 同名两条 `FuncDecl`（`static inline` 定义 + 后面的非 static 声明）不得让跨函数 DCE
 /// 把定义体里**被取地址**的 `static inline` 判成不可达。
 ///
@@ -2688,6 +2777,264 @@ int main(void)
             rc, 0,
             "{level}: `&形参` 被内联代成了 `&调用者对象`（rc={rc}：1=被调方写坏了调用者的指针，\
              2=指到了字符串尾，3=返回值不对）"
+        );
+    }
+}
+
+/// `asm` 会写的形参同样不能直绑实参：内核 `mm/memblock.c::__free_pages_memory` 的
+/// 页游标就是被它改掉的（§5.41）。
+///
+/// 现场形状：`__ffs(word)` 是「`asm("tzcnt %1,%0" : "=r"(word) : "rm"(word))` +
+/// `return word`」的 `always_inline`，走语句级内联；§5.39 的直绑把 `word` 换成调用者
+/// 的 `start`，于是 `tzcnt` 的结果（8）落回 `start`，下一轮拿 `__ffs(8+256)` 继续算，
+/// 循环既不前进也不退出，`memblock_free_all()` 里永远在释放同一页。
+///
+/// 第二条路径（单 `return` 体的表达式级内联）用 `bump` 验：那里形参被 `asm` 写时必须
+/// 退回外带副本（`needs_slot`），而不是把调用者的变量当形参。
+#[test]
+#[cfg(unix)]
+fn inliner_must_not_bind_asm_written_parameter_to_caller_object() {
+    let src = r#"
+static __inline__ __attribute__((always_inline)) unsigned long
+variable__ffs(unsigned long word)
+{
+	asm("tzcnt %1,%0" : "=r" (word) : "rm" (word));
+	return word;
+}
+
+#define MAX_PAGE_ORDER 10
+#define min_t(type, x, y)			\
+	({ type __a = (x); type __b = (y); __a < __b ? __a : __b; })
+
+static unsigned long seq[8];
+static int n;
+
+static void free_one(unsigned long pfn, int order)
+{
+	if (n < 8)
+		seq[n++] = pfn * 16 + (unsigned long)order;
+}
+
+/* mm/memblock.c::__free_pages_memory 的形状 */
+static void free_pages_memory(unsigned long start, unsigned long end)
+{
+	int order;
+
+	while (start < end) {
+		if (start)
+			order = min_t(int, MAX_PAGE_ORDER, variable__ffs(start));
+		else
+			order = MAX_PAGE_ORDER;
+
+		while (start + (1UL << order) > end)
+			order--;
+
+		free_one(start, order);
+		start += 1UL << order;
+	}
+}
+
+/* 单 `return` 体：走表达式级内联；`asm` 写形参时必须退回副本 */
+static __inline__ __attribute__((always_inline)) unsigned long bump(unsigned long v)
+{
+	return ({ asm("incq %0" : "+r" (v)); v; });
+}
+
+int main(void)
+{
+	unsigned long x = 256;
+	unsigned long y = 41;
+
+	if (variable__ffs(x) != 8)
+		return 1;
+	if (x != 256)
+		return 2;	/* 调用者对象被 asm 写穿了 */
+
+	free_pages_memory(256, 1024);
+	if (n != 2)
+		return 3;	/* 页游标不前进：循环永远退不出 */
+	if (seq[0] != 256 * 16 + 8)
+		return 4;
+	if (seq[1] != 512 * 16 + 9)
+		return 5;
+
+	if (bump(y) != 42)
+		return 6;
+	if (y != 41)
+		return 7;
+	return 0;
+}
+"#;
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("asm-param-write", src, &[level]);
+        assert!(
+            out.status.success(),
+            "{level}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = crate::harness::run_exe_bounded(&exe).0;
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{level}: `asm` 会写的形参被内联直绑成了调用者对象（rc={rc}：2=`tzcnt` 的结果\
+             落回了调用者的变量，3=页游标不前进、每轮释放同一页，4/5=释放序列不对，\
+             6/7=表达式级内联把形参换成了调用者变量）"
+        );
+    }
+}
+
+/// 表达式级内联必须把实参**先转换成形参声明类型**再搬进被调方体 (C11 6.5.2.2p7)。
+///
+/// 回归来源（内核 boot Oops #1）：`blk_mq_rq_from_pdu(void *pdu)` 体是
+/// `pdu - sizeof(struct request)`，被 `scsi_cmd_to_rq(struct scsi_cmnd *cmd)` 内联后
+/// `pdu` 拿到了实参类型 `struct scsi_cmnd *`，`- 0xf8` 被按 `sizeof(struct scsi_cmnd)`
+/// 缩放成 `- 0x11ec0`（0xf8*0x128），`rq->tag` 读到垃圾 ⇒ `__ata_qc_from_tag()` 返回
+/// NULL ⇒ `qc->tag = qc->hw_tag = tag` 写 0x5c。此处用同形状的最小复现钉住：
+/// `void *p` 形参做 `p - 1` / `p + 1`，实参是 `struct big *`（sizeof=0x40）。
+#[test]
+fn inline_param_uses_declared_param_type() {
+    let src = r#"
+struct big { char pad[0x40]; };
+
+static inline void *prev_byte(void *p) { return p - 1; }
+static inline void *next_byte(void *p) { return p + 1; }
+static inline unsigned long span(void *p) { return (unsigned long)((char *)(p + 1) - (char *)p); }
+
+int main(void)
+{
+	struct big b[2];
+
+	if ((char *)prev_byte(&b[1]) != (char *)&b[0] + 0x40 - 1)
+		return 1;	/* `p-1` 被按 sizeof(struct big)=0x40 缩放 */
+	if ((char *)next_byte(&b[0]) != (char *)&b[0] + 1)
+		return 2;
+	if (span(&b[1]) != 1)
+		return 3;	/* 指针差/`sizeof(void)`=1 也同样要按形参类型 */
+	return 0;
+}
+"#;
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("inline-param-ty", src, &[level]);
+        assert!(
+            out.status.success(),
+            "{level}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = crate::harness::run_exe_bounded(&exe).0;
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{level}: 表达式级内联把形参替换成了实参表达式而没做隐式转换（rc={rc}：\
+             1/2=`void *` 形参上的指针算术按实参元素大小缩放，3=`p+1` 的差值不对）"
+        );
+    }
+}
+
+/// 语句表达式 `({ ... })` 自成块作用域，内部声明的同名变量必须与外层互不影响。
+///
+/// 回归来源（内核 boot Oops #2）：`this_cpu_xchg` 展开成
+/// `({ __typeof__(cached_stacks[i]) pscr2_ret__; … ({ _Bool pscr2_ret__; … }) })`。
+/// 解析 `({` 时没有 push_scope，内层 `_Bool` 落进外层作用域；`rename_shadow_var`
+/// 的 `exists_in_outer_scopes` 看不到外层同名对象所以不改名，而后端 `var_map`
+/// 按名唯一 ⇒ 内层 `_Bool` 顶掉外层指针，指针 store 走了 `_Bool` 归一化，
+/// 指针值退化成 0/1（`alloc_thread_stack_node` 拿 1 当 `vm_area` 解引用，
+/// `CR2=0x2d`）。
+#[test]
+fn statement_expression_has_its_own_scope() {
+    let src = r#"
+struct vm_struct { int a; };
+
+static struct vm_struct *cached_stacks[2];
+
+static struct vm_struct *f(int i)
+{
+	struct vm_struct *v = ({
+		__typeof__(cached_stacks[i]) pscr2_ret__;
+		int k = 0;
+
+		pscr2_ret__ = cached_stacks[i];
+		do { k++; } while (!({ _Bool pscr2_ret__; pscr2_ret__ = 1; pscr2_ret__; }));
+		(void)k;
+		pscr2_ret__;
+	});
+
+	return v;
+}
+
+int main(void)
+{
+	cached_stacks[0] = (struct vm_struct *)0x1234;
+
+	if (f(0) != (struct vm_struct *)0x1234)
+		return 1;	/* 外层的指针临时量被内层的 _Bool 顶掉了类型 */
+	return 0;
+}
+"#;
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("stmt-expr-scope", src, &[level]);
+        assert!(
+            out.status.success(),
+            "{level}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = crate::harness::run_exe_bounded(&exe).0;
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{level}: 语句表达式内的同名声明污染了外层变量（rc={rc}：外层指针被按 _Bool\
+             归一化，值退化成 0/1）"
+        );
+    }
+}
+
+/// 内联展开的结果必须回到**被调函数声明返回类型** (C11 6.8.6.4p3)。
+///
+/// 回归来源（内核 boot Oops #1 的第二半）：`scsi_cmd_to_rq()` 声明返回
+/// `struct request *`，体是 `return blk_mq_rq_from_pdu(cmd);`，而后者返回 `void *`。
+/// 只搬返回表达式时调用点类型跟着变成 `void *`，`scsi_cmd_to_rq(cmd)->tag` 的成员
+/// 偏移解析不到、按 0 发射（把 `list_head.next` 当 tag），`__ata_scsi_queuecmd`
+/// 随后写 0x5c。这里用同形状复现：`to_p()` 返回 `void *`，`f()` 声明返回 `struct r *`。
+#[test]
+fn inline_result_uses_declared_return_type() {
+    let src = r#"
+struct r { int a; int tag; };
+
+static inline void *to_p(void *p) { return p; }
+static inline struct r *f(struct r *x) { return to_p(x); }
+static __attribute__((noinline)) void *to_p2(void *p) { return p; }
+static __attribute__((noinline)) struct r *f2(struct r *x) { return to_p2(x); }
+
+int get_tag(struct r *x) { return f(x)->tag; }		/* 内联: 偏移必须是 4 */
+int get_tag2(struct r *x) { return f2(x)->tag; }	/* 非内联对照 */
+void set_tag(struct r *x) { f(x)->tag = 7; }		/* 写路径同样要按 4 */
+
+int main(void)
+{
+	struct r v = { 1, 2 };
+
+	if (get_tag(&v) != 2)
+		return 1;	/* 偏移 0: 读到 a */
+	if (get_tag2(&v) != 2)
+		return 2;
+	set_tag(&v);
+	if (v.tag != 7 || v.a != 1)
+		return 3;
+	return 0;
+}
+"#;
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("inline-ret-ty", src, &[level]);
+        assert!(
+            out.status.success(),
+            "{level}: 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = crate::harness::run_exe_bounded(&exe).0;
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{level}: 内联结果没有回到声明返回类型（rc={rc}：1/2=`->tag` 成员偏移按 0 发射，\
+             3=写路径改错了字段）"
         );
     }
 }

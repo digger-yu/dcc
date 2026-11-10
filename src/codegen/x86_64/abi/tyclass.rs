@@ -476,11 +476,14 @@ impl Codegen {
     }
     pub(crate) fn mask_imm_to_type(v: i128, ty: &Type) -> i128 {
         let (bits, signed) = match ty {
-            // 有符号小类型 (< 32 位): 截断 + 符号扩展
+            // `_Bool` 不是「无符号 8 位整数」：C11 6.3.1.2p1 的结果是 `(v != 0)`。
+            // 按宽度截断会把 0x200 折成 0（§5.30：`static _Bool g = 512;` 的
+            // 静态初始化与 SSA 常量折叠都走这里）。
+            Type::Bool => return if v != 0 { 1 } else { 0 },
             Type::Char | Type::SChar => (8, true),
             Type::Short => (16, true),
             // 无符号小类型: 截断 + 零扩展
-            Type::Bool | Type::UChar => (8, false),
+            Type::UChar => (8, false),
             Type::UShort => (16, false),
             // UInt: 截断到 32 位, 零扩展到 64 位.
             // 例如 -1U (i128 = -1) → 截断到 0xFFFFFFFF → 零扩展到 0x00000000FFFFFFFF.

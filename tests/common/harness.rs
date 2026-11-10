@@ -1921,3 +1921,48 @@ pub(crate) fn dwarf_reg_name(loc: &str) -> Option<String> {
         None
     }
 }
+
+/// 某函数体里、**助记符命中白名单**的指令行（`objdump -d`，去掉字节列）。
+///
+/// 两条发射路径（`-c` 直发对象与 `-S`→GAS）比对时用：只留判据关心的那几条，
+/// 帧布局/寄存器家/`nop` 填充的差异不淹掉真问题。
+///
+/// 也只按「助记符 + 操作数」判，不盯整行字节：寄存器家与槽偏移随 regalloc 变。
+/// 自 `tests/integration/c_asm.rs` 上移（§5.19，现 `cmpxchg16b` 一组也在用）。
+pub(crate) fn objdump_insns_of(
+    obj: &std::path::Path,
+    func: &str,
+    watched: &[&str],
+) -> Vec<String> {
+    let out = Command::new("objdump").args(["-d"]).arg(obj).output().expect("objdump -d");
+    assert!(out.status.success(), "objdump -d failed: {}", obj.display());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let start = text
+        .find(&format!("<{func}>:"))
+        .unwrap_or_else(|| panic!("missing {func} in {}:\n{text}", obj.display()));
+    let rest = &text[start..];
+    let end = rest.find("\n\n").unwrap_or(rest.len());
+    let mut lines = Vec::new();
+    for line in rest[..end].lines() {
+        let Some((_, after_colon)) = line.trim().split_once(':') else { continue };
+        let after_colon = after_colon.trim_start();
+        // 跳过十六进制字节列（两个十六进制字符一段，直到第一个助记符）。
+        let mut idx = 0usize;
+        for tok in after_colon.split_whitespace() {
+            let tok_start = after_colon[idx..].find(tok).map_or(idx, |p| p + idx);
+            let tok_end = tok_start + tok.len();
+            if tok.len() == 2 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
+                idx = tok_end;
+                continue;
+            }
+            idx = tok_start;
+            break;
+        }
+        let inst = after_colon[idx..].trim_start();
+        let Some(mnemonic) = inst.split_whitespace().next() else { continue };
+        if watched.contains(&mnemonic) {
+            lines.push(inst.to_string());
+        }
+    }
+    lines
+}

@@ -96,6 +96,11 @@
 | `arch_x86_compile.sh` | 批量编译 `arch/x86/` 的 C 文件，复用内核命令模板 |
 | `dcc-kernel-cc.sh` | 内核编译包装：基础设施文件用 gcc，其余用 dcc |
 | `dcc-host-wrapper.sh` | Kbuild `HOSTCC` 包装：dcc 编译、gcc 链接，含参数白名单翻译 |
+| `kernel_pvh_verify.sh` | 内核「全程 dcc」的 PVH 验收编排：`--partial` / `--config` / `--build` / `--boot`（gcc 陷阱 + delegate 计数 + objtool + QEMU 到用户空间） |
+| `kernel_cc_asm_repro.sh` | §5.11 缺陷的可执行复现：命名 `"+m"` 输出与不可见 `"=@ccz"` 输出同处一条 asm 时绑错帧槽；退出码 0 = 已修 |
+| `kernel_frame_hist.sh` | 序言帧大小直方图（只数每函数第一条 `sub rsp`），§5.12 帧经济的 dcc / gcc 对拍口径 |
+| `frame_cs_plan_ab.sh` | **callee-saved 按需化的帧收益 A/B**（§5.42）：用构建树里的 `.<base>.o.cmd` 重编同一 TU 两遍，一遍默认、一遍 `DCC_CS_PLAN_ALL=1`（旧的四个保存槽），输出逐函数帧和 / 中位数 / 改善数 |
+| `frame_band_probe.sh` | **帧带漏扫探针**：用 debug 二进制把全量 gcc-c-torture 跑一遍，只认按需帧带的 fail-closed 断言（`cx_rvalue_off` / `bf_rmw_slot` / `vec_temp` / `gen_trampoline` 与 E1128/E1136/E0321）；判据是「命中集合与 HEAD 一致」 |
 
 ## 自举 / 静态构建 / GCC 源码树
 
@@ -127,6 +132,7 @@
 | `hot_cold_census.sh` | computed-goto 函数的「三账 + 落脚」普查（entry/hot/out 拆开且同列），冷尾类改动的机制判据源 |
 | `e_per_step.sh` | 按 opcode 执行权重折算的「每 VM 步机器指令数」E/步（静态条数不当墙钟代理时的中间量） |
 | `meta_gate.sh` | 元判据：静态代理（体量 / 条每步 / taken 分支每步）能不能预测墙钟（滴定砝码 + Spearman 秩相关） |
+| `opt_pass_audit.sh` | **中端管线体检**（`docs/dcc-kernel-build-verify-report.md` §5.13）：逐 pass 量两件事实 —— 命中率（`DCC_OPT_SKIP=<pass>` 后 `.o` 字节变不变）与边际耗时（同一对交替 `REPS` 次取中位数，与 `ab_pair.sh` 同一轮配对纪律）。pass 名单从 `src/opt.rs` 的 `opt_skipped("…")` 现抽，不两份清单；`REPS=1 TIMING=0` 是只量命中率的快档（一个内核 `.i` 在 -O2 就 12 s） |
 
 ## 生成类
 

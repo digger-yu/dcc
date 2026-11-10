@@ -36,7 +36,7 @@ impl Codegen {
             // `yymsp[-10].minor.yy0 = (…n==0 ? yymsp[-7].minor.yy0 : yymsp[-6].minor.yy0);`
             // 于是把 `Token.n` 留成垃圾, sqlite3 的 CREATE TRIGGER 按 7.9MB
             // 调 sqlite3DbStrNDup (段错误或假 OOM)。
-            if matches!(ty, Type::Struct(..) | Type::Union(..)) && Self::value_is_whole_copy(&ty) {
+            if Self::cond_materializes_aggregate(&ty) {
                 let slot = self.alloc_sret_slot(ty.size());
                 let agg = AggDst::Local {
                     off: slot,

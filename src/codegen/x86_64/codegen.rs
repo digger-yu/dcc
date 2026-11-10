@@ -140,6 +140,13 @@ pub struct Codegen {
     /// 本函数出现过的最大向量字节数（向量临时槽带的尺寸输入，单源于
     /// `abi::layout::vec_band_reserve`）。与 `late_slot_budget` 同一趟规划写下，逐函数复位。
     pub max_vec_bytes: usize,
+    /// 本函数是否需要帧底那条 complex / 聚合 rvalue 物化带（尺寸单源于
+    /// `abi::layout::cx_band_reserve`，判据来源见 `LateNeed::needs_cx_band`）。
+    /// 与 `max_vec_bytes` 同一趟规划写下，逐函数复位。
+    pub needs_cx_band: bool,
+    /// 本函数里嵌套最深的位域 RMW 链层数（BF RMW 带的尺寸输入，单源于
+    /// `abi::layout::bf_rmw_band_reserve`）。与 `max_vec_bytes` 同一趟规划写下。
+    pub bf_rmw_max_depth: usize,
     /// `__builtin_shuffle` / `__builtin_shufflevector` 的**站点嵌套层号**（0 起）。
     /// 内层站点在外层实参物化期间跑，两边的拼接镜像/掩码/结果必须各用自己的
     /// 槽；层号乘上每站槽数从向量带尾部往下定位（实参表达式自己的 binop 嵌套从带
@@ -155,6 +162,12 @@ pub struct Codegen {
     /// 本函数的帧规划是否已经走完（`plan_late_slot_budget()` 的最后一件事）。
     /// 只有在此之后的 `register_var` 新名字才算「晚分配」，才进 `late_slot_used`。
     pub frame_planned: bool,
+    /// `DCC_FRAME_SKIP_HOMED` 打开时，本函数里**已有寄存器家**（`VarDecl::home == Reg`）
+    /// 的名字集合。`ScopedVarAlloc` 不给它们留槽，`plan_late_slot_budget` 末尾的
+    /// `collect_free_idents` → `register_var` 补登记也必须跳过它们 —— 否则那一步
+    /// 会把刚省下的槽原样捡回来（实测 `decay_load`：peak=1，帧里仍是 8 槽）。
+    /// 逐函数复位；关闭该开关时恒为空。
+    pub reg_homed_names: std::collections::HashSet<String>,
     /// 最近一次「求值到基址」留下的**持有记录**：`Some(号)` 意思是「那个号里现在就是刚
     /// 求出来的值」（Phase 5.1 前置一·下）。
     ///
@@ -298,6 +311,12 @@ pub struct Codegen {
     pub asm_call_window: usize,
     pub max_expr_depth: u32, // 最大表达式嵌套深度
     pub temp_slots: i32,     // 帧临时槽数量 (用于变量偏移计算)
+    /// 本函数帧头里 callee-saved 保存槽的**位图**（§5.42 按需化，逐函数定稿）。
+    ///
+    /// 由 `compute_callee_plan` 在序言之前写下（homes ∪ 局部声明的家 ∪ asm 固定约束
+    /// ∪ 含 asm 时的 r12 兜底），同时喂给两处：帧解算的 `cs_slots`（= `count_ones()`）
+    /// 与 `RegBank::set_plan_mask`（发射期发号器只能在这个集合里取号）。
+    pub callee_plan: u8,
     /// 已注册固定栈对象占用的 8 字节槽数。
     /// 只记录真实布局用量，不再为大数组创建 __pad_ 占位项。
     pub var_map_total_slots: i64,
@@ -401,6 +420,10 @@ pub struct Codegen {
     pub defined_funcs: HashSet<String>,                   // 本 TU 中有函数体的函数名
     pub error_attr_fns: HashSet<String>, // __attribute__((error)) 函数名 (调用时发射 ud2)
     pub pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
+    /// `pending_data_rels` 里 disp32 **不是指令最后一个字段**的那些条目的尾字节数
+    /// （`addl $imm, sym(%rip)` 的 imm8/imm32 = 1/4）。PC32 的 addend 是
+    /// `off - 4 - tail`：CPU 取 RIP 的位置在指令尾，不是 disp32 尾（报告 §5.28）。
+    pub pending_data_rel_tails: HashMap<u64, u8>,
     pub pending_data_rels_with_off: Vec<(u64, String, i32)>, // (disp32_pos, var_name, elem_off) - 带元素偏移的全局重定位(数组 static local 逐元素初始化)
     pub pending_sib_data_rels: Vec<(u64, String)>, // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
     pub data_section: Vec<u8>,                     // .data 节 (已初始化全局变量)
@@ -1012,6 +1035,9 @@ pub struct FuncEmitChunk {
     pub pending_code_rels: Vec<PendingCodeRel>,
     pub pending_func_addr_rels: Vec<(u64, String, bool)>,
     pub pending_data_rels: Vec<(u64, String)>,
+    /// 尾字节表的具体形状见 `Codegen::pending_data_rel_tails`；chunk 合并时要跟着
+    /// 基址重定位走，漏掉它等于让 `addl $imm, sym(%rip)` 又写偏一个立即数长度。
+    pub pending_data_rel_tails: Vec<(u64, u8)>,
     pub pending_sib_data_rels: Vec<(u64, String)>,
     /// 带元素偏移的全局重定位 (数组型 static local 逐元素运行时初始化,
     /// 如 Lua 的 `static const void *disptab[] = {&&L_OP_*, ...}` 计算跳转表)。
@@ -1172,10 +1198,13 @@ impl Codegen {
             late_site_seq: 0,
             late_slot_budget: 0,
             max_vec_bytes: 0,
+            needs_cx_band: false,
+            bf_rmw_max_depth: 0,
             vec_perm_level: 0,
             late_slot_used: 0,
             late_var_cursor: 0,
             frame_planned: false,
+            reg_homed_names: std::collections::HashSet::new(),
             eval_holding: None,
             peep_last: None,
             cmp_flags_token: false,
@@ -1200,6 +1229,7 @@ impl Codegen {
             asm_call_window: 0,
             max_expr_depth: 0,
             temp_slots: 0,
+            callee_plan: 0x0F,
             var_map_total_slots: 0,
             vla_offsets: HashMap::new(),
             vla_total_size: 0,
@@ -1228,6 +1258,7 @@ impl Codegen {
             defined_funcs: HashSet::new(),
             error_attr_fns: HashSet::new(),
             pending_data_rels: vec![],
+            pending_data_rel_tails: HashMap::new(),
             pending_data_rels_with_off: vec![],
             pending_sib_data_rels: vec![],
             data_section: vec![],
@@ -2148,21 +2179,43 @@ impl Codegen {
                                     has_init = true;
                                 }
                             },
-                            Expr::InitList { inits, .. } => {
-                                let base = self.extra_sections[sec_idx].data.len() as u64;
-                                if let Some(init_data) = self.gen_global_init_list(
-                                    &v.ty,
-                                    inits,
-                                    Some((base, Some(sec_idx))),
-                                    false,
-                                ) {
-                                    self.extra_sections[sec_idx]
-                                        .data
-                                        .extend_from_slice(&init_data);
-                                    for _ in init_data.len()..sz {
+                            // 花括号列表 (含 `= (T){…}` 与包裹它的聚合转换):
+                            // 写法判据单点见 `Codegen::static_brace_list`。
+                            e if Self::static_brace_list(e).is_some() => {
+                                // 指针目标 + 聚合型字面量是退化取地址（C11 6.3.2.1p3，
+                                // 判据见 `ptr_decay_literal`）：物化匿名对象 + 发
+                                // 重定位，不能把内容当嵌套列表铺进指针槽。
+                                if Self::ptr_decay_literal(&v.ty, e) {
+                                    let base = self.extra_sections[sec_idx].data.len() as u64;
+                                    let bytes = self.eval_const_expr(
+                                        e,
+                                        Some((base, Some(sec_idx))),
+                                        sz,
+                                        &v.ty,
+                                        false,
+                                    );
+                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                                    for _ in bytes.len()..sz {
                                         self.extra_sections[sec_idx].data.push(0);
                                     }
                                     has_init = true;
+                                } else {
+                                    let inits = Self::static_brace_list(e).expect("guard 已证明");
+                                    let base = self.extra_sections[sec_idx].data.len() as u64;
+                                    if let Some(init_data) = self.gen_global_init_list(
+                                        &v.ty,
+                                        inits,
+                                        Some((base, Some(sec_idx))),
+                                        false,
+                                    ) {
+                                        self.extra_sections[sec_idx]
+                                            .data
+                                            .extend_from_slice(&init_data);
+                                        for _ in init_data.len()..sz {
+                                            self.extra_sections[sec_idx].data.push(0);
+                                        }
+                                        has_init = true;
+                                    }
                                 }
                             },
                             Expr::AddrOf { e, .. } => {
@@ -2341,21 +2394,43 @@ impl Codegen {
                                 }
                                 has_init = true;
                             },
-                            Expr::InitList { inits, .. } => {
-                                let base = self.extra_sections[sec_idx].data.len() as u64;
-                                if let Some(init_data) = self.gen_global_init_list(
-                                    &v.ty,
-                                    inits,
-                                    Some((base, Some(sec_idx))),
-                                    false,
-                                ) {
-                                    self.extra_sections[sec_idx]
-                                        .data
-                                        .extend_from_slice(&init_data);
-                                    for _ in init_data.len()..sz {
+                            // 花括号列表 (含 `= (T){…}` 与包裹它的聚合转换):
+                            // 写法判据单点见 `Codegen::static_brace_list`。
+                            e if Self::static_brace_list(e).is_some() => {
+                                // 指针目标 + 聚合型字面量是退化取地址（C11 6.3.2.1p3，
+                                // 判据见 `ptr_decay_literal`）：物化匿名对象 + 发
+                                // 重定位，不能把内容当嵌套列表铺进指针槽。
+                                if Self::ptr_decay_literal(&v.ty, e) {
+                                    let base = self.extra_sections[sec_idx].data.len() as u64;
+                                    let bytes = self.eval_const_expr(
+                                        e,
+                                        Some((base, Some(sec_idx))),
+                                        sz,
+                                        &v.ty,
+                                        false,
+                                    );
+                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                                    for _ in bytes.len()..sz {
                                         self.extra_sections[sec_idx].data.push(0);
                                     }
                                     has_init = true;
+                                } else {
+                                    let inits = Self::static_brace_list(e).expect("guard 已证明");
+                                    let base = self.extra_sections[sec_idx].data.len() as u64;
+                                    if let Some(init_data) = self.gen_global_init_list(
+                                        &v.ty,
+                                        inits,
+                                        Some((base, Some(sec_idx))),
+                                        false,
+                                    ) {
+                                        self.extra_sections[sec_idx]
+                                            .data
+                                            .extend_from_slice(&init_data);
+                                        for _ in init_data.len()..sz {
+                                            self.extra_sections[sec_idx].data.push(0);
+                                        }
+                                        has_init = true;
+                                    }
                                 }
                             },
                             Expr::AddrOf { e, .. } => {
@@ -2559,18 +2634,37 @@ impl Codegen {
                             }
                             true
                         },
-                        Expr::InitList { inits, .. } => {
-                            let base = self.data_section.len() as u64;
-                            if let Some(init_data) =
-                                self.gen_global_init_list(&v.ty, inits, Some((base, None)), false)
-                            {
-                                self.data_section.extend_from_slice(&init_data);
-                                for _ in init_data.len()..sz {
+                        // 花括号列表 (含 `= (T){…}` 与包裹它的聚合转换):
+                        // 写法判据单点见 `Codegen::static_brace_list`。
+                        e if Self::static_brace_list(e).is_some() => {
+                            // 指针目标 + 聚合型字面量是退化取地址（C11 6.3.2.1p3，
+                            // 判据见 `ptr_decay_literal`）：物化 + 重定位。
+                            if Self::ptr_decay_literal(&v.ty, e) {
+                                let base = self.data_section.len() as u64;
+                                let bytes =
+                                    self.eval_const_expr(e, Some((base, None)), sz, &v.ty, false);
+                                self.data_section.extend_from_slice(&bytes);
+                                for _ in bytes.len()..sz {
                                     self.data_section.push(0);
                                 }
                                 true
                             } else {
-                                false
+                                let inits = Self::static_brace_list(e).expect("guard 已证明");
+                                let base = self.data_section.len() as u64;
+                                if let Some(init_data) = self.gen_global_init_list(
+                                    &v.ty,
+                                    inits,
+                                    Some((base, None)),
+                                    false,
+                                ) {
+                                    self.data_section.extend_from_slice(&init_data);
+                                    for _ in init_data.len()..sz {
+                                        self.data_section.push(0);
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
                             }
                         },
                         Expr::AddrOf { e, .. } => {
@@ -3406,12 +3500,13 @@ mod tests {
     #[test]
     fn spill_home_goes_through_the_single_translation_point() {
         use crate::codegen::x86_64::abi::layout::{
-            FramePlan, LayoutMap, TRAMP_RESERVE, VEC_RESERVE,
+            FramePlan, LayoutMap, CX_FRAME_BAND, TRAMP_RESERVE, VEC_RESERVE,
         };
         use crate::location::Location;
         let mut cg = x86();
         cg.frame_layout = LayoutMap::resolve(&FramePlan {
             temp_slots: 2,
+            cs_slots: 4,
             var_bytes: 512,
             // 晚分配带与本用例无关（测的是 spill 翻译点），传 0 保持原有坐标
             late_slots: 0,
@@ -3419,6 +3514,8 @@ mod tests {
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            // 两条带在本用例里都给「历史上恒给」的尺寸，以免坐标平移掺进被测的那件事。
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
@@ -3493,17 +3590,20 @@ mod tests {
     #[test]
     fn late_allocation_lands_in_the_band_and_rejects_overrun() {
         use crate::codegen::x86_64::abi::layout::{
-            FramePlan, LayoutMap, TRAMP_RESERVE, VEC_RESERVE,
+            FramePlan, LayoutMap, CX_FRAME_BAND, TRAMP_RESERVE, VEC_RESERVE,
         };
         let mut cg = x86();
         cg.frame_layout = LayoutMap::resolve(&FramePlan {
             temp_slots: 2,
+            cs_slots: 4,
             var_bytes: 128,
             late_slots: 2,
             sret_need: 64,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            // 两条带在本用例里都给「历史上恒给」的尺寸，以免坐标平移掺进被测的那件事。
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,

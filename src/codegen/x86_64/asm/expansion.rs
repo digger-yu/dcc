@@ -56,23 +56,11 @@ pub fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option
 }
 
 /// Check if constraint prefers memory operand
+///
+/// 判据本体在 `codegen::shared::asm_constraints`：SSA 往返（降级成地址 / 包回左值）
+/// 读的是同一份表，两边分叉就是「写进帧槽而不是 MMIO」（报告 §5.27）。
 pub fn asm_constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
-    if constraint.is_empty() {
-        return false;
-    }
-    let letters: Vec<char> = constraint
-        .chars()
-        .filter(|c| c.is_ascii_alphabetic())
-        .collect();
-    let has_m = letters.contains(&'m');
-    // let _has_p = letters.contains(&'p');
-    let has_r = letters
-        .iter()
-        .any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
-    if has_m && (!has_r || is_inout) {
-        return true;
-    }
-    letters == vec!['m']
+    crate::codegen::shared::asm_constraints::constraint_prefers_memory(constraint, is_inout)
 }
 
 /// Check if constraint requires immediate operand

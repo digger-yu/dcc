@@ -307,7 +307,7 @@ impl Codegen {
                     imm as u8,
                 ]));
                 let pos = self.pos() - 5;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_rip_data_rel(pos, sym.clone(), 1);
             },
             _ => {
                 self.asm_reject("pextr dst must be gpr or mem");
@@ -351,7 +351,7 @@ impl Codegen {
                     imm as u8,
                 ]));
                 let pos = self.pos() - 5;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_rip_data_rel(pos, sym.clone(), 1);
             },
             _ => {
                 self.asm_reject("pinsr src must be gpr or mem");
@@ -466,7 +466,7 @@ impl Codegen {
                     imm as u8,
                 ]));
                 let pos = self.pos() - 5;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_rip_data_rel(pos, sym.clone(), 1);
             },
             _ => {
                 self.asm_reject("src must be xmm or mem");
@@ -1270,7 +1270,7 @@ impl Codegen {
                     imm as u8,
                 ]));
                 let pos = self.pos() - 5;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_rip_data_rel(pos, sym.clone(), 1);
             },
             _ => {
                 self.asm_reject("vpextr dst must be gpr or mem");
@@ -1315,7 +1315,7 @@ impl Codegen {
                     imm as u8,
                 ]));
                 let pos = self.pos() - 5;
-                self.pending_data_rels.push((pos, sym.clone()));
+                self.push_rip_data_rel(pos, sym.clone(), 1);
             },
             _ => {
                 self.asm_reject("vpinsr src must be gpr or mem");
@@ -1323,9 +1323,25 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_asm_x87_mem(&mut self, op: &AsmOperand, esc: u8, ext: u8, no_modrm: bool) {
+        self.emit_asm_x87_op(op, (esc, ext), (esc, ext), no_modrm);
+    }
+    /// x87 单操作数编码。内存形式与 st(i) 形式的 ESC/ext 可以**不同**：
+    /// `fst (%r13)` 是 `D9 /2`（m32）而 `fst %st(1)` 是 `DD D1`，`fstpl` 是
+    /// `DD /3` 而 `fstpt` 是 `DB /7`。旧实现把两套表合成一套（`"fst"|"fsts"|"fstl"`
+    /// 全走 `D9 /2`），`fldl`/`fldt`/`fdivl`/`fmull` 都被编成 32 位载入/运算，
+    /// 每个都只读写 4 个字节 —— 内核 `arch/x86/kernel/fpu/bugs.c` 的 FDIV 自检
+    /// （`fldl x` / `fdivl y` / `fmull y` / `fistpl fdiv_bug`）正撞在这组形状上。
+    pub(crate) fn emit_asm_x87_op(
+        &mut self,
+        op: &AsmOperand,
+        mem: (u8, u8),
+        st: (u8, u8),
+        no_modrm: bool,
+    ) {
         // x87 内存操作数编码: ESC opcode + ModRM (reg 字段 = ext, rm = 操作数)
         match op {
             AsmOperand::Reg(r, _) => {
+                let (esc, ext) = st;
                 // 寄存器操作数: st(i) 或 %ax (fnstsw)
                 if no_modrm {
                     // fnstsw %ax: DF E0
@@ -1341,8 +1357,29 @@ impl Codegen {
                 index,
                 scale,
             } => {
+                let (esc, ext) = mem;
+                // REX 必须在 ESC **之前**：`fistpl -0x40(%r13)` = `41 DF 5D C0`。
+                // 漏了 REX.B 时 r13 的 r/m=101 被解码成 rbp —— dcc 的帧基址正是
+                // %r13，实测那 4 个字节写到了调用者的栈上（fistpl 的输出操作数）。
+                let rex_b = *base >= 8 && *base != ASM_BASE_RIP;
+                let rex_x = index.is_some_and(|i| i >= 8);
+                let rex = 0x40 | (u8::from(rex_x) << 1) | u8::from(rex_b);
+                if rex != 0x40 {
+                    self.emit_insn(&Insn::raw(&[rex]));
+                }
                 self.emit_insn(&Insn::raw(&[esc]));
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            },
+            AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
+                let (esc, ext) = mem;
+                // RIP 相对内存形式（`fldl x(%rip)`）：mod=00、r/m=101、disp32 重定位。
+                // `-O0` 一直这么印（`Ident` 操作数），`-O2` 在 §5.39-e 之后也这么印；
+                // 没有这条臂，内核 `arch/x86/kernel/fpu/bugs.c` 的 `fldl %1`/`fdivl %2`/
+                // `fmull %2`/`fistpl %0` 四个操作数全部以 E0311 拒编 —— 而 GAS 对同一
+                // 形状发 `DD 05 <disp32>`，所以缺的是编码而不是源程序的写法。
+                self.emit_insn(&Insn::raw(&[esc, ((ext & 7) << 3) | 5, 0, 0, 0, 0]));
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
                 self.asm_reject("unsupported x87 operand pattern");

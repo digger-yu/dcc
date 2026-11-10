@@ -1,7 +1,7 @@
 read_b:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x50,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov %rdi,%rax
@@ -11,6 +11,6 @@ test $0x8,%rax
 je <read_b>
 or $0xfffffffffffffff0,%rax
 movslq %eax,%rax
-add $0xc0,%rsp
+add $0x50,%rsp
 pop %r13
 ret

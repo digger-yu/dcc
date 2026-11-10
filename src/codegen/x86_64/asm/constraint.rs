@@ -44,24 +44,12 @@ impl Codegen {
     pub(crate) fn asm_constraint_is_immediate_only(constraint: &str) -> bool {
         crate::codegen::shared::asm_constraints::constraint_is_immediate_only(constraint)
     }
+    /// 判据本体在 `codegen::shared::asm_constraints`：SSA 往返（`ssa/build.rs` 把
+    /// 这类操作数降级成**地址**、`ssa/expr_rebuild.rs` 再把地址包回左值）读的是
+    /// 同一份表。发射层若在这里另留一份副本，下游一旦只改一边，IR 里的值/地址
+    /// 语义就分叉（报告 §5.27）。
     pub(crate) fn asm_constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
-        if constraint.is_empty() {
-            return false;
-        }
-        let letters: Vec<char> = constraint
-            .chars()
-            .filter(|c| c.is_ascii_alphabetic())
-            .collect();
-        let has_m = letters.contains(&'m');
-        let _has_p = letters.contains(&'p');
-        let has_r = letters
-            .iter()
-            .any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
-        // "p" 表示内存地址, 但仍需填入寄存器 (地址本身), 不当作内存操作数直接替换
-        if has_m && (!has_r || is_inout) {
-            return true;
-        }
-        letters == vec!['m']
+        crate::codegen::shared::asm_constraints::constraint_prefers_memory(constraint, is_inout)
     }
     pub(crate) fn asm_constraint_wants_mmx(constraint: &str) -> bool {
         let core = constraint.trim_start_matches(['=', '+', '&']);
@@ -130,12 +118,93 @@ impl Codegen {
         }
         false
     }
+    /// 静态可求值的 lvalue 地址（`符号 + 常量字节偏移`）。
+    ///
+    /// 只认「全局对象 → 常量字段偏移」这条链：`pv_ops.cpu.irq_disable` 这类
+    /// `"m" (array.op)` 操作数在 GCC 里就展开成 `sym+off(%rip)`，是**不带寄存器、
+    /// 不带前缀**的 6 字节内存操作数。指针基（`->`）、下标、VLA 结构体都返回
+    /// `None`，保持原来的取址路径（地址进 scratch 寄存器，模板里用 `(%reg)`）。
+    ///
+    /// 为什么必须有它：`call *%[paravirt_opptr]` 的 operand 就是这种形状，
+    /// 落到寄存器形式会编成 `call *(%rbx)` —— 语义对、字节形状错，内核
+    /// `alt_replace_call()` 只认 `ff 15 disp32`（§5.32）。
+    fn asm_static_sym_addr(&self, e: &Expr) -> Option<(String, i64)> {
+        match e {
+            Expr::Ident { name, .. } => {
+                if self.is_global_not_local(&name.name) {
+                    Some((self.resolve_global_key(&name.name).to_string(), 0))
+                } else {
+                    None
+                }
+            },
+            // `*(&obj)` 的退化形态：左值地址就是 `&obj` 的值。
+            Expr::Deref { e, .. } => self.asm_static_ptr_value(e),
+            Expr::Member {
+                expr,
+                field,
+                is_arrow,
+                ..
+            } => {
+                // `base.f` 的地址 = base 的地址 + 偏移；`p->f` 的地址 = p 的**值** + 偏移。
+                // 两种形态在 SSA 重建后的地址链上都会出现：`"m"(pv_ops.cpu.a)` 内联后是
+                // `&(&pv_ops.cpu)->a`（`MemberAddr{obj: _t}` 的 obj 被内联成 `AddrOf{Member}`，
+                // `is_arrow` 为真）。静态链只沿「全局对象 → 常量字段」走，指针变量在
+                // `asm_static_ptr_value` 里就断开了，不会误把加载值当符号地址。
+                let (sym, off) = if *is_arrow {
+                    self.asm_static_ptr_value(expr)?
+                } else {
+                    self.asm_static_sym_addr(expr)?
+                };
+                let target_ty =
+                    self.resolve_complete_struct_ty(Self::member_target_ty(expr.ty(), *is_arrow));
+                if target_ty.has_vla() {
+                    return None;
+                }
+                let foff = match &target_ty {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                        find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)?
+                    },
+                    _ => return None,
+                };
+                Some((sym, off + foff as i64))
+            },
+            _ => None,
+        }
+    }
+    /// `e` 作为**指针值**时的静态形态（`符号 + 常量字节偏移`）。
+    ///
+    /// 与 [`Self::asm_static_sym_addr`]（左值取址）分工：SSA 把 `"m"` 操作数降级成
+    /// **地址**、重建时包回 `*addr`（`ssa/build.rs::lower_lvalue_addr` →
+    /// `InstKind::AddrOf` → `Expr::AddrOf`），所以发射层看到的是 `Deref{ e: AddrOf{…} }`。
+    /// 地址表达式的值就是「取址」的结果，递归回左值链即可。
+    ///
+    /// 只认**真正静态**的形状：裸 `Ident` 一律不认 —— 指针**变量**的 `Ident` 值是
+    /// 一次加载（且是 `"m"(*p)` 语义），把它当成符号地址就是静默错值。指针值形态的
+    /// 变量（`&x` / 数组名 / 函数名）在 SSA 里都会带上 `AddrOf`，故不需要裸 Ident。
+    fn asm_static_ptr_value(&self, e: &Expr) -> Option<(String, i64)> {
+        match e {
+            Expr::AddrOf { e, .. } => self.asm_static_sym_addr(e),
+            // 指针到指针的转型不改变地址值。
+            Expr::Cast { e, .. } => self.asm_static_ptr_value(e),
+            _ => None,
+        }
+    }
     /// 内存操作数（`"m"` / `"+m"`）的地址形态。
     ///
     /// `dst` 是调用方预分配并已登记所有权的地址暂存号（见
     /// `build_asm_operand_map` 的预扫描）：地址必须在整条 asm 期间活着，
     /// 模板里直接展开成 `(%reg)`。
-    pub(crate) fn asm_memory_operand_str(&mut self, expr: &Expr, dst: u8) -> Option<String> {
+    ///
+    /// `allow_static_rip` 只在操作数是**间接跳转目标**（`call *%N` / `jmp *%N`）
+    /// 时为真：那是 `sym+off(%rip)` 唯一确定正确的场景（§5.32）。per-cpu 的
+    /// `"m"`（`mov %1,%%gs:%0`、`xadd %%q1,%0`）不能静态化：段前缀会作用到
+    /// 符号的链接地址上，且 xadd/mov 的编码分支只认寄存器/内存形态。
+    pub(crate) fn asm_memory_operand_str(
+        &mut self,
+        expr: &Expr,
+        dst: u8,
+        allow_static_rip: bool,
+    ) -> Option<String> {
         if let Expr::Ident { name, .. } = expr {
             // 局部优先: 与全局同名的参数/局部变量必须走栈槽而非 rip
             if self.is_global_not_local(&name.name) {
@@ -147,11 +216,42 @@ impl Codegen {
             let off = self.var_offset(&name.name);
             return Some(format!("{off}(%r13)"));
         }
+        // 全局对象的常量字段链：直接发 `sym+off(%rip)`，与 GCC 同形。
+        // 寄存器形式（`(%rbx)`）语义等价，但 `call *(%rbx)` 会让内核 alternatives
+        // 的 ALT_FLAG_DIRECT_CALL 站点对不上字节形状（§5.32）。
+        if allow_static_rip {
+            if let Some((sym, off)) = self.asm_static_sym_addr(expr) {
+                return Some(if off != 0 {
+                    format!("{sym}{off:+}(%rip)")
+                } else {
+                    format!("{sym}(%rip)")
+                });
+            }
+        }
         let reg = Self::gp_reg_name(dst).unwrap_or("r12");
+        // 模板里展开成 AT&T 内存引用：寄存器名**必须带 `%`**。旧写法
+        // `format!("({reg})")` 把 `lock incl %0` 渲染成 `lock incl (rbx)`，
+        // GAS 会把 `rbx` 当符号：`-S` 文本路径与直发字节就此不一致
+        // （§5.20 的 `cmpxchg16b (%rbx)` 现场）。
+        // SSA 往返之后 `"m"` 操作数是 `*addr`（地址在 IR 里，见上面的
+        // `lower_lvalue_addr`）：先看**地址**是否静态可求值（`&全局对象`、其常量
+        // 字段链、数组名/函数名衰减）。能定就直接发 `sym+off(%rip)`，与 GCC 同形；
+        // 定不了再退回「地址进 scratch 寄存器」的旧路径（语义等价，只是字节形状不同）。
+        if allow_static_rip {
+            if let Expr::Deref { e, .. } = expr {
+                if let Some((sym, off)) = self.asm_static_ptr_value(e) {
+                    return Some(if off != 0 {
+                        format!("{sym}{off:+}(%rip)")
+                    } else {
+                        format!("{sym}(%rip)")
+                    });
+                }
+            }
+        }
         // 指针解引用/转型: 解引用地址就是指针值本身, 走右值求值.
         if let Expr::Deref { e, .. } | Expr::Cast { e, .. } = expr {
             self.gen_expr(e, dst);
-            return Some(format!("({reg})"));
+            return Some(format!("(%{reg})"));
         }
         // 成员/下标: 必须走 lvalue 取址路径. `gen_expr` 的约定是**取值**,
         // 旧实现把字段值当成 `(%reg)` 里的地址去解引用: 内核
@@ -162,7 +262,7 @@ impl Codegen {
             if !self.gen_lvalue_addr(expr, dst) {
                 return None;
             }
-            return Some(format!("({reg})"));
+            return Some(format!("(%{reg})"));
         }
         None
     }

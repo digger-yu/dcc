@@ -14,7 +14,7 @@
 // 不是它们本身。
 
 use crate::ssa::cfg::{ordered_block_names, term_succs_pub};
-use crate::ssa::ir::{collect_uses_kind, Function, Operand, Terminator};
+use crate::ssa::ir::{collect_uses_kind, Function, InstKind, Operand, Terminator};
 use std::collections::{BTreeSet, HashMap};
 
 /// 块内的一个程序点：一条指令（或 phi 段、terminator）。
@@ -119,6 +119,45 @@ pub fn compute(func: &Function) -> Interference {
     let mut gens: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
     let mut kills: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
 
+    // 「基名 → 该基名的全部 SSA 名」。只为下面 `PreservedDecl` 的读者展开服务。
+    //
+    // 为什么需要：`InstKind::PreservedDecl` 的初始化式在重建时原样回填进
+    // `Decl::Var`（`rebuild.rs` 的 `items.push(BlockItem::Decl(Decl::Var(var.clone())))`），
+    // 发射期是按**基名**查家取值的 —— 这条路径上根本没有 SSA use 边。
+    // 实测形状（报告 §5.38）：内核 `call_netdevice_notifiers` 的
+    // `struct netdev_notifier_info info = { .dev = dev, .extack = extack };`
+    // 两个内联形参在 IR 里只有定义、没有读者 ⇒ `Interference` 判它们互不干涉 ⇒
+    // 同一个号槽发出 %r12 两次，`.dev` 读到被 `.extack`（NULL）覆盖后的值，
+    // boot 在 `dev_net(NULL)` 处 #PF。
+    //
+    // 展开成「全部版本」是保守方向（多算冲突只会少共用、不会撞家）；跨版本也
+    // 必须两两干涉 —— 发射期读的是那个基名的家，哪个版本的家在发射时被复用
+    // 都会读到别人的值。
+    let versions_by_base: HashMap<String, Vec<String>> = {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        let mut note = |name: String, base: String| {
+            m.entry(base).or_default().push(name);
+        };
+        for p in &func.params {
+            note(p.name(), p.base.clone());
+        }
+        for bb in func.blocks.values() {
+            for phi in &bb.phis {
+                note(phi.dest.name(), phi.dest.base.clone());
+            }
+            for inst in &bb.insts {
+                if let Some(d) = &inst.dest {
+                    note(d.name(), d.base.clone());
+                }
+            }
+        }
+        for v in m.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        m
+    };
+
     for (bi, bname) in order.iter().enumerate() {
         let Some(bb) = func.blocks.get(bname) else {
             continue;
@@ -139,6 +178,19 @@ pub fn compute(func: &Function) -> Interference {
             let mut uses: BTreeSet<String> = BTreeSet::new();
             for u in collect_uses_kind(&inst.kind) {
                 uses.insert(u);
+            }
+            // 保留声明的初始化式是**基名**读者（理由见上面 `versions_by_base`）。
+            // 不补这一条，这类读取在活性里不存在，两个只被它读到的值就能共号。
+            if let InstKind::PreservedDecl { var } = &inst.kind {
+                if let Some(init) = &var.init {
+                    let mut ids: Vec<String> = Vec::new();
+                    crate::ssa::passes::collect_expr_uses(init, &mut ids);
+                    for id in ids {
+                        if let Some(vs) = versions_by_base.get(&id) {
+                            uses.extend(vs.iter().cloned());
+                        }
+                    }
+                }
             }
             let def = inst.dest.as_ref().map(|d| d.name());
             for u in uses.iter() {

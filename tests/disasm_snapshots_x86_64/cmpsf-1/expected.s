@@ -1,7 +1,7 @@
 feq:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movss %xmm0,-0x40(%r13)
@@ -23,20 +23,20 @@ je <feq>
 mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 fne:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movss %xmm0,-0x40(%r13)
@@ -58,20 +58,20 @@ je <fne>
 mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 flt:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movss %xmm0,-0x40(%r13)
@@ -93,20 +93,20 @@ je <flt>
 mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 fge:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movss %xmm0,-0x40(%r13)
@@ -128,20 +128,20 @@ je <fge>
 mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 fgt:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movss %xmm0,-0x40(%r13)
@@ -163,20 +163,20 @@ je <fgt>
 mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 fle:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 movss %xmm0,-0x40(%r13)
@@ -198,20 +198,20 @@ je <fle>
 mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 main:
 push %r13
 mov %rsp,%r13
-sub $0x250,%rsp
+sub $0x120,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 mov %r14,-0x20(%r13)
@@ -3049,6 +3049,6 @@ mov -0x10(%r13),%rbx
 mov -0x18(%r13),%r12
 mov -0x20(%r13),%r14
 <nop padding>
-add $0x250,%rsp
+add $0x120,%rsp
 pop %r13
 ret

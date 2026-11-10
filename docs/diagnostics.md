@@ -1,6 +1,6 @@
 # DCC 错误诊断码参考
 
-> 最后更新：2026-08-28  
+> 最后更新：2026-11-06  
 > 实现：`src/diagnostics.rs` · 回归：`tests/errors.rs` + `tests/fixtures/errors/`
 
 本文档是 DCC **Diagnostic 错误/警告码**的权威说明。CLI 参数错误（`dcc: error: …`，无 `[Exxxx]`）不在编号体系内，见 [CLI 非编号错误](#cli-非编号错误)。
@@ -152,6 +152,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0310** | `a __global__ function '…' cannot also be __host__ or __device__` | CUDA 函数限定符冲突 | `__global__` 与 `__host__`/`__device__` 同时出现 | — |
 | **E0311** | `unsupported inline asm instruction …` / `… cannot be encoded by dcc …` | mini-asm 编码失败：助记符不在表内，或操作数形态超出表能力 | `--asm-fallback=error`（默认）且内联汇编不可编码 | `asm_fallback_default_is_hard_error`、`mini_asm_*_is_hard_error` |
 | **E0312** | `--asm-fallback=gas is unavailable for <arch> target` | 目标后端还不能把整个 TU 渲染成真 GAS 文本（`Feature::GasTextOutput`） | `--asm-fallback=gas` 用于不具备该能力的后端 | `asm_fallback_requires_gas_text_capability` |
+| **E0321** | `inline asm output operands N and M are both bound to storage '…'` | 同一条 asm 的两个输出被绑到同一块存储（绑定错，不是编码器能力问题） | `codegen/x86_64/asm/opmap.rs` 的 fail-closed 闸门命中；不走 `E0311` 透传通道，因为 `--asm-fallback=gas` 的提示在这里是误导 | `e0321_asm_output_conflict`（另见 `tests/fixtures/opt/ssa_asm_output_slot_alignment.c` 的绿灯对照） |
 
 **CLI 形式的 E0100**：无输入文件时，`cli.rs` 直接输出 `dcc: error: no input file`（无 `[E0100]`），exit 2。语义等价于 Diagnostic E0100。
 

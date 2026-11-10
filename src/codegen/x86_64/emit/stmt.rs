@@ -294,6 +294,23 @@ impl Codegen {
         self.stmt_line_entries.push((pc, line));
     }
 
+    /// 发一条**互斥分支 / 循环体**语句，并在结束时回收它新增的 sret/物化槽。
+    ///
+    /// 为什么需要它：`gen_block_items` 已经对同层兄弟做了 mark/restore，而 `if` 的两个臂、
+    /// 循环体这些**互斥**子语句以前提前不走这条路：于是 `if (c) a = g(); else *x = g();`
+    /// 会把两臂的槽**叠加**，而规划期 `sret_bytes_stmt` 对 `If` 取的是 `max(then, else)`（两臂
+    /// 不同时存活本来就是事实），两边口径不一致 ⇒ 发射期 `E1128`（实测
+    /// `gcc.c-torture/execute/pr51877.c` 的 `foo`：预算 64B、实际 112B）。旧行为靠帧底那堆
+    /// 无条件预留吸掉了这笔账，§5.12 把预留改成按需后现形。
+    ///
+    /// 不变式与 `gen_block_items` 同一条：sret/物化槽只在一条语句（这里是整个臂）内存活，
+    /// 出臂即死；条件、选择子等外层槽在 `mark` 之前就已分配，不会被这里的回收推平。
+    fn gen_stmt_scoped(&mut self, s: &Stmt) {
+        let mark = self.save_sret_watermark();
+        self.gen_stmt(s);
+        self.restore_sret_watermark(mark);
+    }
+
     pub fn gen_stmt(&mut self, s: &Stmt) {
         self.note_stmt_line(s);
         match s {
@@ -557,7 +574,13 @@ impl Codegen {
                                                 Expr::Index { .. }
                                                 | Expr::Member { .. }
                                                 | Expr::Deref { .. } => true,
-                                                _ => false,
+                                                // 交付轴单一真源: 语句表达式 / 整块拷贝
+                                                // 过的链式赋值 / 物化过的聚合三元 / 内存
+                                                // 返回的调用 —— rax 里也是对象地址
+                                                // （`return ({ struct q y; …; y; });`
+                                                // 的 16 B 结构以前在这一臂返回地址字节,
+                                                // 报告 §5.15）。
+                                                _ => Self::rvalue_is_buffer_addr(e),
                                             };
                                             self.gen_expr(e, Self::EVAL_BASE);
                                             if rax_is_agg_addr {
@@ -662,11 +685,17 @@ impl Codegen {
                                 }
                             }
                             // Small struct (<=8B) returned as value in rax.
-                            // CompoundLit/InitList gen_expr returns an ADDRESS
-                            // in rax; we must load the VALUE from that address.
+                            // 交付轴（`rvalue_is_buffer_addr`）为真的右值——复合字面量 /
+                            // 语句表达式 / 整块拷贝过的链式赋值 / 物化过的聚合三元——
+                            // 在 rax 里是 **地址**, 必须按大小把值从 [rax] 读出来;
+                            // 按字面只列 `CompoundLit|InitList` 会把 `return ({…; t;})`
+                            // （2 B 结构）的地址字节当返回值交回调用方（报告 §5.15）。
+                            // `InitList` 单独列出：它没有 `Expr::ty()` 意义上的自身
+                            // 类型，谓词回答不了它，而发射端同样只给地址。
                             if matches!(&ret_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                                 && ret_sz <= 8
-                                && matches!(e, Expr::CompoundLit { .. } | Expr::InitList { .. })
+                                && (matches!(e, Expr::InitList { .. })
+                                    || Self::rvalue_is_buffer_addr(e))
                             {
                                 match ret_sz {
                                     1 => {
@@ -826,7 +855,12 @@ impl Codegen {
                             // than int, the BinOp result may have extra bits
                             // in the register that must be cleared.
                             let ret_bits = func_ret_ty.size() * 8;
-                            if func_ret_ty.is_int() && ret_bits < 64 {
+                            if matches!(&func_ret_ty, Type::Bool) {
+                                // `_Bool` 返回值不是「无符号 8 位整数」：C11 6.3.1.2p1
+                                // 要求归一化为 `(value != 0)`。按宽度截断会把
+                                // `return 512;` 变成 return 0（§5.30，夹具 `gfun()`）。
+                                self.emit_normalize_bool(0);
+                            } else if func_ret_ty.is_int() && ret_bits < 64 {
                                 let is_signed = Self::is_signed_int(&func_ret_ty);
                                 match ret_bits {
                                     8 if is_signed => {
@@ -1003,7 +1037,7 @@ impl Codegen {
                 let emit_dead_branch = |this: &mut Self, s: &Stmt| {
                     let skip = this.fresh_label();
                     this.jmp_rel32(&skip, JumpKind::Jmp);
-                    this.gen_stmt(s);
+                    this.gen_stmt_scoped(s);
                     this.label(&skip);
                 };
                 // 常量折叠必须**先过可丢性闸门**：`const_eval` 对 `Expr::Assign` 走「返回
@@ -1022,7 +1056,7 @@ impl Codegen {
                         .map_or(false, |s| Self::stmt_contains_label(s));
                     if cv != 0 {
                         // condition is true
-                        self.gen_stmt(then_);
+                        self.gen_stmt_scoped(then_);
                         // else 分支里可能含被 then 分支 goto 跳转的标签（如 20030503-1.c:
                         // `if (1) goto foo; else { foo: ... }`），必须也发射 else 分支。
                         if has_labels_in_else {
@@ -1042,11 +1076,11 @@ impl Codegen {
                                 let to_else = self.fresh_label();
                                 let end = self.fresh_label();
                                 self.jmp_rel32(&to_else, JumpKind::Jmp);
-                                self.gen_stmt(then_);
+                                self.gen_stmt_scoped(then_);
                                 self.jmp_rel32(&end, JumpKind::Jmp);
                                 self.label(&to_else);
                                 if let Some(el) = else_ {
-                                    self.gen_stmt(el);
+                                    self.gen_stmt_scoped(el);
                                 }
                                 self.label(&end);
                             } else {
@@ -1054,7 +1088,7 @@ impl Codegen {
                                 emit_dead_branch(self, then_);
                             }
                         } else if let Some(el) = else_ {
-                            self.gen_stmt(el);
+                            self.gen_stmt_scoped(el);
                         }
                     }
                 } else {
@@ -1088,7 +1122,7 @@ impl Codegen {
                             });
                     } else {
                         self.gen_cond_jump_to(cond, &le, false);
-                        self.gen_stmt(then_);
+                        self.gen_stmt_scoped(then_);
                         // Skip dead jmp when then-body ends with return
                         let then_ends_ret = Self::stmt_ends_with_return(then_);
                         // **不要**在这里追加「无 else 就不发这条 jmp」的 to-next 抑制：
@@ -1101,7 +1135,7 @@ impl Codegen {
                         }
                         self.label(&le);
                         if let Some(el) = else_ {
-                            self.gen_stmt(el);
+                            self.gen_stmt_scoped(el);
                         }
                         self.label(&lend);
                     }
@@ -1117,7 +1151,7 @@ impl Codegen {
                 self.maybe_align_loop();
                 self.label(&ls);
                 self.gen_cond_jump_to(cond, &le, false);
-                self.gen_stmt(body);
+                self.gen_stmt_scoped(body);
                 self.jmp_rel32(&ls, JumpKind::Jmp);
                 self.label(&le);
                 self.loop_continue = sc;
@@ -1131,8 +1165,21 @@ impl Codegen {
                 body,
                 ..
             } => {
+                // for-init 的声明语句被 parser 合成一个 `Stmt::Block`，但按 C 语义它的
+                // 作用域是**整个 for 语句**（跨迭代存活），不是那个合成块。旧写法直接
+                // `gen_stmt_scoped(init)` ⇒ 块臂就地 begin/end 配对，带 cleanup 属性的
+                // 变量（内核 `__scoped_guard` 的锁对象就是它）构造/析构背靠背发生在
+                // 循环体之前，体整段跑在锁外（报告 §5.36）。这里把收尾挪到循环出口。
+                let cleanup_base = self.begin_cleanup_scope();
                 if let Some(i) = init {
-                    self.gen_stmt(i);
+                    if let Stmt::Block { b, .. } = &**i {
+                        // 只发声明本身，**不**关作用域：cleanup 留到 `le` 处统一发。
+                        let mark = self.save_sret_watermark();
+                        self.gen_block_items(&b.items);
+                        self.restore_sret_watermark(mark);
+                    } else {
+                        self.gen_stmt_scoped(i);
+                    }
                 }
                 let ls = self.fresh_label();
                 let le = self.fresh_label();
@@ -1146,7 +1193,7 @@ impl Codegen {
                 if let Some(c) = cond {
                     self.gen_cond_jump_to(c, &le, false);
                 }
-                self.gen_stmt(body);
+                self.gen_stmt_scoped(body);
                 self.label(&lst);
                 if let Some(s) = step {
                     // for 的 step 也是表达式语句：值同样没人读。
@@ -1156,6 +1203,10 @@ impl Codegen {
                 }
                 self.jmp_rel32(&ls, JumpKind::Jmp);
                 self.label(&le);
+                // 循环出口（条件假 / break）就是 for 语句作用域结束处：
+                // 在这里发 for-init 声明的 cleanup，`return` 走各 return 站点的
+                // emit_cleanup_range（登记此刻还在栈上）。
+                self.end_cleanup_scope(cleanup_base);
                 self.loop_continue = sc;
                 self.loop_break = sb;
                 self.break_targets.pop();
@@ -1173,7 +1224,7 @@ impl Codegen {
                 self.break_targets.push((le.clone(), false));
                 self.maybe_align_loop();
                 self.label(&ls);
-                self.gen_stmt(body);
+                self.gen_stmt_scoped(body);
                 self.label(&lc);
                 self.gen_cond_jump_to(cond, &ls, true);
                 self.label(&le);
@@ -1684,7 +1735,9 @@ impl Codegen {
             let sb = std::mem::replace(&mut self.loop_break, arm.loop_break.clone());
             let bt = std::mem::replace(&mut self.break_targets, arm.break_targets.clone());
             self.label(&arm.entry);
-            self.gen_stmt(&arm.body);
+            // 每条冷臂都是独立的：它的 sret/物化槽不能叠到下一条臂上（与 `sret_bytes_stmt` 对 Switch 取
+            // max(各臂) + 选择子槽 的口径一致）。
+            self.gen_stmt_scoped(&arm.body);
             if let Some(j) = &arm.join {
                 if !Self::stmt_ends_with_return(&arm.body) {
                     self.jmp_rel32(j, JumpKind::Jmp);
@@ -1742,15 +1795,28 @@ impl Codegen {
         self.cleanup_vars.len()
     }
 
-    /// 出块：按 LIFO 发出本作用域内登记的 cleanup 调用。
+    /// 出块：按 LIFO 发出本作用域内登记的 cleanup 调用，并消费掉登记。
     pub fn end_cleanup_scope(&mut self, base: usize) {
-        while self.cleanup_vars.len() > base {
-            if let Some((var_name, fn_name)) = self.cleanup_vars.pop() {
-                // 发射: lea rdi, [r13 + offset]; call fn_name
-                let off = self.var_offset(&var_name);
-                self.emit_lea_r13(7, off); // rdi = &var
-                self.call_label(&fn_name);
-            }
+        self.emit_cleanup_range(base);
+        self.cleanup_vars.truncate(base);
+    }
+
+    /// 按 LIFO 发出 `[base, len)` 区间的 cleanup，但**不**消费登记。
+    ///
+    /// 为什么要两个入口：登记栈是全局单份，而一个函数有**多条**退出路径 —— 每个 `return`
+    /// 站点都内联一份尾声。消费式的 `end_cleanup_scope` 只在第一条被发射的路径上发得出
+    /// 来，后面的路径拿到的是空栈（实测 `int o __attribute__((cleanup(c1))) = 1;
+    /// if (flag) return 5; return 6;`：`return 5` 那条跑了，`return 6` 那条不跑，而
+    /// gcc 两条都跑）。块出口仍是「离开一次」的语义，所以它继续用消费式。
+    pub fn emit_cleanup_range(&mut self, base: usize) {
+        let mut i = self.cleanup_vars.len();
+        while i > base {
+            i -= 1;
+            let (var_name, fn_name) = self.cleanup_vars[i].clone();
+            // 发射: lea rdi, [r13 + offset]; call fn_name
+            let off = self.var_offset(&var_name);
+            self.emit_lea_r13(7, off); // rdi = &var
+            self.call_label(&fn_name);
         }
     }
 
@@ -1821,33 +1887,12 @@ impl Codegen {
                         .static_local_map
                         .needs_runtime_init(&self.current_func_name, &v.name.name)
                 {
-                    if let Some(init) = &v.init {
-                        // 数组型 static local (如 `static const void *l[] = {&&a, &&b};`):
-                        // InitList 中的每个元素都要逐元素写入对应偏移,
-                        // 不能用 gen_expr(EVAL_BASE) + 单次 store (只写第一个元素).
-                        if let Expr::InitList { inits, .. } = init {
-                            if let Type::Array(elem_ty, _) = &v.ty {
-                                let elem_size = elem_ty.size();
-                                let mut off: i32 = 0;
-                                for item in inits.iter() {
-                                    if let InitItem::Expr(e) = item {
-                                        self.gen_expr(e, Self::EVAL_BASE);
-                                        self.emit_global_store_offset(0, &v.name.name, off);
-                                        off += elem_size as i32;
-                                    }
-                                }
-                            } else {
-                                self.gen_expr(init, Self::EVAL_BASE);
-                                self.emit_global_store(0, &v.name.name);
-                            }
-                        } else {
-                            self.gen_expr(init, Self::EVAL_BASE);
-                            self.emit_global_store(0, &v.name.name);
-                        }
-                    }
+                    self.gen_static_local_init(v);
                     return;
                 }
-                self.register_var(&v.name.name, &v.ty);
+                if !self.decl_skips_frame_slot(v) {
+                    self.register_var(&v.name.name, &v.ty);
+                }
                 if Self::type_has_vla(&v.ty) {
                     self.gen_vla_alloc(v);
                 } else if let Some(init) = &v.init {
@@ -1864,27 +1909,16 @@ impl Codegen {
                             self.mov_to_stack(0, &v.name.name);
                         }
                     } else {
-                        let is_agg = matches!(
-                            &v.ty,
-                            Type::Struct(_, _, _, _)
-                                | Type::Union(_, _, _, _)
-                                | Type::Array(_, ArraySize::Const(_))
-                                | Type::Atomic(_)
-                        ) && v.ty.size() > 8;
-                        // CompoundLit 求值后 rax 里是**缓冲地址**而不是数据。
-                        // 8 字节及以下的 struct/union 装得进一个寄存器，
-                        // 但值模型仍是「地址」，直接 `mov_to_stack` 存下去就是
-                        // 把指针字节写进变量。内核 `pgprot_t prot = PAGE_KERNEL_IO;`
-                        // （1×u64 struct，内联展开成 `__inlN$_flags`）正是此形：
-                        // APIC fixmap PTE 得到 `0xFFFFFFFF87DFF398`，启动 #PF→#DF。
-                        // 判据与 `functions.rs` 顶层声明、`dispatch.rs` 语句表达式
-                        // 三处必须同步（同一份知识，不允许任一处另写一套）。
-                        let needs_compound_copy = matches!(init, Expr::CompoundLit { .. })
-                            && matches!(
-                                &v.ty,
-                                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
-                            );
-                        if matches!(&v.ty, Type::Vector(_, _)) || is_agg || needs_compound_copy {
+                        // 聚合初始化一律问 `assign_needs_whole_copy`（类型轴 ||
+                        // 交付轴，报告 §5.15 的单一真源；与 `functions.rs` 顶层声明
+                        // 共用，不允许任一站点重写形状/尺寸判据）。旧写法的
+                        // 「尺寸 > 8 或 CompoundLit」漏掉了内联展开后的 StmtExpr：
+                        // 8 字节聚合（内核 `guard(mutex)` 的 `class_mutex_t`）在 rax
+                        // 里交付的是物化槽地址，`mov_to_stack` 直接把地址写进变量，
+                        // 解锁落到栈上而不是真实 mutex（§5.24）。
+                        if matches!(&v.ty, Type::Vector(_, _))
+                            || Self::assign_needs_whole_copy(&v.ty, init)
+                        {
                             let dst_ty = v.ty.clone();
                             let dst_name = v.name.name.clone();
                             self.gen_aggregate_assign(&dst_name, &dst_ty, init);

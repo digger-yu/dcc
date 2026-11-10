@@ -210,7 +210,15 @@ pub enum InstKind {
         outputs: Vec<Expr>,
         output_names: Vec<Option<String>>,
         output_constraints: Vec<String>,
-        output_vars: Vec<SsaVar>,
+        /// 与 `outputs` **逐位对齐**的输出写侧变量：只有操作数本身是 `Expr::Ident`
+        /// （写侧能在 IR 里建成一次 def）时才是 `Some`，其余形态（`"+m"(*v)`、
+        /// `"=r"(a[i])`、不可见的 `"=@ccz"(c)` …）是 `None` 占位。
+        ///
+        /// 为什么必须是 `Option` 而不是只 push 有 def 的项：重建侧按 `idx` 把版本名
+        /// 代回 `outputs[idx]`，压缩过的列表会让第 i 个 def 落到第 j 个操作数上
+        /// （§5.11：`"+m"(*v)` 被换成 `"=@ccz"` 的 `c`，`lock cmpxchgl` 于是拿条件码
+        /// 变量的帧槽当目标，写错地址 + 读回垃圾条件码，且全程无诊断）。
+        output_vars: Vec<Option<SsaVar>>,
         inputs: Vec<Operand>,
         input_names: Vec<Option<String>>,
         input_constraints: Vec<String>,
@@ -442,22 +450,42 @@ pub struct Function {
     /// **但「按值」本身就盖不住最常见的一类歧义**：`1` 既是 `int` 也是 `unsigned`，
     /// 于是 `int x=-1; unsigned y=1; x>y` 被 SCCP 折成两个 `Operand::Int` 后，重建只能
     /// 把 `1` 认成 `int` ⇒ 公共类型 `int` ⇒ 有符号条件码。那类形状由下面
-    /// [`Function::cmp_operand_tys`]（按指令槽位记账）兜住，本表退为「无指令归属的常量」
+    /// [`Function::bin_operand_tys`]（按指令槽位记账）兜住，本表退为「无指令归属的常量」
     /// 的第二档。
     pub const_int_tys: HashMap<i128, Option<Type>>,
-    /// 比较指令**在原始 AST 里两个操作数的类型**：`dest` 名 -> `(l.ty(), r.ty())`。
+    /// **整型** Binop 两个操作数在原始 AST 里的类型：`dest` 名 -> `(l.ty(), r.ty())`。
     ///
     /// 为什么需要按键到**指令**而不是按值：`Operand::Int` 无类型，而 SCCP/拷贝传播会把
-    /// **带类型的** `Operand::Var`（`y.1: UInt`）换成**无类型的** `Operand::Int(1)` ——
-    /// 字面量的无符号性就在这一步被销毁（实测 `int x=-1; unsigned y=1; return x>y;` 在
-    /// -O2 得 0，应 1；`DCC_SSA_OFF=sccp` 时 IR 仍是 `Var(x.1: Int) > Var(y.1: UInt)`，
-    /// 结果正确）。被销毁的事实只有构建器知道，所以在 `Expr::Binop` 下降时按本指令的
-    /// `dest` 名记一笔；重建回 AST 时用它给「裸 `Expr::Int` 操作数」补类型，于是
-    /// 比较的符号性重新由 `usual_arith_type` 从**真类型**推出，而不是从量级猜。
+    /// **带类型的** `Operand::Var`（`y.1: UInt`）换成**无类型的** `Operand::Int(1)`，
+    /// `Expr::Cast{u64, 字面量}` 也会在下降时被折叠成裸 `Operand::Int` —— 字面量的
+    /// 无符号性与**宽度**就在这一步被销毁。被销毁的事实只有构建器知道，所以在
+    /// `Expr::Binop` 下降时按本指令的 `dest` 名记一笔；重建回 AST 时用它给「裸
+    /// `Expr::Int` 操作数」补类型，于是运算的符号性与宽度重新由**真类型**推出，
+    /// 而不是从量级猜。
     ///
-    /// 只记 `Lt/Gt/Le/Ge` 四条（条件码唯符号性是从的运算），且只在操作数重建为
-    /// **裸整常量**时生效 —— 其余形状原本就带着类型，不该被改写。
-    pub cmp_operand_tys: HashMap<String, (Type, Type)>,
+    /// 两族实测受害者（同一件事的两个面）：
+    ///  * 符号性：`int x=-1; unsigned y=1; return x>y;` 在 -O2 得 0（应 1）。
+    ///  * **宽度**：`q = (r * (u64)0x28f5c29) >> 32;`（内核 `lib/vsprintf.c`
+    ///    的 `put_dec_full8`）里那份 `(u64)` 被折叠后，乘法只剩 32 位口径，
+    ///    发射序成了 `imul; mov %eax,%eax; shr $32` —— 先截低位再右移 32 恒得 0，
+    ///    拼出来的十进制数下标越界，PVH 启动在 `put_dec_full8+0x8a` 以 #DF 收场。
+    ///
+    /// 只在两个操作数的 AST 类型**都是整数**时记账（指针算术的 `1` 不该被刷成指针型），
+    /// 且只在操作数重建为**裸整常量**时生效 —— 其余形状原本就带着类型，不该被改写。
+    pub bin_operand_tys: HashMap<String, (Type, Type)>,
+    /// 调用实参在**原始 AST** 里的类型：`dest` 名 -> 各实参类型（只在阶梯会猜错时记）。
+    ///
+    /// 与 [`Function::bin_operand_tys`] 同源同因：`Operand::Int` 不带类型，重建回 AST
+    /// 只能按量级阶梯猜。按**实参类型**决定语义的内建（`__builtin_clzll` 的宽度、
+    /// `__builtin_clzg` 的宽窄 …）问的正是 `args[i].ty()`，猜错就换个口径算：
+    /// 内核 `mm/sparse.c` 的 `roundup_pow_of_two(4)` → `fls64(3)` →
+    /// `64 - __builtin_clzll(3ULL)` 在 -O2 拿到 1<<34（应 4），usemap 申请 1 TB 失败，
+    /// 随后 `sparse_init_subsection_map` 在 `ms->usage == NULL` 上取 `->map` —— PVH 启动
+    /// 在 `__bitmap_set+0x183` 以 #GP 收场（§5.18）。
+    ///
+    /// 只记**阶梯会猜错**的那些槽位（裸 `Expr::Int` 且其 AST 类型 ≠ `int_const_ty(值)`）：
+    /// 其余情况重建得到的就是真类型，多存一份只会让这张表在改名/克隆后变成噪音。
+    pub call_arg_tys: HashMap<String, Vec<Type>>,
 }
 
 impl Function {
@@ -484,7 +512,8 @@ impl Function {
             value_loc: crate::ssa::location::LocMap::empty(),
             local_splits: crate::ssa::location::Splits::default(),
             const_int_tys: HashMap::new(),
-            cmp_operand_tys: HashMap::new(),
+            bin_operand_tys: HashMap::new(),
+            call_arg_tys: HashMap::new(),
         };
         s.add_block("entry".to_string());
         s
@@ -525,19 +554,30 @@ impl Function {
             value_loc: self.value_loc.fork(),
             local_splits: self.local_splits.clone(),
             const_int_tys: self.const_int_tys.clone(),
-            cmp_operand_tys: self.cmp_operand_tys.clone(),
+            bin_operand_tys: self.bin_operand_tys.clone(),
+            call_arg_tys: self.call_arg_tys.clone(),
         }
     }
 
-    /// 记下一条比较指令在原始 AST 里的操作数类型（仅 SSA 构建器调用）。
-    pub fn note_cmp_operand_tys(&mut self, dest: String, l: &Type, r: &Type) {
-        self.cmp_operand_tys.insert(dest, (l.clone(), r.clone()));
+    /// 记一笔整型 Binop 两个操作数在 AST 里的原始类型（仅 SSA 构建器调用；记账条件见字段注释）。
+    pub fn note_bin_operand_tys(&mut self, dest: String, l: &Type, r: &Type) {
+        self.bin_operand_tys.insert(dest, (l.clone(), r.clone()));
     }
 
-    /// 取回比较指令两个操作数在 AST 里的类型；没记过（非比较、或指令由 pass 克隆而出
+    /// 取回该指令两个操作数在 AST 里的类型；没记过（操作数非整数、或指令由 pass 克隆而出
     /// 的新 `dest`）则 `None` ⇒ 重建保持今天的「读字面量表 / 量级阶梯」行为。
-    pub fn cmp_operand_ty(&self, dest: &str) -> Option<(Type, Type)> {
-        self.cmp_operand_tys.get(dest).cloned()
+    pub fn bin_operand_ty(&self, dest: &str) -> Option<(Type, Type)> {
+        self.bin_operand_tys.get(dest).cloned()
+    }
+
+    /// 记一笔调用实参在 AST 里的类型（仅 SSA 构建器调用；记账条件见字段注释）。
+    pub fn note_call_arg_tys(&mut self, dest: String, tys: &[Type]) {
+        self.call_arg_tys.insert(dest, tys.to_vec());
+    }
+
+    /// 取回该调用各实参在 AST 里的类型；没记过则 `None` ⇒ 重建保持阶梯行为。
+    pub fn call_arg_ty(&self, dest: &str) -> Option<&[Type]> {
+        self.call_arg_tys.get(dest).map(|v| v.as_slice())
     }
 
     /// 记录一个整型字面量的**原始**类型；同值异型 ⇒ 标为歧义（`None`），不据此推类型。

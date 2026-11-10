@@ -123,8 +123,12 @@ pub fn optimize_with_full_target(
     // 比较恒等式折叠: `(a < b) != (b > a)` 这类关系恒等式在**任何** -O 档都要折掉,
     // 与 GCC 前端 fold-const 一致; 否则 `link_error()` 之类的死调用会留在产物里
     // (gcc.dg pr27302 / pr27302-2 在默认档位链接失败)。必须排在 level==0 提前返回之前。
+    // 体检（`DCC_PASS_STATS=1`，见 `pass_probe` 模块）：记下 -O 档并清空上一模块的累计。
+    crate::pass_probe::begin(level);
     if !opt_skipped("fold_compare_identities") {
-        crate::ast_cmp_fold::run(module, strict_overflow);
+        crate::pass_probe::probe("fold_compare_identities", module, |m| {
+            crate::ast_cmp_fold::run(m, strict_overflow)
+        });
     }
     // 「体只有 `return <编译期常量>;` 的 static 桩」的调用直接换成那个常量。
     //
@@ -138,12 +142,12 @@ pub fn optimize_with_full_target(
     // `__blk_crypto_*` 守的那批），全部落在这条路上 ⇒ 换成先代回常量、再内联。
     // `-O0` 不做（保持「调试时看得见控制流」的原契约，与下面 `level == 0` 提前返回一致）。
     if level > 0 && !opt_skipped("fold_const_return_calls") {
-        fold_const_return_calls(module);
+        crate::pass_probe::probe("fold_const_return_calls", module, fold_const_return_calls);
         dump_after_pass("fold_const_return_calls", module);
     }
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     if !opt_skipped("function_inline") {
-        function_inline(module, level);
+        crate::pass_probe::probe("function_inline", module, |m| function_inline(m, level));
         dump_after_pass("function_inline", module);
     }
     // asm 只立即数操作数的常量代回：必须紧跟内联（内联产生的形参临时量就是它的主客户），
@@ -151,40 +155,45 @@ pub fn optimize_with_full_target(
     // 不代回就只能拿到寄存器（产物里的 `.altinstructions`/`__bug_table` 条目会坏掉，
     // 而编译本身不报错）。
     if !opt_skipped("fold_asm_immediate_consts") {
-        fold_asm_immediate_consts(module);
+        crate::pass_probe::probe("fold_asm_immediate_consts", module, fold_asm_immediate_consts);
     }
     if level == 0 {
+        crate::pass_probe::flush("");
         return;
     }
     // 常量桩的代回在内联**之前**已经跑过一次（见上面的理由：晚于内联就只能看见
     // `__inl0$rv` 这种嵌块临时量，看不见桩调用）。这里再跑一次是便宜的：内联可能把
     // 新的桩调用带进原本不可达的位置，后面的 `while (0)` / `if (0)` 判据需要它们。
     if !opt_skipped("fold_const_return_calls") {
-        fold_const_return_calls(module);
+        crate::pass_probe::probe("fold_const_return_calls", module, fold_const_return_calls);
         dump_after_pass("fold_const_return_calls", module);
     }
     // 同 TU 内「空体 void 函数」的调用就地吸收（上一行只管 `static` 常量桩，这一行管
     // 非 static、无返回值的空壳；两者合起来才能把内核那一族条件编译的空实现从产物里清掉）。
     if !opt_skipped("fold_empty_void_calls") {
-        fold_empty_void_calls(module);
+        crate::pass_probe::probe("fold_empty_void_calls", module, fold_empty_void_calls);
         dump_after_pass("fold_empty_void_calls", module);
     }
     // 常量桩折完后的第二跳：常量现在坐在局部里，循环条件读的是变量，
     // 不把它代回条件/选择子位置，`while (0)` / `if (0)` 删不掉（§3.41：这是
     // 全树剩下 253 行未定义引用的主机制）。必须排在死分支折叠之前。
     if !opt_skipped("propagate_const_locals_in_conditions") {
-        propagate_const_locals_in_conditions(module);
+        crate::pass_probe::probe(
+            "propagate_const_locals_in_conditions",
+            module,
+            propagate_const_locals_in_conditions,
+        );
         dump_after_pass("propagate_const_locals_in_conditions", module);
     }
     // IPA modref: 跨过程 "哪些指针形参被写穿" 摘要 + 只对「地址逃逸点全部是已证明
     // 不写的调用实参」的局部折叠 __builtin_constant_p。必须排在 fold_constants 之前:
     // 折出的 Int(1) 之后的 fold_expr / SCCP 才能把 `!1` 折成 0、删掉 `if(!1) abort();`。
     if level >= 2 && !opt_skipped("ipa_modref") {
-        crate::ipa_modref::run(module, level);
+        crate::pass_probe::probe("ipa_modref", module, |m| crate::ipa_modref::run(m, level));
         dump_after_pass("ipa_modref", module);
     }
     if !opt_skipped("fold_constants") {
-        fold_constants(module);
+        crate::pass_probe::probe("fold_constants", module, fold_constants);
         dump_after_pass("fold_constants", module);
     }
     // 死分支折叠与不可达截断从 **-O1** 起就要跑（以前放在 `level >= 2` 里）。
@@ -198,11 +207,11 @@ pub fn optimize_with_full_target(
     // dead asm elimination：纯 asm（非 volatile、无输出、无 memory clobber）在结果没人用
     // 时随臂一起消失，与 gcc 同；volatile 与有副作用的 asm 永远保留。
     if !opt_skipped("fold_constant_branches") {
-        fold_constant_branches(module);
+        crate::pass_probe::probe("fold_constant_branches", module, fold_constant_branches);
         dump_after_pass("fold_constant_branches", module);
     }
     if !opt_skipped("eliminate_unreachable") {
-        eliminate_unreachable(module);
+        crate::pass_probe::probe("eliminate_unreachable", module, eliminate_unreachable);
         dump_after_pass("eliminate_unreachable", module);
     }
     // 第二跳：上一轮死分支/不可达截除之后，**剩下的写入才可能只剩一个**。
@@ -215,10 +224,14 @@ pub fn optimize_with_full_target(
     // 的 530/531/532 三条就卡在这里）。两跳不引入新规则，只是把同一个判据
     // 在新事实上看一遍。
     if !opt_skipped("propagate_const_locals_in_conditions") {
-        propagate_const_locals_in_conditions(module);
+        crate::pass_probe::probe(
+            "propagate_const_locals_in_conditions",
+            module,
+            propagate_const_locals_in_conditions,
+        );
     }
     if !opt_skipped("fold_constant_branches") {
-        fold_constant_branches(module);
+        crate::pass_probe::probe("fold_constant_branches", module, fold_constant_branches);
         dump_after_pass("fold_constant_branches#2", module);
     }
     // 第三跳（§3.51）：**块内向前**的常量代回。上面两个 pass 都靠「声明初值」或 SSA 层的
@@ -233,12 +246,16 @@ pub fn optimize_with_full_target(
         if opt_skipped("propagate_const_stores_forward") {
             break;
         }
-        let again = propagate_const_stores_forward(module);
+        let again = crate::pass_probe::probe_fn("propagate_const_stores_forward", || {
+            propagate_const_stores_forward(module)
+        });
         // 守卫排除值：`for (…; E != K; step)` 的 step 里 `case K` 不可达。与上面同一轮
         // 不动点里做：它丢掉的臂可能让别的写入只剩一个值，反过来又喂给下一轮。
-        let narrowed = narrow_switch_by_excluded_guard(module);
+        let narrowed = crate::pass_probe::probe_fn("narrow_switch_by_excluded_guard", || {
+            narrow_switch_by_excluded_guard(module)
+        });
         if !opt_skipped("fold_constant_branches") {
-            fold_constant_branches(module);
+            crate::pass_probe::probe("fold_constant_branches", module, fold_constant_branches);
             // 本轮的折法（常量代回后的 `if (1) return …;`、空 switch 臂）**留下的常常是
             // 一条 `return`/`goto`**，它后面的语句本轮就该截掉。上面的
             // `eliminate_unreachable` 只跑过一次，位置在 cprop 之前，越不过这一批：
@@ -246,7 +263,7 @@ pub fn optimize_with_full_target(
             // 代回后成为无条件 return，后面的 `convert_to_fxsr(&xstate, &env)` 还在发引用）
             // 与 `lib/vsprintf.c` 的 `rust_fmt_argument`（同一个形状）。
             if !opt_skipped("eliminate_unreachable") {
-                eliminate_unreachable(module);
+                crate::pass_probe::probe("eliminate_unreachable", module, eliminate_unreachable);
             }
         } else {
             break;
@@ -265,7 +282,7 @@ pub fn optimize_with_full_target(
     // `drivers/gpu/drm/i915/gt/uc/intel_guc_ads.o` 的 `__ilog2_u32` 调用）。
     // 补完再跑一次分支折叠与不可达截除：内联出来的体里同样可能有常量条件。
     if !opt_skipped("function_inline") {
-        function_inline(module, 0);
+        crate::pass_probe::probe("function_inline#2", module, |m| function_inline(m, 0));
         dump_after_pass("function_inline#2", module);
     }
     // 第二轮内联（或它之前的代回）新造的常量形状**没有任何表达式折法看过**：
@@ -279,47 +296,61 @@ pub fn optimize_with_full_target(
     // `__bad_udelay()` / `dm_zone_endio()` 全留在产物里（前者是链接期未定义引用，
     // 后者把整条 `dm_dax_ops` 链的同类问题遮在后面）。
     if !opt_skipped("fold_constants") {
-        fold_constants(module);
+        crate::pass_probe::probe("fold_constants#3", module, fold_constants);
     }
     if !opt_skipped("propagate_const_locals_in_conditions") {
-        propagate_const_locals_in_conditions(module);
+        crate::pass_probe::probe(
+            "propagate_const_locals_in_conditions#3",
+            module,
+            propagate_const_locals_in_conditions,
+        );
     }
     if !opt_skipped("fold_constant_branches") {
-        fold_constant_branches(module);
+        crate::pass_probe::probe("fold_constant_branches#3", module, fold_constant_branches);
         if !opt_skipped("eliminate_unreachable") {
-            eliminate_unreachable(module);
+            crate::pass_probe::probe("eliminate_unreachable#3", module, eliminate_unreachable);
         }
     }
     if level >= 2 {
         if !opt_skipped("prune_dead_stores") {
-            prune_dead_stores(module);
+            crate::pass_probe::probe("prune_dead_stores", module, prune_dead_stores);
+        }
+        // 紧跟 `prune_dead_stores`：它削掉死写之后，被削空的声明才能被认出来。
+        // 顺序不能反（反了就是「写还在、声明没了」 ⇒ 未定义名字）。
+        if !opt_skipped("prune_dead_locals") {
+            crate::pass_probe::probe("prune_dead_locals", module, prune_dead_locals);
         }
         if !opt_skipped("ast_gvn") {
-            crate::ast_gvn::run(module, level);
+            crate::pass_probe::probe("ast_gvn", module, |m| crate::ast_gvn::run(m, level));
             dump_after_pass("ast_gvn", module);
         }
         if !opt_skipped("loop_opt") {
-            crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
+            crate::pass_probe::probe("loop_opt", module, |m| {
+                crate::loop_opt::run_with_target(m, level, has_vnni, vec_bits)
+            });
         }
         // M16: 跨函数 DCE (call graph reachability)
         if !opt_skipped("cross_variable_dce") {
-            cross_variable_dce(module);
+            crate::pass_probe::probe("cross_variable_dce", module, cross_variable_dce);
             dump_after_pass("cross_variable_dce", module);
         }
         if !opt_skipped("cross_function_dce") {
-            cross_function_dce(module);
+            crate::pass_probe::probe("cross_function_dce", module, cross_function_dce);
         }
         // Qualifier-aware optimization: const/volatile/restrict
         if !opt_skipped("qualifier_aware") {
-            qualifier_aware_optimization(module);
+            crate::pass_probe::probe("qualifier_aware", module, qualifier_aware_optimization);
         }
     }
     if level >= 2 {
         // M16: SSA pass pipeline (strength reduction, IVOP, TCO, etc.)
         if !opt_skipped("run_ssa_passes") {
-            run_ssa_passes(module, level, strict_aliasing, debug_info, pic);
+            crate::pass_probe::probe("run_ssa_passes", module, |m| {
+                run_ssa_passes(m, level, strict_aliasing, debug_info, pic)
+            });
         }
     }
+    crate::pass_probe::flush("");
 }
 
 /// 诊断用：`DCC_OPT_SKIP=prune_dead_stores,ast_gvn,loop_opt,...` 逐个关掉 AST 层 pass。
@@ -2980,7 +3011,231 @@ fn prune_dead_stores(module: &mut Module) {
     }
 }
 
-/// 扫一片语句/声明，把「每次访问都可观察」的名字并进 `out`（含嵌套块与嵌套函数体）。
+/// 死局部声明的删除：名字在整个函数体里**一次都没被表达式提到**、且初始化式求值没有
+/// 副作用的局部声明，整条删掉（连同它在帧里的那一格）。
+///
+/// 为什么必须删（报告 §5.39）：帧槽在规划期按**声明**分配
+/// （`func_setup::pre_register_vars`），而 [`prune_dead_stores`] 已经把死写削掉了 —— 于是
+/// 槽留着、读写一条也没有。实测 `__schedule` 的变量区 77 槽里只有 19 个偏移被真正触及；
+/// 同一函数 gcc 的帧是 96 B，dcc 是 832 B。
+///
+/// 判据为什么是「整函数体一个引用都没有」而不是「本作用域内没有引用」：名字解析要看
+/// 作用域链，而按**全函数**收名字只会多留（外层同名会让内层那条也不删），不会把某个引用
+/// 解析到另一个对象上。
+///
+/// 两条已知的漏判（方向都是「仍然占槽」，不是错值）：
+///   * 语句表达式 `({ int x = …; })` 里的声明：本 pass 不穿进表达式（那里没有可用的
+///     安全递归），所以那一族一条都不删；
+///   * 只经 `x = …` 赋值、从不被读的写法：赋值左值会作为 `Expr::Ident` 进 `used` 集合。
+fn prune_dead_locals(module: &mut Module) {
+    let dbg = std::env::var_os("DCC_DEAD_DECL_DUMP").is_some();
+    let prog = module.source_mut();
+    for decl in &mut prog.decls {
+        if let Decl::Func(f) = decl {
+            let Some(body) = &mut f.body else { continue };
+            // 名字按**整函数体**收一次：这是本 pass 唯一的语义输入。
+            let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+            walk_block_ref(body, &mut |e| {
+                if let Expr::Ident { name, .. } = e {
+                    used.insert(name.name.clone());
+                }
+            });
+            // 类型里的变量引用也要收：见 [`collect_vla_dim_names_items`] 的注释。
+            collect_vla_dim_names_items(&body.items, &mut used);
+            let before = count_local_decls(&body.items);
+            prune_dead_local_items(&mut body.items, &used);
+            let after = count_local_decls(&body.items);
+            if dbg && before != after {
+                eprintln!("DEAD_DECL {} {before} -> {after}", f.name.name);
+            }
+        }
+    }
+}
+
+/// 把**类型里**的变量引用也收进 `out`。
+///
+/// VLA 的维度表达式住在 `Type::Array(_, ArraySize::Var(e))` 里，不是语句树上的
+/// `Expr`
+/// —— [`walk_block_ref`] 看不到它。而 `fold_constants` / `propagate_*` 会把体内对那个
+/// 名字的读全部代回常量，于是「整函数体一次引用都没有」成立、声明被 [`prune_dead_locals`]
+/// 删掉，而 VLA 在运行期仍要读那个名字来算尺寸：实测
+/// `int n = 4; int a[n];` 的 `n` 被删后编出 `E1134: frame slot for 'n' was never
+/// planned`（夹具 `cold_outline_blocked_by_vla_in_body`）。
+fn collect_vla_dim_names_items(items: &[BlockItem], out: &mut std::collections::HashSet<String>) {
+    for it in items {
+        match it {
+            BlockItem::Decl(Decl::Var(v)) => collect_vla_dim_names_ty(&v.ty, out),
+            BlockItem::Stmt(s) => collect_vla_dim_names_stmt(s, out),
+            _ => {},
+        }
+    }
+}
+
+fn collect_vla_dim_names_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::Block { b, .. } => collect_vla_dim_names_items(&b.items, out),
+        Stmt::If { then_, else_, .. } => {
+            collect_vla_dim_names_stmt(then_, out);
+            if let Some(e) = else_ {
+                collect_vla_dim_names_stmt(e, out);
+            }
+        },
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => collect_vla_dim_names_stmt(body, out),
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_vla_dim_names_stmt(i, out);
+            }
+            collect_vla_dim_names_stmt(body, out);
+        },
+        Stmt::Switch {
+            cases, prelude, ..
+        } => {
+            collect_vla_dim_names_items(prelude, out);
+            for c in cases {
+                collect_vla_dim_names_items(&c.body.items, out);
+            }
+        },
+        Stmt::Label { stmt, .. } => collect_vla_dim_names_stmt(stmt, out),
+        Stmt::Invoke { call, .. } => collect_vla_dim_names_stmt(call, out),
+        _ => {},
+    }
+}
+
+/// 类型里所有 VLA 维度表达式提到的名字。
+fn collect_vla_dim_names_ty(ty: &Type, out: &mut std::collections::HashSet<String>) {
+    match ty {
+        Type::Array(elem, sz) => {
+            if let crate::ast::ArraySize::Var(e) = sz {
+                walk_expr_ref(e, &mut |x| {
+                    if let Expr::Ident { name, .. } = x {
+                        out.insert(name.name.clone());
+                    }
+                });
+            }
+            collect_vla_dim_names_ty(&elem.base, out);
+        },
+        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+            for f in fields.iter() {
+                collect_vla_dim_names_ty(&f.ty, out);
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 一棵语句树里还有多少个局部声明（只用于 `DCC_DEAD_DECL_DUMP` 的读数）。
+fn count_local_decls(items: &[BlockItem]) -> usize {
+    let mut n = 0usize;
+    for it in items {
+        match it {
+            BlockItem::Decl(Decl::Var(_)) => n += 1,
+            BlockItem::Stmt(s) => n += count_local_decls_stmt(s),
+            _ => {},
+        }
+    }
+    n
+}
+
+fn count_local_decls_stmt(s: &Stmt) -> usize {
+    match s {
+        Stmt::Block { b, .. } => count_local_decls(&b.items),
+        Stmt::If { then_, else_, .. } => {
+            count_local_decls_stmt(then_)
+                + else_.as_ref().map_or(0, |e| count_local_decls_stmt(e))
+        },
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => count_local_decls_stmt(body),
+        Stmt::For { init, body, .. } => {
+            init.as_ref().map_or(0, |i| count_local_decls_stmt(i)) + count_local_decls_stmt(body)
+        },
+        Stmt::Switch { cases, prelude, .. } => {
+            count_local_decls(prelude)
+                + cases
+                    .iter()
+                    .map(|c| count_local_decls(&c.body.items))
+                    .sum::<usize>()
+        },
+        Stmt::Label { stmt, .. } => count_local_decls_stmt(stmt),
+        Stmt::Invoke { call, .. } => count_local_decls_stmt(call),
+        _ => 0,
+    }
+}
+
+/// 初始化式求值有没有副作用。`InitItem` 的两种形状都要下去：`int a[2] = {f(), 1}` 里的
+/// `f()` 是必须保留的副作用，把它当纯的就会把整条声明删掉、调用消失。
+fn decl_init_is_pure(e: &Expr) -> bool {
+    match e {
+        Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
+            inits.iter().all(|it| match it {
+                crate::ast::InitItem::Expr(x) => decl_init_is_pure(x),
+                crate::ast::InitItem::Designated { value, .. } => decl_init_is_pure(value),
+            })
+        },
+        _ => !crate::semantics::expr_has_side_effects(e),
+    }
+}
+
+/// 这一条声明能不能整条删。
+fn dead_local_decl(v: &VarDecl, used: &std::collections::HashSet<String>) -> bool {
+    // 有静态存储期/可观察读写的声明一律不动：它们不占帧，删了还会改语义。
+    if v.is_static || v.is_extern || v.quals.is_volatile() || v.cleanup_fn.is_some() {
+        return false;
+    }
+    // 已经绑了家的（`register asm` 与 SSA 交付的寄存器家）不动：删声明会把
+    // 「序言保存哪个号」与绑定表拆开。
+    if v.register_name.is_some() || v.home.is_some() {
+        return false;
+    }
+    if used.contains(&v.name.name) {
+        return false;
+    }
+    match &v.init {
+        None => true,
+        Some(e) => decl_init_is_pure(e),
+    }
+}
+
+fn prune_dead_local_items(items: &mut Vec<BlockItem>, used: &std::collections::HashSet<String>) {
+    items.retain(|it| !matches!(it, BlockItem::Decl(Decl::Var(v)) if dead_local_decl(v, used)));
+    for it in items.iter_mut() {
+        // 只走语句：声明里的初始化式（可能含语句表达式块）与嵌套函数的体留给别的 pass。
+        if let BlockItem::Stmt(s) = it {
+            prune_dead_local_stmt(s, used);
+        }
+    }
+}
+
+fn prune_dead_local_stmt(s: &mut Stmt, used: &std::collections::HashSet<String>) {
+    match s {
+        Stmt::Block { b, .. } => prune_dead_local_items(&mut b.items, used),
+        Stmt::If { then_, else_, .. } => {
+            prune_dead_local_stmt(then_, used);
+            if let Some(e) = else_ {
+                prune_dead_local_stmt(e, used);
+            }
+        },
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => prune_dead_local_stmt(body, used),
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                prune_dead_local_stmt(i, used);
+            }
+            prune_dead_local_stmt(body, used);
+        },
+        // switch 的 `prelude`（第一个 case 之前的声明）与每个 case 体都是一个块。
+        Stmt::Switch {
+            cases, prelude, ..
+        } => {
+            prune_dead_local_items(prelude, used);
+            for c in cases {
+                prune_dead_local_items(&mut c.body.items, used);
+            }
+        },
+        Stmt::Label { stmt, .. } => prune_dead_local_stmt(stmt, used),
+        Stmt::Invoke { call, .. } => prune_dead_local_stmt(call, used),
+        _ => {},
+    }
+}
+
+/// 扫描一片语句/声明，把「每次访问都可观察」的名字并进 `out`（含嵌套块与嵌套函数体）。
 fn collect_observable_names_items(items: &[BlockItem], out: &mut std::collections::HashSet<String>) {
     for item in items {
         match item {
@@ -4815,6 +5070,25 @@ fn fold_const_return_calls(module: &mut Module) {
         local_names.extend(decls.into_keys());
         let mentions_local = expr_mentions_name(e, &|n| local_names.contains(n));
         if foldable && !mentions_local {
+            // `_Bool` 返回类型：调用点看到的是**转换后**的值（C11 6.3.1.2p1 的
+            // `value != 0`），不是 `return` 表达式的原样。把 `return 512;` 搬过去
+            // 会让调用点拿到 512，`!f()` 于是被折成假（§5.30：-O1 起 `main` 直接
+            // `mov $1, %eax`，gcc 为 rc=0）。替体换成归一化后的整数常量。
+            if matches!(&f.ret_ty, crate::ast::Type::Bool) {
+                if let Ok(crate::const_eval::ConstValue::Int(v)) =
+                    const_eval::eval_full(e, false)
+                {
+                    consts.insert(
+                        f.name.name.clone(),
+                        Expr::Int {
+                            v: if v != 0 { 1 } else { 0 },
+                            span: crate::diagnostics::Span::point("", 0, 0),
+                            ty: crate::ast::Type::Bool,
+                        },
+                    );
+                    continue;
+                }
+            }
             consts.insert(f.name.name.clone(), e.clone());
             continue;
         }
@@ -4826,6 +5100,13 @@ fn fold_const_return_calls(module: &mut Module) {
         // `READ_ONCE` 那种「类型带 volatile、但永远轮不到执行」的右操作数正是这一族。
         if mentions_local && is_int_scalar_ty(&f.ret_ty) {
             if let Some(v) = const_value_short_circuit(e) {
+                // `_Bool` 返回类型：值语境里只有 0/1（C11 6.3.1.2p1），
+                // 替体不能带 `return 512;` 的原始整数（同上面 consts 那一支）。
+                let v = if matches!(&f.ret_ty, crate::ast::Type::Bool) && v != 0 {
+                    1
+                } else {
+                    v
+                };
                 const_vals.insert(f.name.name.clone(), (v, f.ret_ty.clone()));
             }
         }
@@ -6648,7 +6929,14 @@ fn expr_addr_of_key(e: &Expr, key: &str, pins: &Pins) -> bool {
 }
 
 /// 只读遍历：把 `e` 及其全部子表达式依次交给 `f`。
-fn walk_expr_ref<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+///
+/// **必须穷尽写**（与 `stmt_node_count`/`stmt_max_local_object_bytes` 同一条纪律）：
+/// 落进 `_ => {}` 的子表达式在调用方就是「不存在」—— `prune_dead_locals` 据此判
+/// 「整函数体一次引用都没有」时，漏一个变体就是把活的声明删掉。实测漏掉
+/// `Expr::Real`/`Expr::Imag` 就删掉了 `float _Complex z = …; __real__ z` 里的 `z`
+/// （夹具 `vec_cast.c` 的 `check_vector_to_complex` 返回值从 0 变成 7），漏掉
+/// `Expr::VaArg`/`Expr::Offsetof` 是同一类。
+pub(crate) fn walk_expr_ref<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(e);
     match e {
         Expr::Binop { l, r, .. }
@@ -6699,7 +6987,29 @@ fn walk_expr_ref<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
         },
         Expr::StmtExpr { block, .. } => walk_block_ref(block, f),
-        _ => {},
+        // 下面这几条以前全部落进 `_ => {}`：它们的子表达式不是「不需要看」，而是
+        // 写的时候漏了。`__real__ z` / `__imag__ z` / `va_arg(ap, T)` / `offsetof(T, a[i])`
+        // 都是对局部/变量的真实读取。
+        Expr::Real { e: x, .. } | Expr::Imag { e: x, .. } | Expr::VaArg { ap: x, .. } => {
+            walk_expr_ref(x, f)
+        },
+        Expr::Offsetof { indices, .. } => {
+            for x in indices {
+                walk_expr_ref(x, f);
+            }
+        },
+        // 叶子：没有子表达式。列全而不是靠兜底，新增 `Expr` 变体时这里会直接编不过。
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
+        | Expr::String { .. }
+        | Expr::Char { .. }
+        | Expr::Ident { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. }
+        | Expr::LabelAddr { .. }
+        | Expr::VaArgPack { .. } => {},
     }
 }
 
@@ -6780,14 +7090,32 @@ fn walk_stmt_ref<'a>(s: &'a Stmt, f: &mut dyn FnMut(&'a Expr)) {
             ..
         } => {
             walk_expr_ref(expr, f);
+            // `prelude` 里的**声明初始化式**以前没走：`switch (…) { int t = x; case 0: … }`
+            // 的 `x` 是对局部的一次真实读取，漏了它「从未被引用」就成了假事实
+            // （[`prune_dead_locals`] 会据此把 `x` 的声明删掉）。
             for it in prelude {
-                if let BlockItem::Stmt(ss) = it {
-                    walk_stmt_ref(ss, f);
+                match it {
+                    BlockItem::Stmt(ss) => walk_stmt_ref(ss, f),
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        if let Some(e) = &v.init {
+                            walk_expr_ref(e, f);
+                        }
+                    },
+                    _ => {},
                 }
             }
             for c in cases {
                 walk_block_ref(&c.body, f);
             }
+        },
+        // C++ 的两条语句同样可能读局部（`invoke` 的调用、landing pad 的两个操作数）。
+        // 以前落进 `_ => {}`：对活名字是漏计，对「从未被引用」是假事实。
+        Stmt::Invoke { call, .. } => walk_stmt_ref(call, f),
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
+            walk_expr_ref(object, f);
+            walk_expr_ref(selector, f);
         },
         _ => {},
     }
@@ -8330,6 +8658,83 @@ fn init_node_count(init: &crate::ast::InitItem) -> usize {
     }
 }
 
+/// 投机内联的「大局部对象」闸门：callee 体里**最大的单个局部对象**超过这个字节数
+/// 就不内联。
+///
+/// 这个数是 gcc 的 `--param large-stack-frame=256` 默认值；gcc 在
+/// `can_inline_edge_p` 里对**所有**投机内联用它（与调用点个数无关），因为它防的
+/// 是栈帧，不是代码体积。
+///
+/// 为什么必须补这一条（报告 §5.39）：`init/main.c::initcall_blacklisted` 里有一个
+/// `char fn_name[KSYM_SYMBOL_LEN]`（本配置 672 B），dcc 把它投机内联进
+/// `do_one_initcall` ⇒ 后者的帧从 gcc 的 80 B 变成 1 792 B。16 KB 内核栈上，
+/// early-boot 那条 25 层 initcall 链（`kernel_init` → `do_one_initcall` →
+/// `net_dev_init` → … → `_raw_spin_trylock`，首段帧合计 11 088 B）因此打穿 guard page。
+///
+/// 判据只看**单个对象**而不是「所有局部之和」：数组与聚合一定要一块连续帧内存，
+/// 而标量可以拿到寄存器家（`ssa::regalloc::deliver`），把它们加进去会把一批本来就
+/// 很小的函数误判成大帧。漏判的方向是「仍然内联」= 今天的行为，不会引入新错值。
+const INLINE_LARGE_LOCAL_BYTES: usize = 256;
+
+/// 一个局部声明会占多少字节帧（向上圆整到 8）。`static`/`extern` 不占本帧。
+fn local_decl_frame_bytes(v: &VarDecl) -> usize {
+    if v.is_static || v.is_extern {
+        return 0;
+    }
+    let n = v.ty.size().max(8);
+    (n + 7) & !7
+}
+
+/// 一个项列表里**最大的单个局部对象**字节数（不递归进嵌套函数：它有自己的帧）。
+fn max_local_object_bytes(items: &[BlockItem]) -> usize {
+    let mut m = 0usize;
+    for it in items {
+        match it {
+            BlockItem::Decl(Decl::Var(v)) => m = m.max(local_decl_frame_bytes(v)),
+            BlockItem::Stmt(s) => m = m.max(stmt_max_local_object_bytes(s)),
+            // 嵌套函数的局部住在它自己的帧里，与本次内联无关。
+            BlockItem::Decl(_) => {},
+        }
+    }
+    m
+}
+
+/// 语句子树里最大的单个局部对象字节数。穷举写（与 [`stmt_node_count`] 同一条纪律）：
+/// 新增 `Stmt` 变体时这里必须表态，否则大数组可以沿新语法漏过闸门。
+/// 表达式里只有语句表达式 `({ ... })` 能带声明，其余不递归（那里不会有大数组）。
+fn stmt_max_local_object_bytes(s: &Stmt) -> usize {
+    match s {
+        Stmt::Return { .. }
+        | Stmt::Expr { .. }
+        | Stmt::GotoIndirect { .. }
+        | Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Fallthrough { .. } => 0,
+        Stmt::If {
+            then_, else_, ..
+        } => stmt_max_local_object_bytes(then_).max(else_.as_ref().map_or(0, |e| {
+            stmt_max_local_object_bytes(e)
+        })),
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_max_local_object_bytes(body),
+        Stmt::For { init, body, .. } => init
+            .as_ref()
+            .map_or(0, |s| stmt_max_local_object_bytes(s))
+            .max(stmt_max_local_object_bytes(body)),
+        Stmt::Block { b, .. } => max_local_object_bytes(&b.items),
+        Stmt::Switch { cases, prelude, .. } => {
+            let mut m = max_local_object_bytes(prelude);
+            for c in cases {
+                m = m.max(max_local_object_bytes(&c.body.items));
+            }
+            m
+        },
+        Stmt::Label { stmt, .. } => stmt_max_local_object_bytes(stmt),
+        Stmt::Invoke { call, .. } => stmt_max_local_object_bytes(call),
+        Stmt::EhLandingPad { .. } | Stmt::AsmGoto { .. } => 0,
+    }
+}
+
 /// Estimate the cost of inlining function `f` called with `args`.
 ///
 /// Returns the estimated node count of the inlined result.
@@ -8855,6 +9260,22 @@ fn arm_budget_limit() -> usize {
     })
 }
 
+/// 「这次投机内联被成本模型否掉」的两个互不相同的理由。
+///
+/// 分开表达是为了让 `DCC_INLINE_TRACE` 的日志说人话：一个量的是**代码体积**
+/// （节点数），另一个量的是**栈帧**（字节）。两者在 gcc 里也是两个独立的闸门
+/// （`max-inline-insns-*` 与 `--param large-stack-frame`）。
+enum InlineCostReject {
+    /// 体量超阈值（`estimate_inline_cost` vs `STATIC_INLINE_*_THRESHOLD`）
+    Cost {
+        cost: usize,
+        limit: usize,
+        sites: usize,
+    },
+    /// 大局部对象闸门（[`INLINE_LARGE_LOCAL_BYTES`]）
+    LargeFrame { bytes: usize, sites: usize },
+}
+
 /// 成本判据的唯一一份实现（语句级通道在用；表达式级通道放宽时要接的也是它）：
 /// 多调用点的函数按 `STATIC_INLINE_COST_THRESHOLD` 卡住；只有一个调用点的放宽
 /// （不复制代码）；`always_inline` 另走一档——那条上限保护的是 I-cache，它否决的是
@@ -8867,9 +9288,17 @@ fn stmt_splice_cost_ok(
     f: &FuncDecl,
     body: &Block,
     args: &[Expr],
-) -> Result<usize, (usize, usize, usize)> {
+) -> Result<usize, InlineCostReject> {
     let cost = estimate_inline_cost(f, body, args);
     let sites = funcs.call_sites(callee);
+    // 栈帧闸门。`__always_inline` 不在此列：那是语义要求（gcc 展开不了直接报错），
+    // 不是「编译器猜值不值得一展」。
+    if !f.is_always_inline {
+        let bytes = max_local_object_bytes(&body.items);
+        if bytes > INLINE_LARGE_LOCAL_BYTES {
+            return Err(InlineCostReject::LargeFrame { bytes, sites });
+        }
+    }
     let limit = if sites <= 1 {
         STATIC_INLINE_SINGLE_SITE_COST_THRESHOLD
     } else if f.is_always_inline {
@@ -8878,7 +9307,11 @@ fn stmt_splice_cost_ok(
         STATIC_INLINE_COST_THRESHOLD
     };
     if cost > limit {
-        return Err((cost, limit, sites));
+        return Err(InlineCostReject::Cost {
+            cost,
+            limit,
+            sites,
+        });
     }
     Ok(cost)
 }
@@ -10110,6 +10543,9 @@ fn count_direct_call_sites(funcs: &HashMap<String, FuncDecl>) -> HashMap<String,
 struct InlineScan {
     calls: Vec<String>,
     blocked: bool,
+    /// `asm` 输出操作数（以及被内存约束取址的输入操作数）的左值根名。§5.39 的「形参
+    /// 直绑实参名」判据用，见 [`asm_written_roots_of`]。
+    asm_written_roots: Vec<String>,
 }
 
 impl InlineScan {
@@ -10215,8 +10651,12 @@ fn scan_stmt(s: &Stmt, acc: &mut InlineScan) {
         // `.long %c0 + %c1 - .` 变成指向寄存器名的野重定位（`__jump_table`/`.altinstructions`
         // 条目整片坏掉，要到 objtool 才暴露）。操作数仍是普通 C 表达式，照常扫调用。
         Stmt::AsmGoto {
-            outputs, inputs, ..
+            outputs,
+            inputs,
+            input_constraints,
+            ..
         } => {
+            note_asm_operand_roots(outputs, inputs, input_constraints, acc);
             for e in outputs.iter().chain(inputs.iter()) {
                 scan_expr(e, acc);
             }
@@ -10317,8 +10757,12 @@ fn scan_expr(e: &Expr, acc: &mut InlineScan) {
         // 只能拿到寄存器，`%c1` 被换成空串 ⇒ 编出语义错且不报错的 `leaq (%rip), %rax`。
         // 仍不接 `asm goto` 标签引用：那条由 `Stmt::AsmGoto` 自己那一臂管，标签改名在那里做。
         Expr::AsmExpr {
-            outputs, inputs, ..
+            outputs,
+            inputs,
+            input_constraints,
+            ..
         } => {
+            note_asm_operand_roots(outputs, inputs, input_constraints, acc);
             for e in outputs.iter().chain(inputs.iter()) {
                 scan_expr(e, acc);
             }
@@ -12083,6 +12527,109 @@ fn rewrite_returns_to_dest(
     }
 }
 
+/// 左值根：沿 `Member`/`Index`/`Cast` 往下找到那个对象名（`s.f`、`a[i]`、`(T)x` 的根
+/// 分别是 `s`/`a`/`x`）。**不穿过 `Deref`**：`*p = 1` 写的是 p 指向的对象，不是 p。
+fn expr_lvalue_root_name(x: &Expr) -> Option<&str> {
+    let mut cur = x;
+    loop {
+        match cur {
+            Expr::Ident { name, .. } => return Some(name.name.as_str()),
+            Expr::Member { expr, .. }
+            | Expr::Index { arr: expr, .. }
+            | Expr::Cast { e: expr, .. } => cur = expr,
+            _ => return None,
+        }
+    }
+}
+
+/// 操作数约束是否**取对象的地址**：内存形式（`m`/`o`/`V`）就是地址，`g`/`X` 允许汇编
+/// 挑内存形式。修饰前缀（`=`/`+`/`&`/`%`/匹配数字）只说明「怎么写」，不影响这个判断。
+fn asm_constraint_takes_address(c: &str) -> bool {
+    c.chars().any(|ch| matches!(ch, 'm' | 'o' | 'V' | 'g' | 'X'))
+}
+
+/// 体内 `asm`/`asm goto` 会**写**或**取地址**的名字（左值根）。
+///
+/// 为什么值得单独扫：§5.39 的「形参直绑实参名」要求形参在体内只读不取址；而 `asm`
+/// 输出操作数（`"=r"(p)` / `"+m"(p)`）写的就是形参对象本身，直绑之后写穿到调用者的
+/// 变量 —— `mm/memblock.c::__free_pages_memory` 里 `__ffs(start)` 就是这么把页游标
+/// 改成 0 的（`tzcnt %rcx,%rax` 的结果落回 `start` 的槽，每轮都在释放同一页，boot
+/// 停在 `mem auto-init` 之后），见报告 §5.41。
+///
+/// `asm goto` 的操作数挂在 `Stmt` 上，`walk_block_ref` 交出来的只是操作数内部的表达
+/// 式，`"哪个操作数、什么约束"` 这层信息已经丢了 —— 所以借 [`scan_block`] 那份穷举
+/// 语句递归（连语句表达式里的块一起走）一次收全，而不是再写一份同样的遍历。
+fn asm_written_roots_of(body: &Block) -> Vec<String> {
+    let mut acc = InlineScan::default();
+    scan_block(body, &mut acc);
+    acc.asm_written_roots
+}
+
+/// `asm` 操作数里哪些名字会被写/取址（见 [`InlineScan::asm_written_roots`]）：
+/// 输出操作数恒写；输入操作数只在约束允许内存形式时才算取址。
+fn note_asm_operand_roots(
+    outputs: &[Expr],
+    inputs: &[Expr],
+    input_constraints: &[String],
+    acc: &mut InlineScan,
+) {
+    for x in outputs {
+        if let Some(n) = expr_lvalue_root_name(x) {
+            acc.asm_written_roots.push(n.to_string());
+        }
+    }
+    for (i, x) in inputs.iter().enumerate() {
+        if input_constraints
+            .get(i)
+            .is_some_and(|c| asm_constraint_takes_address(c))
+        {
+            if let Some(n) = expr_lvalue_root_name(x) {
+                acc.asm_written_roots.push(n.to_string());
+            }
+        }
+    }
+}
+
+/// 形参 `pname` 在 `body` 里是否**被写、被取地址、被自增自减**。
+///
+/// 判据只看这四类节点（父节点本身也在 `walk_block_ref` 的遍历里，所以不需要上
+/// 下文）：`Assign { l }` 与 `Inc/Dec { e }` 的**左值根**是形参，或 `AddrOf { e }`
+/// 的根是形参。左值根沿 `Member`/`Index`/`Cast` 往下找（`s.f = 1`、`a[i] = 1` 都
+/// 算写形参副本），但**不穿过 `Deref`**：`*p = 1` 写的是 p 指向的对象，不是 p。
+///
+/// 为什么保守到连「写成员」都算：直绑之后形参就是实参本身，写副本与写实参的
+/// 可见性不同（实参变化会被 caller 看到），那是语义变更而不是优化。
+///
+/// `asm` 操作数不在这条遍历里（`Stmt::AsmGoto` 的操作数挂在语句节点上，见
+/// [`asm_written_roots_of`]）：调用方要把两份结果一起看。
+fn param_written_or_addressed(body: &Block, pname: &str) -> bool {
+    let mut hit = false;
+    let root_is_param = |x: &Expr| expr_lvalue_root_name(x) == Some(pname);
+    walk_block_ref(body, &mut |e| {
+        if hit {
+            return;
+        }
+        match e {
+            Expr::Assign { l, .. } => {
+                if root_is_param(l) {
+                    hit = true;
+                }
+            },
+            Expr::AddrOf { e: x, .. }
+            | Expr::PreInc { e: x, .. }
+            | Expr::PreDec { e: x, .. }
+            | Expr::PostInc { e: x, .. }
+            | Expr::PostDec { e: x, .. } => {
+                if root_is_param(x) {
+                    hit = true;
+                }
+            },
+            _ => {},
+        }
+    });
+    hit
+}
+
 /// P13 阶段5：-O2 起对**小 `static` 函数**做函数体级内联（允许控制流）。
 ///
 /// 为什么单独一条臂而不是改 `always_inline` 那条：那条的准入是「程序员明说」，
@@ -12210,11 +12757,26 @@ fn try_static_inline_general(
     }
     let cost = match stmt_splice_cost_ok(funcs, &callee_name, f, body, &args) {
         Ok(c) => c,
-        Err((cost, limit, sites)) => {
+        Err(InlineCostReject::Cost {
+            cost,
+            limit,
+            sites,
+        }) => {
             trace_inline_decision(
                 &callee_name,
                 "REJECT",
                 &format!("static-inline cost {cost} > {limit} ({sites} 个调用点)"),
+            );
+            return false;
+        },
+        Err(InlineCostReject::LargeFrame { bytes, sites }) => {
+            trace_inline_decision(
+                &callee_name,
+                "REJECT",
+                &format!(
+                    "static-inline 大局部对象 {bytes} B > {INLINE_LARGE_LOCAL_BYTES} B \
+                     （栈帧闸门，{sites} 个调用点；gcc --param large-stack-frame）"
+                ),
             );
             return false;
         },
@@ -12274,6 +12836,10 @@ fn try_static_inline_general(
     // **实参表达式属于 caller 作用域，绝不能跟着改名**：否则 `f_luaopen(L)` 里
     // `stack_init(L)` 的实参 `L` 会被改成 `__inlN$_L`（那是刚要新建的形参临时量本身）。
     // 旧代码里 `bind` 与 callee 自己的声明混在同一个 `items` 里一起改名，同一个坑。
+    //
+    // `asm` 会写/取址的名字一次收全，给下面每个形参的直绑判据共用
+    // （[`asm_written_roots_of`]）。
+    let asm_written = asm_written_roots_of(body);
     for (p, a) in f.params.iter().zip(args.iter()) {
         let pname = match p.name.as_ref() {
             Some(id) => id.name.clone(),
@@ -12281,6 +12847,38 @@ fn try_static_inline_general(
         };
         if !used_names.contains(&pname) && !crate::semantics::expr_has_side_effects(a) {
             continue;
+        }
+        // §5.39：实参就是**同类型的一个左值**、且形参在体内只读不取址时，把形参
+        // 直接绑到实参名上，不建 `__inlN$_p` 临时量。
+        //
+        // 为什么值得（这是 `var_bytes` 膨胀的主源之一）：临时量是一个真正的
+        // `Decl::Var`，`pre_register_vars` 会给它留一个 8B 槽 —— 即使它后来拿到了
+        // 寄存器家（`ssa::regalloc::deliver`），_ 槽依旧占着帧。`__schedule` 实测
+        // var=776 B（97 槽，帧 992 B）里绝大多数是 `__inlN$_rq` / `__inlN$_rf`
+        // 这一类只读形参绑定，而 gcc 对同一函数是 96 B。16 KB 内核栈上，25 层
+        // early-boot 链因此打穿 guard page（报告 §5.39）。
+        //
+        // 三个前提都是必要的：实参无副作用（已经由上面那句保证）、**类型相同**
+        // （否则直绑会跳过形参处那次隐式转换，`f(long)` 传 `int` 就是错值）、
+        // 形参只读不取址（否则形参副本语义与实参别名不同；`asm` 输出操作数与内存
+        // 约束的输入同样算写/取址，见 [`asm_written_roots_of`]）。
+        //
+        // 还有一条防环：实参名不得是**另一个形参名**（`f(b, a)` 直绑成
+        // `{a: b, b: a}` 就是一个互换环，一次遍历改名会把两个名字对调回去）。
+        // 同名（`rq_lock(rq, &rf)` 里 `rq -> rq`）不是环，放行。
+        if let Expr::Ident { name: an, .. } = a {
+            let cycle = an.name != pname
+                && f.params
+                    .iter()
+                    .any(|q| q.name.as_ref().is_some_and(|n| n.name == an.name));
+            if a.ty() == p.ty
+                && !cycle
+                && !param_written_or_addressed(body, &pname)
+                && !asm_written.iter().any(|n| n == &pname)
+            {
+                map.insert(pname, an.name.clone());
+                continue;
+            }
         }
         let tmp = format!("__inl{}$_{}", uid, pname);
         map.insert(pname, tmp.clone());
@@ -12489,7 +13087,27 @@ fn try_static_inline_general(
                 span: rspan.clone(),
             }));
         },
-        Dest::Discard | Dest::ReturnValue => {},
+        // `return f(...);` 且 callee 返回 **void**：callee 的体里没有 `return`（走完体
+        // 就是返回），上面那条「不改写 callee 的 return」对它无对象 —— 整条调用点的
+        // `return` 只能在这里补。丢掉它，`if (x) return f();` 就变成 `if (x) { f(); }`，
+        // 接着执行后面的语句。
+        //
+        // 实测（kbuild22 的 `--boot`）：`lib/maple_tree.c::mas_topiary_replace` 的
+        // `if (mte_is_leaf(old_enode)) return mas_free(mas, old_enode);`（`mas_free` 是
+        // `static inline void`）被编成「释放旧叶之后落入第二循环」，于是拿已死的旧根叶
+        // 进 `mas_find_child`：叶的 `ma_data_end` 返回 15 ⇒ 读 `slots[15]`（leaf 的 meta
+        // 区，恒 NULL）⇒ `mte_parent(NULL)` 解引用地址 0，early_irq_init 期间 panic。
+        // 非 void 的 callee 不走这里：它的每条路径都自带 `return`（落空是 UB），
+        // 那些 `return` 原样搬过来就是本层的 `return`。
+        Dest::ReturnValue => {
+            if matches!(rv_ty, Type::Void) {
+                items.push(BlockItem::Stmt(Stmt::Return {
+                    val: None,
+                    span: rspan.clone(),
+                }));
+            }
+        },
+        Dest::Discard => {},
     }
     // 搬进来的体先做一次「形参临时量 → caller 实参」的代回，再折掉条件已是编译期值的分支。
     // 必须在递归展开之前做完（理由见 `prune_spliced_items`）。
@@ -12791,6 +13409,10 @@ struct SubstCtx {
     shadows: Vec<Vec<String>>,
     /// 正在 `&` 的操作数子树里。
     in_addr: bool,
+    /// 正在 `asm` 操作数的位置：输出操作数（`"=r"(p)`/`"+m"(p)`）会被汇编**写**，
+    /// 内存约束的输入（`m`/`g`/`o`/`V`/`X`）取的是形参地址 —— 与 `in_addr` 同一类
+    /// 问题：换成实参表达式后，被调方写回的就是调用者的对象。
+    in_asm_write: bool,
     /// 已发现「被取址的位置上出现了形参」⇒ 调用方必须放弃这次内联。
     needs_slot: bool,
 }
@@ -12801,7 +13423,12 @@ struct SubstCtx {
 /// 返回 `true` = 体里有形参被取址，表达式内联给不了它独立槽位，调用方**不得**采用结果。
 fn substitute_params(expr: Expr, params: &[(String, Expr)], pack_args: &[Expr]) -> (Expr, bool) {
     let mut e = expr;
-    let mut ctx = SubstCtx { shadows: Vec::new(), in_addr: false, needs_slot: false };
+    let mut ctx = SubstCtx {
+        shadows: Vec::new(),
+        in_addr: false,
+        in_asm_write: false,
+        needs_slot: false,
+    };
     subst_params_mut(&mut e, params, pack_args, &mut ctx);
     (e, ctx.needs_slot)
 }
@@ -12838,9 +13465,10 @@ fn subst_params_mut(
         let nm = name.name.clone();
         if !ctx.shadows.iter().any(|s| s.iter().any(|n| *n == nm)) {
             if let Some((_, arg)) = params.iter().find(|(n, _)| *n == nm) {
-                if ctx.in_addr {
-                    // `&形参` —— 换成实参表达式会把「被调方的局部地址」变成
-                    // 「调用者对象的地址」，被调方写回就是越界改人。见 [`SubstCtx`]。
+                if ctx.in_addr || ctx.in_asm_write {
+                    // `&形参` 与 `asm` 会写/取址的操作数 —— 换成实参表达式会把「被调方的
+                    // 局部」变成「调用者对象的地址」，被调方写回就是越界改人。
+                    // 见 [`SubstCtx`]。
                     ctx.needs_slot = true;
                 }
                 *e = arg.clone();
@@ -12937,11 +13565,26 @@ fn subst_params_mut(
             }
         },
         Expr::AsmExpr {
-            inputs, outputs, ..
+            inputs,
+            outputs,
+            input_constraints,
+            ..
         } => {
-            for x in inputs.iter_mut().chain(outputs.iter_mut()) {
+            // 操作数位置：输出操作数恒写；输入操作数只有允许内存形式时才算取址。
+            // 两种都要让形参保留一份独立副本（[`SubstCtx::in_asm_write`]）。
+            let outer = ctx.in_asm_write;
+            for x in outputs.iter_mut() {
+                ctx.in_asm_write = true;
                 subst_params_mut(x, params, pack_args, ctx);
             }
+            for (i, x) in inputs.iter_mut().enumerate() {
+                ctx.in_asm_write = outer
+                    || input_constraints
+                        .get(i)
+                        .is_some_and(|c| asm_constraint_takes_address(c));
+                subst_params_mut(x, params, pack_args, ctx);
+            }
+            ctx.in_asm_write = outer;
         },
         Expr::Offsetof { indices, .. } => {
             for x in indices.iter_mut() {
@@ -13255,15 +13898,88 @@ fn try_inline_call(
     substitute_call(f, ret, args, name)
 }
 
+/// 形参 ← 实参绑定：每个实参先按**形参声明类型**做一次隐式转换 (C11 6.5.2.2p7)，
+/// 再交给 [`substitute_params`] 做名字替换。
+///
+/// 少了这次转换，实参类型会「泄漏」给形参：
+/// ```c
+/// static inline struct request *blk_mq_rq_from_pdu(void *pdu)
+/// { return pdu - sizeof(struct request); }
+/// static inline struct request *scsi_cmd_to_rq(struct scsi_cmnd *cmd)
+/// { return blk_mq_rq_from_pdu(cmd); }
+/// ```
+/// 内联后 `pdu - 0xf8` 里的 `pdu` 拿到的是实参的 `struct scsi_cmnd *`，
+/// 指针算术按 `sizeof(struct scsi_cmnd)=0x128` 缩放 ⇒ `cmd - 0x11ec0`（gcc 是
+/// `cmd - 0xf8`）。`__ata_scsi_queuecmd` 由此读到垃圾 `rq->tag`，`__ata_qc_from_tag()`
+/// 返回 NULL，随后 `qc->tag = qc->hw_tag = tag` 写 0x5c 触发内核 boot Oops。
+///
+/// 语句级内联 (`try_stmt_inline_call`) 建的是带 `p.ty` 的临时量，天然没有这个问题；
+/// 只有「把返回表达式整体搬进调用方」的表单级内联需要在这里补转换。
+fn bind_inline_params(f: &FuncDecl, args: &[Expr]) -> Vec<(String, Expr)> {
+    f.params
+        .iter()
+        .zip(args.iter())
+        .filter_map(|(p, a)| {
+            let id = p.name.as_ref()?;
+            Some((
+                id.name.clone(),
+                cast_to_declared_ty(a.clone(), &p.ty, p.span.clone()),
+            ))
+        })
+        .collect()
+}
+
+/// 实参 → 形参声明类型 / 返回表达式 → 函数声明返回类型的隐式转换 (C11 6.5.2.2p7、
+/// 6.8.6.4p3)；类型已相同则原样返回（不给每个内联点都套 cast）。
+fn cast_to_declared_ty(a: Expr, ty: &Type, span: Span) -> Expr {
+    if crate::ast::type_equal(&a.ty(), ty) {
+        return a;
+    }
+    // 不能写 cast 的类型（聚合/向量/`Type::Func`/未解析的 `Named`）原样返回：
+    // 聚合按值传递时类型本就相容，`Type::Func` 只会作为函数指示符实参出现，
+    // 其形参类型是 `Ptr(Func(..))`，走指针分支。
+    let writable = matches!(
+        ty,
+        Type::Ptr(_)
+            | Type::Bool
+            | Type::Char
+            | Type::SChar
+            | Type::UChar
+            | Type::Char8
+            | Type::Char16
+            | Type::Char32
+            | Type::Short
+            | Type::UShort
+            | Type::Int
+            | Type::UInt
+            | Type::Long
+            | Type::ULong
+            | Type::LongLong
+            | Type::ULongLong
+            | Type::Int128
+            | Type::UInt128
+            | Type::Float
+            | Type::Double
+            | Type::LongDouble
+            | Type::Float128
+            | Type::Fract
+            | Type::Accum
+            | Type::Enum(..)
+    );
+    if !writable {
+        return a;
+    }
+    Expr::Cast {
+        ty: ty.clone(),
+        e: Box::new(a),
+        span,
+    }
+}
+
 /// 参数替换: 将函数体返回表达式中的形参替换为实参.
 /// 返回 `None` = 这个体不能只搬表达式（有形参被取址，见 [`SubstCtx`]）。
 fn substitute_call(f: &FuncDecl, ret: &Expr, args: &[Expr], name: &str) -> Option<Expr> {
-    let bindings: Vec<(String, Expr)> = f
-        .params
-        .iter()
-        .zip(args.iter())
-        .filter_map(|(p, a)| p.name.as_ref().map(|id| (id.name.clone(), a.clone())))
-        .collect();
+    let bindings = bind_inline_params(f, args);
     if bindings.len() != f.params.len() {
         return Some(ret.clone());
     }
@@ -13272,7 +13988,12 @@ fn substitute_call(f: &FuncDecl, ret: &Expr, args: &[Expr], name: &str) -> Optio
         trace_inline_decision(name, "REJECT", "形参被取址 (&p)，表达式内联给不了独立槽位");
         return None;
     }
-    Some(e)
+    // 返回表达式也要回到**声明返回类型**：C11 6.8.6.4p3。只搬表达式时类型会跟着
+    // 实参走，实测 `static inline struct request *scsi_cmd_to_rq(struct scsi_cmnd *cmd)
+    // { return blk_mq_rq_from_pdu(cmd); }` 内联后整个调用点成了 `void *`，于是
+    // `scsi_cmd_to_rq(cmd)->tag` 的成员偏移解析不到，按 0 发射 —— 把 `struct request`
+    // 头 4 字节（`list_head.next` 低半）当成 tag，`__ata_scsi_queuecmd` 又写 0x5c。
+    Some(cast_to_declared_ty(e, &f.ret_ty, f.span.clone()))
 }
 
 /// 变参 + `__builtin_va_arg_pack ()` 的强制内联 (va-arg-pack-1)。
@@ -13299,12 +14020,7 @@ fn try_inline_variadic_pack(f: &FuncDecl, args: &[Expr], name: &str) -> Option<E
         trace_inline_decision(name, "REJECT", "forced variadic but direct recursion");
         return None;
     }
-    let bindings: Vec<(String, Expr)> = f
-        .params
-        .iter()
-        .zip(args.iter())
-        .filter_map(|(p, a)| p.name.as_ref().map(|id| (id.name.clone(), a.clone())))
-        .collect();
+    let bindings = bind_inline_params(f, args);
     if bindings.len() != f.params.len() {
         return None; // 无形名实参 (如 `void f(int, ...)`): 无法绑定
     }
@@ -13315,7 +14031,7 @@ fn try_inline_variadic_pack(f: &FuncDecl, args: &[Expr], name: &str) -> Option<E
         trace_inline_decision(name, "REJECT", "形参被取址 (&p)，表达式内联给不了独立槽位");
         return None;
     }
-    Some(e)
+    Some(cast_to_declared_ty(e, &f.ret_ty, f.span.clone()))
 }
 
 /// 取 always_inline 函数体的返回值表达式。除单 `Return` 外, 还认
@@ -14903,6 +15619,92 @@ mod tests {
                 "-O{level} 不应发生函数体级拼接（出口标签/跳转必为 0）"
             );
         }
+    }
+
+    /// `return f(...);` 且 callee 返回 **void**：callee 的体里没有 `return`（走完体就是
+    /// 返回），展开块末尾必须补回 `return;`。丢掉的后果不是少一条优化 —— kbuild22 的
+    /// `--boot` 就是死在 `lib/maple_tree.c::mas_topiary_replace` 的
+    /// `if (mte_is_leaf(old_enode)) return mas_free(mas, old_enode);`：释放旧叶之后落入
+    /// 第二循环，用死叶做 `mas_find_child`，读到叶的 `slots[15]`（NULL）后解引用地址 0。
+    #[test]
+    fn general_inline_void_callee_at_return_site_keeps_return() {
+        let prog = optimize_src(
+            b"extern int g;\n\
+              static void f(int x) { g += x; }\n\
+              void t(int leaf) { if (leaf) return f(1); g += 100; }\n",
+            2,
+        );
+        let body = func_body(&prog, "t");
+        assert!(
+            block_has_valueless_return(body),
+            "return f(); 展开后必须补回 return（否则会落进后面的 `g += 100;`）"
+        );
+    }
+
+    /// 反向护栏：callee 返回**非 void** 时，展开块末尾不得画蛇添足地补 `return;` ——
+    /// 那会把「callee 没走到 return 的路径」（UB 但不该改变其它路径的产物）变成
+    /// 「提前归还一个未定义值」。
+    #[test]
+    fn general_inline_nonvoid_callee_at_return_site_keeps_value_return() {
+        let prog = optimize_src(
+            b"extern int g;\n\
+              static int f(int x) { if (x) return 1; g += x; return 2; }\n\
+              int t(int leaf) { if (leaf) return f(1); return 0; }\n",
+            2,
+        );
+        let body = func_body(&prog, "t");
+        assert!(
+            !block_has_valueless_return(body),
+            "非 void callee 的展开块末尾不该出现无值 return（callee 自己的 `return e;` 才是本层的返回）"
+        );
+    }
+
+    /// 上面两条护栏取函数体用。
+    fn func_body<'a>(prog: &'a crate::ast::Program, name: &str) -> &'a Block {
+        for d in &prog.decls {
+            if let Decl::Func(f) = d {
+                if f.name.name == name {
+                    return f.body.as_ref().expect("函数体");
+                }
+            }
+        }
+        panic!("找不到函数 {name}");
+    }
+
+    /// 函数体（含嵌套块/分支/循环/switch）里是否有无值 `return;`。写成递归而不是钉
+    /// 某一层形状：`run_ssa_passes` 在 -O2 会重建 caller，块嵌套层数不是内联器的契约。
+    fn block_has_valueless_return(b: &Block) -> bool {
+        fn in_stmt(s: &Stmt) -> bool {
+            match s {
+                Stmt::Return { val: None, .. } => true,
+                Stmt::Return { .. } | Stmt::Expr { .. } | Stmt::Goto { .. } => false,
+                Stmt::GotoIndirect { .. }
+                | Stmt::Break { .. }
+                | Stmt::Continue { .. }
+                | Stmt::Fallthrough { .. }
+                | Stmt::EhLandingPad { .. }
+                | Stmt::AsmGoto { .. } => false,
+                Stmt::If { then_, else_, .. } => {
+                    in_stmt(then_) || else_.as_ref().is_some_and(|e| in_stmt(e))
+                },
+                Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+                    in_stmt(body)
+                },
+                Stmt::Label { stmt, .. } => in_stmt(stmt),
+                Stmt::Invoke { call, .. } => in_stmt(call),
+                Stmt::Block { b, .. } => block_has_valueless_return(b),
+                Stmt::Switch { cases, prelude, .. } => {
+                    prelude.iter().any(|it| match it {
+                        BlockItem::Stmt(s) => in_stmt(s),
+                        _ => false,
+                    }) || cases.iter().any(|c| block_has_valueless_return(&c.body))
+                },
+            }
+        }
+        b.items.iter().any(|it| match it {
+            BlockItem::Stmt(s) => in_stmt(s),
+            _ => false,
+        })
     }
 
     #[test]

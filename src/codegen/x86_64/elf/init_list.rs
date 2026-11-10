@@ -1,13 +1,88 @@
 // src/codegen/x86_64/elf/init_list.rs
 // Global initialization list generation for static variables.
 
-use crate::ast::{find_field, ArraySize, Designator, Expr, InitItem, Type};
+use crate::ast::{ArraySize, Designator, Expr, InitItem, Type};
 use crate::codegen::shared::elf::R_X86_64_PC32;
-use crate::codegen::x86_64::emit::expr::aggregate::resolve_designator;
+use crate::codegen::x86_64::emit::expr::aggregate::{designator_bitfield, resolve_designator};
 use crate::codegen::x86_64::{Codegen, GlobalVar};
 use crate::const_eval;
 
 impl Codegen {
+    /// 数组**单个元素**的初始化器 → 该元素的字节编码（单一真源）。
+    ///
+    /// 两个调用者必须走同一条路：普通元素项，和 GNU 范围设计符
+    /// `[f ... l] = v` 展开出的每个 k。范围分支曾经自己内联了一份「只认标量」
+    /// 的编码，于是 `[0 ... 1023] = { .first = NULLS_MARKER(0) }`（内核
+    /// `kernel/ucount.c` 的 `ucounts_hashtable`）被 `eval_const_expr` 当成
+    /// 不支持的表达式写成了全 0：空链表的 NULLS 哨兵（`1`）退化成 NULL，
+    /// `hlist_nulls_for_each_entry_rcu` 把 NULL 当节点，`iter->uid` 读 +0x18
+    /// 当场 #PF（报告 §5.37）。
+    fn encode_array_elem(
+        &mut self,
+        elem_ty: &Type,
+        value: &Expr,
+        elem_rel: Option<(u64, Option<usize>)>,
+        elem_size: usize,
+        rodata_slots: bool,
+    ) -> Option<Vec<u8>> {
+        // 带花括号的聚合元素（`{ .first = 1 }` / `(T){…}`）必须递归生成；
+        // 判据与数组分支顶部的 is_braced_init 同源，否则复合字面量元素会被
+        // 当成标量平铺（§5.34 的同一条口径）。
+        //
+        // 例外：**指针元素**收到聚合型字面量是 C11 6.3.2.1p3 的退化取地址
+        // （`ptr_decay_literal`），必须落到 `eval_const_expr` 的物化+重定位路径；
+        // 当成嵌套列表会把内容铺进指针槽（kbuild23 的 `CMDS()` 表）。
+        if let Expr::InitList {
+            inits: nested,
+            ty: nested_ty,
+            ..
+        }
+        | Expr::CompoundLit {
+            ty: nested_ty,
+            inits: nested,
+            ..
+        } = value
+        {
+            if !Self::ptr_decay_literal(elem_ty, value) {
+                let nty = if matches!(nested_ty, Type::Int) {
+                    elem_ty.clone()
+                } else {
+                    nested_ty.clone()
+                };
+                let mut bytes = self.gen_global_init_list(&nty, nested, elem_rel, rodata_slots)?;
+                bytes.resize(elem_size, 0);
+                return Some(bytes);
+            }
+        }
+        // C11 6.7.9p14: 字符串字面量初始化 char 数组元素（二维数组的一行，
+        // 如 char w[][6] = {"hello","world"}）——整个字符串填入该元素，
+        // 尾部补零到 elem_size。不能走 eval_const_expr，否则字符串会被
+        // 当标量只取首字节（实测将两行错写为 "hw"）。
+        if Self::is_char_array(elem_ty) {
+            if let Expr::String { data, .. } = value {
+                let mut row = vec![0u8; elem_size];
+                let n = data.len().min(elem_size);
+                row[..n].copy_from_slice(&data[..n]);
+                return Some(row);
+            }
+        }
+        // 复数元素收到复数常量表达式: 按目标分量编码
+        // (eval_const_expr 通用路径对复数只取虚部)
+        if let Type::Complex(ci) = elem_ty {
+            if let Some(b) = Self::complex_init_bytes(value, &ci.base) {
+                return Some(b);
+            }
+        }
+        // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
+        // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
+        if matches!(elem_ty, Type::Ptr(_)) {
+            if let Expr::String { data, .. } = const_eval::unwrap_string_cast(value) {
+                return Some(self.emit_string_ptr_slot(elem_rel, data, rodata_slots));
+            }
+        }
+        Some(self.eval_const_expr(value, elem_rel, elem_size, elem_ty, rodata_slots))
+    }
+
     pub fn gen_global_init_list(
         &mut self,
         ty: &Type,
@@ -34,9 +109,12 @@ impl Codegen {
                     // (C11 6.7.9p14: "abc" 等价 {'a','b','c','\0'}), 不是标量——若把它
                     // 计入触发条件, `char w[][6] = {"hello","world"}` 会被按 sub_count=6
                     // 把两个字符串挤进第 0 行, 再各按标量只写首字节 (得 "hw")。
+                    // 同理 `(T){…}` 复合字面量也自带花括号 (判据单一真源 is_braced_init);
+                    // 旧判据只认 `Expr::InitList`, 内核 `static_calls_table` 的
+                    // `(struct lsm_static_call){…}` 元素因此被平铺写坏 (§5.34)。
                     let needs_elision = inits.iter().any(|item| {
                         matches!(item, InitItem::Expr(e)
-                            if !matches!(e, Expr::InitList { .. })
+                            if !Self::is_braced_init(e)
                                 && !(Self::is_char_array(&elem_ty.base)
                                     && matches!(e, Expr::String { .. })))
                     });
@@ -49,6 +127,62 @@ impl Codegen {
                     effective_inits = inits.to_vec();
                 }
                 let inits = &effective_inits;
+                // GNU 范围设计符的**链式**形式 `[f ... l].field = v` 等价于对
+                // k∈[f,l] 依次写 `[k].field = v`。顶层 `[f ... l] = v` 由下面的
+                // Range 早退分支处理；链式形式此前交给 resolve_designator，而
+                // Range 在那里固定返回 None ⇒ 整项被静默跳过，目标槽位停在 0。
+                // 展开成显式 Index 项后，它们走通用的指定符路径（含位域、链式
+                // 子成员、乱序回写），不再需要第二套编码（报告 §5.37）。
+                let expanded;
+                let inits = if inits.iter().any(|it| {
+                    matches!(
+                        it,
+                        InitItem::Designated {
+                            designator: Designator::Chain(ch),
+                            ..
+                        } if matches!(ch.first(), Some(Designator::Range(_, _)))
+                    )
+                }) {
+                    let mut out: Vec<InitItem> = Vec::with_capacity(inits.len());
+                    for it in inits {
+                        let InitItem::Designated {
+                            designator: Designator::Chain(ch),
+                            value,
+                        } = it
+                        else {
+                            out.push(it.clone());
+                            continue;
+                        };
+                        let Some(Designator::Range(first, last)) = ch.first() else {
+                            out.push(it.clone());
+                            continue;
+                        };
+                        let (Ok(f), Ok(l)) = (const_eval::eval(first), const_eval::eval(last)) else {
+                            out.push(it.clone());
+                            continue;
+                        };
+                        let (f, l) = (f.max(0) as usize, l.max(0) as usize);
+                        if l < f {
+                            continue;
+                        }
+                        for k in f..=l {
+                            let mut sub = ch.clone();
+                            sub[0] = Designator::Index(Expr::Int {
+                                v: k as i128,
+                                span: crate::diagnostics::Span::point("<init>", 0, 0),
+                                ty: Type::Int,
+                            });
+                            out.push(InitItem::Designated {
+                                designator: Designator::Chain(sub),
+                                value: value.clone(),
+                            });
+                        }
+                    }
+                    expanded = out;
+                    &expanded[..]
+                } else {
+                    inits
+                };
                 for (i, item) in inits.iter().enumerate() {
                     // GNU 范围设计符 [first ... last]: 范围内每个元素写同一值
                     if let InitItem::Designated {
@@ -70,40 +204,23 @@ impl Codegen {
                                 data.push(0);
                             }
                             let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
-                            // 复数元素收到复数常量表达式: 按目标分量编码
-                            // (eval_const_expr 通用路径对复数只取虚部)
-                            let complex_data = match &elem_ty.base {
-                                Type::Complex(ci) => Self::complex_init_bytes(value, &ci.base),
-                                _ => None,
-                            };
-                            // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
-                            // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                            let elem_data = if let Some(b) = complex_data {
-                                b
-                            } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                                if let Expr::String { data, .. } =
-                                    const_eval::unwrap_string_cast(value)
-                                {
-                                    self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
-                                } else {
-                                    self.eval_const_expr(
-                                        value,
-                                        elem_rel,
-                                        elem_size,
-                                        &elem_ty.base,
-                                        rodata_slots,
-                                    )
-                                }
-                            } else {
-                                self.eval_const_expr(
-                                    value,
-                                    elem_rel,
-                                    elem_size,
-                                    &elem_ty.base,
-                                    rodata_slots,
-                                )
+                            // 元素值编码走与普通元素同一个入口：范围设计符只是
+                            // 「同一个值写到多个下标」，不该有自己的一套编码
+                            // （§5.37：内联标量编码把聚合值写成全 0）。
+                            let Some(elem_data) = self.encode_array_elem(
+                                &elem_ty.base,
+                                value,
+                                elem_rel,
+                                elem_size,
+                                rodata_slots,
+                            ) else {
+                                break;
                             };
                             data.extend_from_slice(&elem_data);
+                            // 编码短于元素宽度时补齐，否则下一个 k 的起点错位
+                            if data.len() < (k + 1) * elem_size {
+                                data.resize((k + 1) * elem_size, 0);
+                            }
                             k += 1;
                         }
                         continue;
@@ -127,73 +244,48 @@ impl Codegen {
                         },
                     };
                     let write_base = target_off.unwrap_or(data.len());
-                    let elem_data_opt: Option<Vec<u8>> = if let Expr::InitList {
-                        inits: nested,
-                        ty: nested_ty,
-                        ..
-                    }
-                    | Expr::CompoundLit {
-                        ty: nested_ty,
-                        inits: nested,
-                        ..
-                    } = value
-                    {
-                        let nested_ty = if matches!(nested_ty, Type::Int) {
-                            &elem_ty.base
-                        } else {
-                            nested_ty
-                        };
-                        let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
-                        self.gen_global_init_list(nested_ty, nested, elem_rel, rodata_slots)
-                    } else if Self::is_char_array(&elem_ty.base)
-                        && matches!(value, Expr::String { .. })
-                    {
-                        // C11 6.7.9p14: 字符串字面量初始化 char 数组元素（二维数组的一行，
-                        // 如 char w[][6] = {"hello","world"}）——整个字符串填入该元素，
-                        // 尾部补零到 elem_size。不能走 eval_const_expr，否则字符串会被
-                        // 当标量只取首字节（实测将两行错写为 "hw"）。
-                        let Expr::String { data, .. } = value else {
-                            unreachable!()
-                        };
-                        let mut row = vec![0u8; elem_size];
-                        let n = data.len().min(elem_size);
-                        row[..n].copy_from_slice(&data[..n]);
-                        Some(row)
-                    } else {
-                        let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
-                        // 复数元素收到复数常量表达式: 按目标分量编码
-                        // (eval_const_expr 通用路径对复数只取虚部)
-                        let complex_data = match &elem_ty.base {
-                            Type::Complex(ci) => Self::complex_init_bytes(value, &ci.base),
-                            _ => None,
-                        };
-                        // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
-                        // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                        Some(if let Some(b) = complex_data {
-                            b
-                        } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                            if let Expr::String { data, .. } = const_eval::unwrap_string_cast(value)
-                            {
-                                self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
-                            } else {
-                                self.eval_const_expr(
-                                    value,
-                                    elem_rel,
-                                    elem_size,
-                                    &elem_ty.base,
-                                    rodata_slots,
-                                )
-                            }
-                        } else {
-                            self.eval_const_expr(
-                                value,
-                                elem_rel,
-                                elem_size,
+                    let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
+                    // C11 6.7.9p14：一维字符数组的花括号字符串初始化
+                    // （`char a[] = { "hello" };`）等价于逐个字符铺开 —— 字符串
+                    // 从当前位置起**横跨连续元素**。`encode_array_elem` 只在元素本身
+                    // 是字符数组（二维数组的一行）时按整行处理；标量元素走到那里会
+                    // 退化成「只取首字节」（内核 fs/coredump.c 的 `core_modes[]`
+                    // 因此只剩首字符，sysctl 报 `No maxlen`）。
+                    if target_off.is_none() {
+                        if let (Expr::String { data: bytes, .. }, true) = (
+                            value,
+                            matches!(
                                 &elem_ty.base,
-                                rodata_slots,
-                            )
-                        })
-                    };
+                                Type::Char
+                                    | Type::SChar
+                                    | Type::UChar
+                                    | Type::Char8
+                                    | Type::Char16
+                                    | Type::Char32
+                                    | Type::Short
+                                    | Type::UShort
+                                    | Type::Int
+                                    | Type::UInt
+                            ),
+                        ) {
+                            while data.len() < write_base {
+                                data.push(0);
+                            }
+                            let n = bytes.len();
+                            if data.len() < write_base + n {
+                                data.resize(write_base + n, 0);
+                            }
+                            data[write_base..write_base + n].copy_from_slice(bytes);
+                            continue;
+                        }
+                    }
+                    let elem_data_opt = self.encode_array_elem(
+                        &elem_ty.base,
+                        value,
+                        elem_rel,
+                        elem_size,
+                        rodata_slots,
+                    );
                     if let Some(elem_data) = elem_data_opt {
                         match target_off.take() {
                             Some(off) => {
@@ -257,24 +349,11 @@ impl Codegen {
                             }
                             match resolve_designator(ty, designator) {
                                 Some((o, s, ft)) => {
-                                    // Look up bitfield info for designated field
-                                    let bf_info = if let Designator::Field(ref name) = designator {
-                                        if let Type::Struct(_, fs, _, _)
-                                        | Type::Union(_, fs, _, false) = ty
-                                        {
-                                            find_field(fs.as_ref(), &name.name).and_then(
-                                                |(f, extra)| {
-                                                    f.bit_width.map(|bw| {
-                                                        (f.bit_offset + (extra as u32) * 8, bw)
-                                                    })
-                                                },
-                                            )
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    };
+                                    // 位域信息：链式设计符（`.bits.p = 1`）必须沿链
+                                    // 下潜到最终字段，否则退化成普通标量写 —— 值落在
+                                    // 字段起始字节、丢掉单元内移位（报告 §5.25：内核
+                                    // `def_idts[]` 的 IDT 门因此 p=0，首个 ud2 即 triple fault）。
+                                    let bf_info = designator_bitfield(ty, designator);
                                     (o, s, value, Some(ft), bf_info)
                                 },
                                 None => {
@@ -287,6 +366,12 @@ impl Codegen {
                     let field_rel = rel.map(|(base, sec)| (base + off as u64, sec));
                     // 本字段消费的 init item 数 (默认 1)
                     let consumed;
+                    // 指针字段收到聚合型字面量（`{ .commands = (const u8 []){…} }`）
+                    // 是 C11 6.3.2.1p3 的退化取地址，不是「把内容填进指针槽」：
+                    // 必须落到 `eval_const_expr` 的物化+重定位路径。
+                    let decays_to_ptr = field_ty
+                        .as_ref()
+                        .is_some_and(|ft| Self::ptr_decay_literal(ft, value));
                     // 嵌套初始化列表 ({ { [0 ... N] = v } }): 递归生成字段数据,
                     // 否则 eval_const_expr 会把整个 InitList 当成不支持表达式置零
                     let field_data = match value {
@@ -299,7 +384,7 @@ impl Codegen {
                             ty: nested_ty,
                             inits: nested,
                             ..
-                        } => {
+                        } if !decays_to_ptr => {
                             consumed = 1;
                             let nty = if matches!(nested_ty, Type::Int) {
                                 field_ty.clone().unwrap_or_else(|| ty.clone())
@@ -333,11 +418,20 @@ impl Codegen {
                                     vec![InitItem::Expr(value.clone())];
                                 let mut k = init_idx + 1;
                                 // 计算该聚合字段剩余字节数 (第一个标量已占一个元素大小)
+                                //
+                                // 两处必须是 `saturating_sub`：`remaining` 的语义是「本字段还剩多少
+                                // 字节」，负值在 C 里不存在；无符号直减在 debug profile 下当场
+                                // panic（实测 `gcc.c-torture/execute/20030305-1.c` 在 -O0 就碰上了
+                                // `n == 0` 的数组字段），在 release 下则回绕成一个天文数字，把
+                                // 后面的初始化元素全部吃进本字段（静默误编译）。
                                 let remaining = match &field_ty {
-                                    Some(Type::Array(elem_ty, ArraySize::Const(n))) => {
-                                        elem_ty.size() * n - elem_ty.size()
-                                    },
-                                    _ => field_ty.as_ref().map_or(0, |t| t.size() - sz),
+                                    Some(Type::Array(elem_ty, ArraySize::Const(n))) => (elem_ty
+                                        .size()
+                                        .saturating_mul(*n))
+                                        .saturating_sub(elem_ty.size()),
+                                    _ => field_ty
+                                        .as_ref()
+                                        .map_or(0, |t| t.size().saturating_sub(sz)),
                                 };
                                 // 对于数组: 每个标量占 elem_size 字节
                                 if let Some(Type::Array(elem_ty, _)) = &field_ty {
@@ -580,6 +674,37 @@ impl Codegen {
         }
     }
 
+    /// 静态初始化式的「花括号列表」视图 —— 单一判据点。
+    ///
+    /// `= { … }` 与 `= (T){ … }` 是同一个初始化语义 (C11 6.5.2.5: 复合字面量的
+    /// 初始值列表就是花括号列表, 其对象表示与直接声明同形), 包裹列表的**聚合类型**
+    /// 转换也不改变对象表示。仓库里所有 AST 遍历 (`src/ir.rs`、`src/ast.rs`、
+    /// `src/ast_cmp_fold.rs` …) 早就把两种写法并成一条臂; x86_64 的**静态初始化**
+    /// 站点却只认 `Expr::InitList`, 于是
+    ///
+    /// ```c
+    /// struct s g = (struct s){ .a = 7 };   // 落到标量常量兜底 → 求不出字节 → 静默零初始化
+    /// ```
+    ///
+    /// 内核全树都在用这条写法: `#define __SPIN_LOCK_UNLOCKED(x) (spinlock_t)
+    /// __SPIN_LOCK_INITIALIZER(x)`, 而 `early_pfn_lock` 的 boot 缺陷正是它的
+    /// 函数局部 static 版本 (报告 §5.14)。
+    /// 标量目标的转换 (`(int){1}`) 语义上仍是标量, **不**算列表。
+    pub fn static_brace_list(init: &Expr) -> Option<&[InitItem]> {
+        match init {
+            Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => Some(inits),
+            Expr::Cast { ty, e, .. }
+                if matches!(
+                    *ty,
+                    Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)
+                ) =>
+            {
+                Self::static_brace_list(e)
+            },
+            _ => None,
+        }
+    }
+
     pub fn eval_global_init(
         &mut self,
         v: &crate::ast::VarDecl,
@@ -587,6 +712,32 @@ impl Codegen {
         use_rodata: bool,
     ) -> Option<Vec<u8>> {
         let init = v.init.as_ref()?;
+        // 指针目标的聚合型字面量是**地址**（C11 6.3.2.1p3 退化，判据见
+        // `ptr_decay_literal`）。必须放在 `static_brace_list` 之前：那个判据
+        // 只看「有没有花括号」，不看目标类型。
+        if Self::ptr_decay_literal(&v.ty, init) {
+            let base = if use_rodata {
+                self.rodata.len()
+            } else {
+                self.tdata_section.len()
+            } as u64;
+            if let Some(bytes) =
+                self.ptr_decay_init(&v.ty, init, Some((base, None)), sz, use_rodata)
+            {
+                return Some(bytes);
+            }
+        }
+        // 花括号列表 (含复合字面量与包裹它的聚合类型转换) 共用同一份字节生成,
+        // 写法判据单点在 [`Self::static_brace_list`]; 对象类型取**声明类型**,
+        // 与下面 `gen_global_init_list(&v.ty, …)` 的旧 `Expr::InitList` 臂一致。
+        if let Some(inits) = Self::static_brace_list(init) {
+            let base = if use_rodata {
+                self.rodata.len()
+            } else {
+                self.tdata_section.len()
+            } as u64;
+            return self.gen_global_init_list(&v.ty, inits, Some((base, None)), use_rodata);
+        }
         // 静态地址常量统一拦截 (含 cast 包裹与指针算术基址):
         // globals 中的符号按 data 偏移直算虚地址。
         if let Some((name, addend)) = Self::static_addr_parts(init) {
@@ -607,14 +758,6 @@ impl Codegen {
                 } else {
                     Some(data.clone())
                 }
-            },
-            Expr::InitList { inits, .. } => {
-                let base = if use_rodata {
-                    self.rodata.len()
-                } else {
-                    self.tdata_section.len()
-                } as u64;
-                self.gen_global_init_list(&v.ty, inits, Some((base, None)), use_rodata)
             },
             Expr::AddrOf { e, .. } => {
                 // 1. 首先尝试命名全局变量 + 偏移 (如 &a[3], &s.field)

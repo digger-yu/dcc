@@ -162,9 +162,37 @@ impl Codegen {
         }
         // 每个 trampoline 32 字节 (16 字节对齐)
         let tramp_size: i64 = 32;
-        // Trampoline 槽位位于帧底部 trampoline reserve (256 字节) 内
-        // 从 reserve 顶部向下分配: 第一个槽在 tramp_top(-frame_size+256) 之下
+        // fail-closed：帧底那摞带里能不能容下这个 trampoline。几何事实只有一条：
+        // 槽是从 `tramp_top` 往下长的，而 `tramp_top` 距帧底只有
+        // `cx + va + sc + 8 + vec + bf` 那么多（`tramp_reserve` 本身 **不在** 这段里，
+        // 它只进了 `frame_size` 的求和），所以 `trampoline 实测用量 ≤ 那段` 才是
+        // 不变式。以前它靠 cx(48)+bf(64) 两条恒带兑住至多 3 个 trampoline，从未被
+        // 显式检查；complex 带改成按需后这个余量会变，不查就是静默碎帧（实测两层
+        // 嵌套的 `nested_func_symbol_facts.c`：帧 128B，trampoline 写到 `-152(%r13)`，
+        // 跳进去就是段错误）。
         let offset = self.frame_layout.tramp_top - self.trampoline_total_size as i64 - tramp_size;
+        if offset < self.frame_layout.frame_base() {
+            self.report_internal_bug(
+                "E1128",
+                format!(
+                    "trampoline band passes the frame bottom in `{}`: slot #{} would sit at \
+                     {offset}(%r13) while the frame starts at {} (frame_size {}B; band tops: \
+                     tramp_top={} cx={} va={} sc={} vec={} bf={})",
+                    self.current_func_name,
+                    self.trampoline_slots.len() + 1,
+                    self.frame_layout.frame_base(),
+                    self.frame_layout.frame_size,
+                    self.frame_layout.tramp_top,
+                    self.frame_layout.cx_band,
+                    self.frame_layout.va_slots,
+                    self.frame_layout.static_chain_slot,
+                    self.frame_layout.vec_reserve,
+                    self.frame_layout.bf_rmw_reserve,
+                ),
+                "trampoline 槽与帧底那摞带共用同一段空间（见 `abi/layout.rs` 的 \"不对称 2\"）：\
+                 要么把带摆进各自的区间，要么给本函数留回 cx/bf 那条恒带。",
+            );
+        }
         self.trampoline_total_size += tramp_size as i32;
         self.trampoline_slots
             .insert(nested_name.to_string(), offset);

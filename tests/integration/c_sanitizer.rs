@@ -2015,6 +2015,11 @@ int main(void) {\n\
 /// 实测 `struct S s; char b[8];` 里红区条目正好落在 `b` 的槽上 —— libc 的 `memcpy`
 /// 正常写入被报 `use-after-poison`（同一源码 gcc 的 ASan 构建干净）。最终判据是几何
 /// 事实：与任何活区间相交的红区条目一律不毒。本用例钉住这个结论。
+///
+/// 补充（2026-11）：红区算术本身也修了 —— `off` 已是对象最低槽，旧式
+/// `off - slots*8 - 8j` 对多槽变量会往下多跳一个对象，这里最后一条红区正好压到
+/// `b` 上。另外 `b` 显式清零：x86_64 不零帧，`b[7]` 是未初始化栈字节（实测本次
+/// 排布变更后是 0xff），不能拿来当「memset 只写两个字节」的判据。
 #[test]
 #[cfg(all(unix, not(target_os = "macos")))]
 fn asan_stack_poison_does_not_flag_live_slots() {
@@ -2023,7 +2028,7 @@ fn asan_stack_poison_does_not_flag_live_slots() {
 #include <string.h>
 struct S { int n; struct { unsigned f, g; } fg; };
 int main(void){
-  struct S s; char b[8]; char *p = b;
+  struct S s; char b[8] = {0}; char *p = b;
   s.fg.f = 7; s.fg.g = 8; s.n = 9;
   /* 让未插桩的 libc 往帧内活对象里写：旧模型下这里报 use-after-poison */
   memcpy(b, \"abcd\", 5);

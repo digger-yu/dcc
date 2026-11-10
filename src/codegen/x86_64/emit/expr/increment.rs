@@ -277,8 +277,15 @@ impl super::super::super::Codegen {
                 // 本行不是行为变更；区别只在于 `Spill` 家现在能被正确翻译（Phase 5.1.c）。
                 let off = self.stack_home_off(&name.name);
                 let ty_sz = inner_ty.size().max(1);
-                // 按类型大小加载 (零扩展小类型到 64 位)
-                self.load_stack_sized(dst, off, ty_sz);
+                // 读数必须走单一读入口 `mov_from_stack`（按**声明类型**取宽度与符号性）。
+                // 旧写法是 `load_stack_sized(dst, off, ty_sz)` —— 那是「按宽度零扩展」，
+                // 对 4 字节有符号 int 会把 -1 读成 0x00000000FFFFFFFF，而紧接着的
+                // `emit_inc_dec_reg` 是 64 位 `add`，于是 `++` 得到 0x100000000：
+                // 内核 `int block = -1; while (fixed_range_blocks[++block].ranges)`
+                // 用该值算表元素地址，`0xffffffff87c479c8 + 0x800000000` 回绕成
+                // 0x787c479cc，boot 在 `set_fixed_ranges+0x20c` 取 `movslq (%rax)` 时 #PF
+                // （§5.31）。这是 §5.30 之后的下一个停点。
+                self.mov_from_stack(dst, &name.name);
                 if !is_pre {
                     self.push(dst);
                 } // 后缀：保存旧值
@@ -562,9 +569,9 @@ impl super::super::super::Codegen {
         // 几何与 dispatch.rs 位域写 RMW 统一为 3 槽/层 (24B 对齐 32B),
         // slot 0=容器地址, slot 1=旧值, slot 2=新值.
         let depth = self.bf_rmw_depth as i64;
-        let addr_slot = self.frame_layout.bf_rmw_slot(depth, 0);
-        let old_slot = self.frame_layout.bf_rmw_slot(depth, 1);
-        let new_slot = self.frame_layout.bf_rmw_slot(depth, 2);
+        let addr_slot = self.bf_rmw_slot(depth, 0);
+        let old_slot = self.bf_rmw_slot(depth, 1);
+        let new_slot = self.bf_rmw_slot(depth, 2);
         self.bf_rmw_depth += 1;
 
         // 1. Get container address, save to frame slot

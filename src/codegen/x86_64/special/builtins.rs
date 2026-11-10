@@ -3406,9 +3406,18 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], dst);
                 // GCC 语义: 无后缀 → int 宽度(32), l → long 宽度, ll → long long 宽度.
+                //
+                // 宽度只从**内建名**来，不能问 `args[0].ty()`：`Operand::Int` 不带类型，
+                // 实参是裸字面量时重建只能按量级阶梯猜（`3ULL` 被猜成 `int`）⇒ 前导零
+                // 按 32 位口径算。内核 `mm/sparse.c` 的 `mem_section_usage_size()` 正是经
+                // `roundup_pow_of_two(4)` → `fls64(3)` → `64 - __builtin_clzll(3ULL)` 拿到
+                // 1<<34，usemap 申请 1 TB 失败后空指针解引用（§5.18）。内建的原型在 GCC
+                // 里就是 `unsigned long`/`unsigned long long`，与实参写的是什么无关；
+                // `const_eval.rs` 一直按名字答，两处口径现在一致。
                 let bits = match name {
                     "__builtin_clz" => 32,
-                    _ => args[0].ty().size() as i32 * 8,
+                    "__builtin_clzl" => Type::Long.size() as i32 * 8,
+                    _ => Type::LongLong.size() as i32 * 8,
                 };
                 // 位宽 < 64 时, gen_expr 可能把值符号扩展进高 32 位 (负 int),
                 // 64 位 bsr 会把这些高位算成最高置位 → clz 变负 (pr94802-1).

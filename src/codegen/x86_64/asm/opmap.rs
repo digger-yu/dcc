@@ -57,6 +57,19 @@ impl DeferredGpLoad {
 }
 
 impl Codegen {
+    /// 报障窗口：`DCC_DBG_ASM=1` 在 stderr 逐条打印内联 asm 的操作数绑定
+    /// （约束、名字、解析出的槽/寄存器、最终替换表）。只读不改：不进任何判据、
+    /// 不进产物字节。
+    ///
+    /// 为什么必须有它：§5.11 那一族缺陷的现场是「模板里 `%[var]` 换错了对象」，
+    /// 而从产物上只能看到一个错值，从 AST 上又看不出是上游改了 `outputs` 还是
+    /// 本函数绑错了 —— 两侧一打就能分。`OnceLock` 只读一次 env：本函数每条 asm
+    /// 调两次，一个内核 TU 就是几百次 getenv。
+    fn asm_operand_map_dbg() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("DCC_DBG_ASM").is_some())
+    }
+
     fn asm_format_subst(val: &str) -> String {
         // 缺失操作数占位符会被保留为 `%[name]` / `%N`; 这些不是
         // mini-asm 可编码操作数, 让指令整体走 warning + nop fallback。
@@ -101,7 +114,12 @@ impl Codegen {
     /// 约束里的固定 GP 号（`a/b/c/d/S/D` 或 `{eax}` 这类显式寄存器）。
     ///
     /// 与规划器 `alloc_gp_for_constraint` 的字母表一致；`r/R/g`、`q/Q`、`@cc` 不钉号。
-    fn fixed_gp_of_constraint(raw: &str) -> Option<u8> {
+    /// 约束文本 → 被固定点名的 GP 号（字母约束 `"b"`→rbx 与显式名 `{r12}` 同一口径）。
+    ///
+    /// 可见性从私有提到 `pub(crate)`：帧规划期（`Codegen::compute_callee_plan`）要用
+    /// 同一个判据算「哪些池号被 asm 钉死」，不能在那里再写一份字母表 —— 两份表
+    /// 一定会漂移，而漂移的方向是「计划漏了号 ⇒ 序言少一条保存」。
+    pub(crate) fn fixed_gp_of_constraint(raw: &str) -> Option<u8> {
         if let Some(eri) = Self::asm_parse_explicit_reg(raw) {
             return match eri.kind {
                 ExplicitRegKind::Gp => Some(eri.reg),
@@ -316,8 +334,132 @@ impl Codegen {
     /// `own_asm_operand_gp`（幂等）来登记。Phase 6.2 之后这件事由
     /// `AsmRegisterPlanner::finish(&mut reg_bank)` 一次性完成，旧入口已删除。
 
+    /// 模板里作为**间接跳转目标**出现的操作数标识（`*%[name]` 的名字或 `*%N` 的编号）。
+    ///
+    /// 只认 `*%` 形态：它只会在间接跳转/间接寻址里出现（`call *%0`、`jmp *%[x]`），
+    /// 无需再解析前一条助记符（`call`/`callq`/`jmp`/`jmpq` 别名各异）。返回集合里
+    /// 同时装下名字与编号，调用方按「操作数名或操作数号」匹配。
+    fn asm_indirect_target_tokens(asm_str: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let b = asm_str.as_bytes();
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i] != b'*' {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+                j += 1;
+            }
+            if j >= b.len() || b[j] != b'%' {
+                i += 1;
+                continue;
+            }
+            j += 1;
+            // 修饰字母（`%c`、`%k`、`%q`、`%a` 等）
+            while j < b.len() && b[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'[' {
+                let start = j + 1;
+                let mut k = start;
+                while k < b.len() && b[k] != b']' {
+                    k += 1;
+                }
+                if k < b.len() {
+                    out.insert(asm_str[start..k].to_string());
+                    i = k + 1;
+                    continue;
+                }
+            } else if j < b.len() && b[j].is_ascii_digit() {
+                let start = j;
+                let mut k = j;
+                while k < b.len() && b[k].is_ascii_digit() {
+                    k += 1;
+                }
+                out.insert(asm_str[start..k].to_string());
+                i = k;
+                continue;
+            }
+            i = j.max(i + 1);
+        }
+        out
+    }
+
+    /// 模板里该操作数的**每一次**出现都处在可静态化的位置吗（名字与编号两种写法都认）。
+    ///
+    /// 与 [`Self::asm_indirect_target_tokens`] 分工：那份只收集 `*%N` 目标（间接跳转必须
+    /// 静态化才与 GAS 同形）；这份回答另一半问题——**普通** `"m"` 操作数的地址静态可求时，
+    /// 能不能直接印 `sym+off(%rip)`。
+    ///
+    /// 为什么需要它：`-O0` 下 `"m"(全局对象)` 走 `Ident` 分支一直印 `sym(%rip)`，SSA 把
+    /// 操作数降级成 `*&sym`（`Deref{AddrOf}`）后却退回 scratch 寄存器
+    /// （`lea sym(%rip),%rX; insn (%rX)`）——同一个源程序在两个优化级别得到两种字节形状，
+    /// 且 -O2 的 7+3 字节比 GAS 的 6 字节贵（实测 `verw ds(%rip)`：GAS `0f 00 2d`，
+    /// 后端 `0f 00 2b`，§5.39-e 的 x87/描述符用例）。
+    ///
+    /// 仍然拒绝的两种位置：
+    ///   * 段前缀（`mov %1,%%gs:%0`）：rip 相对会把段基址加在符号的**链接地址**上，
+    ///     语义错（per-cpu 现场）；
+    ///   * `*%N` 间接目标：由 `indirect_targets` 单独放行，这里一律不放（避免两套判据）。
+    ///
+    /// 操作数在模板里一次都没出现（宏展开才用）时返回 false：宁可不改形状。
+    fn asm_memory_token_plain(asm_str: &str, name: Option<&str>, idx: usize) -> bool {
+        let b = asm_str.as_bytes();
+        let mut i = 0usize;
+        let mut seen = false;
+        while i < b.len() {
+            if b[i] != b'%' {
+                i += 1;
+                continue;
+            }
+            // `%%` 是转义的字面 `%`（`%%gs` 的那个），不是操作数占位符
+            if i + 1 < b.len() && b[i + 1] == b'%' {
+                i += 2;
+                continue;
+            }
+            let mut j = i + 1;
+            // 修饰字母（`%k0`、`%q1` …）
+            while j < b.len() && b[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+            let hit = if j < b.len() && b[j] == b'[' {
+                let start = j + 1;
+                let mut k = start;
+                while k < b.len() && b[k] != b']' {
+                    k += 1;
+                }
+                k < b.len() && name.is_some_and(|n| &asm_str[start..k] == n)
+            } else if j < b.len() && b[j].is_ascii_digit() {
+                let start = j;
+                let mut k = j;
+                while k < b.len() && b[k].is_ascii_digit() {
+                    k += 1;
+                }
+                asm_str[start..k].parse::<usize>() == Ok(idx)
+            } else {
+                false
+            };
+            if hit {
+                seen = true;
+                // 占位符之前的第一个非空白字节：`:`（段前缀/标号）与 `*`（间接）都不算 plain。
+                let mut p = i;
+                while p > 0 && (b[p - 1] == b' ' || b[p - 1] == b'\t') {
+                    p -= 1;
+                }
+                if p > 0 && (b[p - 1] == b':' || b[p - 1] == b'*') {
+                    return false;
+                }
+            }
+            i = j.max(i + 1);
+        }
+        seen
+    }
+
     pub(crate) fn build_asm_operand_map(
         &mut self,
+        asm_str: &str,
         outputs: &[Expr],
         output_names: &[Option<String>],
         output_constraints: &[String],
@@ -328,7 +470,26 @@ impl Codegen {
         bindings: &mut Vec<AsmOpBinding>,
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
+        if Self::asm_operand_map_dbg() {
+            eprintln!(
+                "[DBG-ASM] fn={} outs={} constraints={} names={} ins={}",
+                self.current_func_name,
+                outputs.iter().map(|e| format!("{}", crate::const_eval::ExprDebug(e))).collect::<Vec<_>>().join(" | "),
+                output_constraints.join("|"),
+                output_names.iter().map(|n| n.clone().unwrap_or_default()).collect::<Vec<_>>().join("|"),
+                inputs.iter().map(|e| format!("{}", crate::const_eval::ExprDebug(e))).collect::<Vec<_>>().join(" | "),
+            );
+        }
         let mut idx = 0usize;
+        // 允许「静态地址直接展开成 `sym+off(%rip)`」的操作数标识：只有作为
+        // `call *%N` / `jmp *%N` **目标**的才算（内核 paravirt 的
+        // `"m"(pv_ops.op)`，§5.32）。
+        //
+        // 为什么必须限定：per-cpu 访问的 `"m"` 操作数（`mov %1,%%gs:%0`、
+        // `xadd %%q1,%0`）一旦展开成 RIP 相对，`%gs:` 前缀就作用到符号的**链接
+        // 地址**上（语义错），且 xadd/mov 的编码分支只认寄存器/内存形态（实测
+        // `arch/x86/mm/tlb.c` 报 `unsupported xadd operand pattern`）。
+        let indirect_targets = Self::asm_indirect_target_tokens(asm_str);
         // 写回地址槽占用的 sret 水位。槽必须在模板之前分配、写回之后才能还原，
         // 所以把标记留给发射侧（见 `Codegen::asm_pending_sret_mark`）。
         let addr_slot_mark = self.save_sret_watermark();
@@ -381,12 +542,26 @@ impl Codegen {
             Self::asm_constraint_prefers_memory(raw, is_inout)
                 && !matches!(op, Expr::Ident { .. })
         };
-        let mut mem_scratch: Vec<Option<u8>> = Vec::with_capacity(outputs.len() + inputs.len());
+        // 固定寄存器约束（`a/b/c/d/S/D` 与 `{eax}` 这类显式寄存器）必须**先于**任何
+        // 分配成集：除了下面给规划器 `reserve_gp`，`"m"` 操作数的地址 scratch 也
+        // 要避开它们。旧序里 scratch 先分配、固定约束后预留，于是地址挑中 `"b"`
+        // 要钉死的 `%rbx`：`mov ptr,%rbx` 后紧接 `mov n_lo,%rbx`，内存操作数在
+        // n_lo（内核里是 0）上寻址 —— §5.20 的 `cmpxchg16b (%rbx)` 读地址 0。
+        // 号码与输入/输出侧一次性算完，下面建规划器与 scratch 两处共用同一张表。
+        let fixed_regs: Vec<(u8, bool)> = output_constraints
+            .iter()
+            .map(|c| (c, true))
+            .chain(input_constraints.iter().map(|c| (c, false)))
+            .filter_map(|(c, is_out)| Self::fixed_gp_of_constraint(c).map(|r| (r, is_out)))
+            .collect();
+        let fixed_gp: HashSet<u8> = fixed_regs.iter().map(|&(r, _)| r).collect();
+        let mut mem_scratch: Vec<Option<(u8, bool)>> =
+            Vec::with_capacity(outputs.len() + inputs.len());
         for (i, op) in outputs.iter().enumerate() {
             let raw = output_constraints.get(i).map(String::as_str).unwrap_or("=r");
             mem_scratch.push(if mem_needs_scratch(op, raw) {
-                // 池耗尽时退回 r12（旧行为），至少语义上是地址寄存器。
-                Some(self.alloc_asm_mem_scratch(&clobber_gp))
+                // 第二项 = 是否"借号"（池内四个号全被活值占着时压栈保存后借用）。
+                Some(self.alloc_asm_mem_scratch(&clobber_gp, &fixed_gp))
             } else {
                 None
             });
@@ -394,7 +569,7 @@ impl Codegen {
         for (i, op) in inputs.iter().enumerate() {
             let raw = input_constraints.get(i).map(String::as_str).unwrap_or("r");
             mem_scratch.push(if mem_needs_scratch(op, raw) {
-                Some(self.alloc_asm_mem_scratch(&clobber_gp))
+                Some(self.alloc_asm_mem_scratch(&clobber_gp, &fixed_gp))
             } else {
                 None
             });
@@ -404,28 +579,32 @@ impl Codegen {
         // 规划期不再持有 `&mut RegBank`，因此操作数求值（`prepare_asm_binding` 等
         // `&mut self` 方法）可以与规划器同时活跃。规划结束后由 `planner.finish(&mut reg_bank)`
         // 一次性把 callee-saved 号 claim 回占用真源。
-        let owned_gp: Vec<u8> = self.reg_bank.owned_gp();
+        //
+        // §5.42：帧头只为**计划内**的 callee-saved 号留保存槽（``cs_slots =
+        // callee_plan.count_ones()``），所以计划外的池号一律不得发给 asm —— 发了就是
+        // 「序言没保存、asm 却毁掉它」。把它们并进排除集（不是 clobber 集：asm 结束
+        // 后它们仍属于调用方）。固定约束（`"b"`/`{r12}`）的号已由
+        // `compute_callee_plan` 收进计划，不会出现在这里。
+        let mut owned_gp: Vec<u8> = self.reg_bank.owned_gp();
+        for &pool_reg in &[3u8, 12, 14, 15] {
+            if !self.reg_bank.is_in_plan(pool_reg) {
+                owned_gp.push(pool_reg);
+            }
+        }
         let mut planner = AsmRegisterPlanner::new(&owned_gp, &clobber_gp, &clobber_xmm);
 
-        // 预扫描固定寄存器约束（输出 + 输入，含 `{eax}` 这类显式寄存器）：先于任何
-        // 通用分配预留，避免前面的 `"r"` 操作数抢占后面固定约束要的号（同一句 asm
-        // 两个操作数共享一个号 = 静默错值）。输入侧此前没有这一步：`"r"(a), "c"(b)`
-        // 会先给 a 发 rax，再让 b 用 rcx；换一个 seed 就撞号。
-        for (oc, is_out) in output_constraints
-            .iter()
-            .map(|c| (c, true))
-            .chain(input_constraints.iter().map(|c| (c, false)))
-        {
-            if let Some(reg) = Self::fixed_gp_of_constraint(oc) {
-                planner.reserve_gp(
-                    reg,
-                    if is_out {
-                        AsmRegUse::Output
-                    } else {
-                        AsmRegUse::Input
-                    },
-                );
-            }
+        // 预扫描固定寄存器约束：先于任何通用分配预留，避免前面的 `"r"` 操作数抢占
+        // 后面固定约束要的号（同一句 asm 两个操作数共享一个号 = 静默错值）。
+        // 号码表已在 scratch 分配前算好（`fixed_regs`），与那边同一真源。
+        for &(reg, is_out) in &fixed_regs {
+            planner.reserve_gp(
+                reg,
+                if is_out {
+                    AsmRegUse::Output
+                } else {
+                    AsmRegUse::Input
+                },
+            );
         }
 
         // ===== 处理 outputs =====
@@ -442,12 +621,19 @@ impl Codegen {
             if let Some(n) = match_digit {
                 if (n as usize) < slots.len() {
                     let slot = &slots[n as usize];
+                    // `meta` 与 `slots` 必须同长：它按**下标**就是操作数号（写回、
+                    // early-clobber 重分配、`bindings` 与下面的碰撞检查都按下标取）。
+                    // 旧写法只在 `Slot::Reg` 臂 push，`"0"`/`"1"` 匹配到一个立即数/内存
+                    // 操作数时后面每个操作数的 meta 条目整体前移一位 —— 与 §5.11 同一族
+                    // 的静默错位，只是发生在输出侧。
                     match slot {
                         Slot::Imm(s) => {
                             map.insert(format!("%{idx}"), s.clone());
+                            meta.push((0, 0, true, false, 0));
                         },
                         Slot::Mem(s) => {
                             map.insert(format!("%{idx}"), s.clone());
+                            meta.push((0, 0, true, true, 0));
                         },
                         Slot::Reg(r, name) => {
                             let nreg = *r;
@@ -546,6 +732,20 @@ impl Codegen {
             // 立即数约束且操作数可常量求值
             if matches!(letter, "i") && Self::asm_constraint_is_immediate(raw) {
                 if let Some(val) = self.eval_asm_operand(op) {
+                    // 输出侧走到这里说明 `asm_pick_sub_constraint` 选的就是 `i`
+                    // （约束里没有 `r`/`m`/`g` 备选），越界在 gcc 里是
+                    // `impossible constraint in 'asm'`，不能默默截成 imm8。
+                    if !crate::codegen::shared::asm_constraints::immediate_text_fits(raw, &val) {
+                        self.asm_reject(&format!(
+                            "impossible constraint in 'asm': immediate {val} out of range for \
+                             constraint \"{raw}\" (operand {idx}, in function {})",
+                            if self.current_func_name.is_empty() {
+                                "<unknown>"
+                            } else {
+                                &self.current_func_name
+                            }
+                        ));
+                    }
                     // 字符串字面量立即数: eval_asm_operand 返回 .L.str.const.<hash> label,
                     // 但 codegen 之前没把这个字符串落进 string_pool (g_expr_literal 才会
                     // 落池; 内联汇编里 "%c" 把 label 直接嵌入自定义节, 不经 gen_expr).
@@ -577,8 +777,17 @@ impl Codegen {
 
             // 内存操作数 (m 优先)
             if Self::asm_constraint_prefers_memory(raw, is_inout) {
-                let scratch = mem_scratch.get(idx).copied().flatten().unwrap_or(12);
-                if let Some(mem) = self.asm_memory_operand_str(op, scratch) {
+                let scratch = mem_scratch
+                    .get(idx)
+                    .copied()
+                    .flatten()
+                    .map(|(r, _)| r)
+                    .unwrap_or(12);
+                let op_name = output_names.get(op_idx).and_then(|n| n.as_deref());
+                let allow_static = op_name.is_some_and(|n| indirect_targets.contains(n))
+                    || indirect_targets.contains(&idx.to_string())
+                    || Self::asm_memory_token_plain(asm_str, op_name, idx);
+                if let Some(mem) = self.asm_memory_operand_str(op, scratch, allow_static) {
                     map.insert(format!("%{idx}"), mem.clone());
                     slots.push(Slot::Mem(mem));
                     meta.push((0, 0, true, true, if early { 1 } else { 0 }));
@@ -706,13 +915,16 @@ impl Codegen {
                         idx += 1;
                         continue;
                     }
-                    // 非 Reg slot (Imm/Mem): 直接复制即可
+                    // 非 Reg slot (Imm/Mem): 直接复制即可（`meta` 同样必须同长，
+                    // 理由见输出侧的 match-digit 臂）
                     match slot {
                         Slot::Imm(s) => {
                             map.insert(format!("%{idx}"), s.clone());
+                            meta.push((0, 0, false, false, 0));
                         },
                         Slot::Mem(s) => {
                             map.insert(format!("%{idx}"), s.clone());
+                            meta.push((0, 0, false, true, 0));
                         },
                         Slot::Reg(_, _) => unreachable!(),
                     }
@@ -785,27 +997,54 @@ impl Codegen {
             // 立即数约束且操作数可常量求值
             if Self::asm_constraint_is_immediate(raw) {
                 if let Some(val) = self.eval_asm_operand(op) {
-                    if let Expr::String { data, .. } = op {
-                        if !self.string_pool.contains_key(data) {
-                            let o = self.rodata.len() as u64;
-                            self.rodata.extend_from_slice(data);
-                            self.string_pool.insert(data.clone(), o);
+                    // 立即数**备选**要走一遍字母的取值范围：`"Ir"` 的 `I` 只接 0..31，
+                    // 超范围时 gcc 会改用备选 `r`（寄存器），而 CPU 的
+                    // `bts/btr mem,reg` 才会按 `nr/64*8` 调整地址。旧写法无视范围
+                    // 当 `i` 代成 `$100`，而 `btsq $100,(mem)` 由 CPU 按
+                    // `imm & 63` 取位、不做地址调整 —— 内核 `init_rt_rq` 的
+                    // delimiter 位（MAX_RT_PRIO=100）就这样落在 bit 36。
+                    if crate::codegen::shared::asm_constraints::immediate_text_fits(raw, &val) {
+                        if let Expr::String { data, .. } = op {
+                            if !self.string_pool.contains_key(data) {
+                                let o = self.rodata.len() as u64;
+                                self.rodata.extend_from_slice(data);
+                                self.string_pool.insert(data.clone(), o);
+                            }
                         }
+                        let att_val = if val.starts_with('$') {
+                            val.clone()
+                        } else if val.starts_with('-')
+                            || val.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        {
+                            format!("${val}")
+                        } else {
+                            val.clone()
+                        };
+                        map.insert(format!("%{idx}"), att_val.clone());
+                        slots.push(Slot::Imm(att_val));
+                        meta.push((0, 0, false, false, 0));
+                        idx += 1;
+                        continue;
                     }
-                    let att_val = if val.starts_with('$') {
-                        val.clone()
-                    } else if val.starts_with('-')
-                        || val.chars().next().is_some_and(|c| c.is_ascii_digit())
-                    {
-                        format!("${val}")
-                    } else {
-                        val.clone()
-                    };
-                    map.insert(format!("%{idx}"), att_val.clone());
-                    slots.push(Slot::Imm(att_val));
-                    meta.push((0, 0, false, false, 0));
-                    idx += 1;
-                    continue;
+                    // 值超出受限字母的范围：只有「全立即数」约束才是 gcc 的
+                    // impossible constraint；带 `r`/`m` 备选的落到下面的寄存器分支，
+                    // 与 gcc 的备选选择一致（这正是 `"Ir"(100)` 该走的路）。
+                    if Self::asm_constraint_is_immediate_only(raw) {
+                        self.asm_reject(&format!(
+                            "impossible constraint in 'asm': immediate {val} out of range for \
+                             constraint \"{raw}\" (operand {idx}, in function {})",
+                            if self.current_func_name.is_empty() {
+                                "<unknown>"
+                            } else {
+                                &self.current_func_name
+                            }
+                        ));
+                        map.insert(format!("%{idx}"), String::new());
+                        slots.push(Slot::Imm(String::new()));
+                        meta.push((0, 0, false, false, 0));
+                        idx += 1;
+                        continue;
+                    }
                 }
                 // 走到这里：约束只能接立即数，操作数却不是编译期常量（内联没能把实参传进来）。
                 // GCC 对这一形状直接报 `impossible constraint in 'asm'`；往下掉去分配寄存器
@@ -842,8 +1081,17 @@ impl Codegen {
 
             // 内存操作数
             if Self::asm_constraint_prefers_memory(raw, is_inout) {
-                let scratch = mem_scratch.get(idx).copied().flatten().unwrap_or(12);
-                if let Some(mem) = self.asm_memory_operand_str(op, scratch) {
+                let scratch = mem_scratch
+                    .get(idx)
+                    .copied()
+                    .flatten()
+                    .map(|(r, _)| r)
+                    .unwrap_or(12);
+                let op_name = input_names.get(op_idx).and_then(|n| n.as_deref());
+                let allow_static = op_name.is_some_and(|n| indirect_targets.contains(n))
+                    || indirect_targets.contains(&idx.to_string())
+                    || Self::asm_memory_token_plain(asm_str, op_name, idx);
+                if let Some(mem) = self.asm_memory_operand_str(op, scratch, allow_static) {
                     map.insert(format!("%{idx}"), mem.clone());
                     slots.push(Slot::Mem(mem));
                     meta.push((0, 0, false, true, 0));
@@ -1110,6 +1358,82 @@ impl Codegen {
             }
         }
 
+        // ===== fail-closed：两个输出不得被绑到同一块存储 =====
+        //
+        // §5.11 的现场：命名 `"+m"(*v)` 与模板里不可见的 `"=@ccz"(c)` 解析到同一个
+        // `-64(%r13)` —— 比较交换打到了条件码变量自己的帧槽上，`v` 永不写回、`c`
+        // 读回垃圾，而整条链**一个警告都没有**。绑定错了就是产物错了，所以这里把它
+        // 钉成编译错误而不是继续生成。
+        //
+        // 只比较**静态可判定**的形态：内存操作数解析出的地址串，与 Ident 输出写回的
+        // 帧槽 / `符号(%rip)`（`@cc`/x87/MMX/段寄存器/显式子寄存器的写回也是 Ident 的槽位，
+        // 同一个式子算）。驻足在寄存器里的非 Ident 输出（`"=r"(a[i])`）目的地址各自独占
+        // 一个号，静态无从判定，不在此列。
+        //
+        // 不报的情况：带匹配数字的输出（`"0"`/`"1"` …）—— 它**天生**就是与它引用的那个
+        // 操作数同一块存储，那就是匹配约束的含义。
+        //
+        // 这里**不能**拿「两个操作数写法相同」当豁免条件去对齐 gcc：§5.11 的错位恰好
+        // 会把 `"+m"(*v)` 改写成 `Ident{c}`，于是两侧看起来都是同一个 `c` —— 错位自己的
+        // 指纹就是「两个输出指向同一变量」。`"=m"(x), "=r"(x)` 这类写法在 gcc 里也是
+        // 谁后写谁赢的歧义式，真实代码不会依赖它；把它一起钉住换来的是这一族静默
+        // 错绑不再可能漏网（全量 gcc-c-torture 与内核树已建部分实测无命中站点）。
+        if !self.current_func_name.is_empty() {
+            let mut dests: Vec<(usize, String, String)> = Vec::new();
+            for i in 0..num_outputs {
+                let raw = output_constraints.get(i).map(String::as_str).unwrap_or("=r");
+                if Self::parse_asm_constraint_flags(raw).3.is_some() {
+                    continue;
+                }
+                let Some(&(_, _, is_out, is_mem, _)) = meta.get(i) else {
+                    continue;
+                };
+                if !is_out {
+                    continue;
+                }
+                let Some(op) = outputs.get(i) else {
+                    continue;
+                };
+                let dest = if is_mem {
+                    match slots.get(i) {
+                        Some(Slot::Mem(s)) if !s.is_empty() => Some(s.clone()),
+                        _ => None,
+                    }
+                } else if let Expr::Ident { name, .. } = op {
+                    if self.is_global_not_local(&name.name) {
+                        Some(format!("{}(%rip)", self.resolve_global_key(&name.name)))
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        Some(format!("{off}(%r13)"))
+                    }
+                } else {
+                    None
+                };
+                if let Some(d) = dest {
+                    dests.push((i, d, format!("{}", crate::const_eval::ExprDebug(op))));
+                }
+            }
+            for a in 0..dests.len() {
+                for b in (a + 1)..dests.len() {
+                    if dests[a].1 != dests[b].1 {
+                        continue;
+                    }
+                    self.diag_asm_operand_conflict(&format!(
+                        "inline asm output operands {} and {} are both bound to storage '{}' \
+                         (operands: {} and {}) — two outputs must not share one destination; \
+                         use a matching constraint if they are meant to be the same operand \
+                         (in function {})",
+                        dests[a].0,
+                        dests[b].0,
+                        dests[a].1,
+                        dests[a].2,
+                        dests[b].2,
+                        self.current_func_name,
+                    ));
+                }
+            }
+        }
+
         // x87 FPU 栈加载: 每 fld 都会把栈顶 (st(0)) 压向 st(1), 因此
         // **目标 st 号大的最后加载** 才能让 st(0) = st_idx=0 的操作数.
         // 先加载 st_idx=N (N>=1), 最后加载 st_idx=0; 这样 st(0) 是最后一次
@@ -1211,7 +1535,12 @@ impl Codegen {
                 xmm_width: *xmm_w,
                 saved_addr_reg: saved.and_then(|(_, r, _)| r),
                 saved_addr_slot: saved.and_then(|(_, _, s)| s),
-                mem_addr_reg: mem_scratch.get(i).copied().flatten(),
+                mem_addr_reg: mem_scratch.get(i).copied().flatten().map(|(r, _)| r),
+                mem_addr_borrowed: mem_scratch
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|(_, borrowed)| borrowed),
             });
         }
         // name aliases
@@ -1230,7 +1559,44 @@ impl Codegen {
                 }
             }
         }
+        if Self::asm_operand_map_dbg() {
+            let mut kv: Vec<_> = map.iter().collect::<Vec<_>>();
+            kv.sort();
+            eprintln!(
+                "[DBG-ASM]   slots={} bindings={} map={}",
+                slots.iter().map(|s| match s {
+                    Slot::Imm(t) => format!("Imm({t:?})"),
+                    Slot::Mem(t) => format!("Mem({t:?})"),
+                    Slot::Reg(r, n) => format!("Reg({r},{n})"),
+                }).collect::<Vec<_>>().join(" | "),
+                bindings.iter().map(|b| format!("reg={} out={} mem={} mm={} sa={:?}/{:?}", b.reg, b.is_output, b.is_mem, b.xmm_width, b.saved_addr_reg, b.saved_addr_slot)).collect::<Vec<_>>().join(" | "),
+                kv.iter().map(|(k, v)| format!("{k}=>{v}")).collect::<Vec<_>>().join(" "),
+            );
+        }
         map
+    }
+
+    /// 同一条 asm 的两个输出被绑到同一块存储 —— 硬失败（判据与理由见
+    /// `build_asm_operand_map` 里的 fail-closed 段）。
+    ///
+    /// 为什么不走 `asm_reject`：那条通道的语义是「这条指令 dcc 编不出来」，
+    /// 拼出来的文本与 `--asm-fallback=gas` 提示对「绑定错了」全是误导；而绑定错
+    /// 正是 §5.11 那种能编过、能链接、开机 0.15 s 才 #GP 的静默产物缺陷。
+    fn diag_asm_operand_conflict(&mut self, msg: &str) {
+        use crate::diagnostics::{Diagnostic, Severity, Span};
+        let (file, line) = self.asm_src_pos();
+        self.diagnostics.push(Diagnostic {
+            sev: Severity::Error,
+            code: Self::DIAG_ASM_OPERAND_CONFLICT,
+            msg: msg.to_string(),
+            span: Span::point(if file.is_empty() { "<asm>" } else { &file }, line.max(1), 1),
+            hint: Some(
+                "两个输出要写同一个操作数请用匹配约束（如 \"=r\"(x) 与 \"1\"），要写不同的对象请换变量；\
+                 若你确信这段 asm 是合法的，那就是 dcc 把操作数绑错了 —— 请附上本条报错与最小复现件"
+                    .to_string(),
+            ),
+            source_line: None,
+        });
     }
 
     /// 取一个可在本条 asm 里当内存操作数地址的 callee-saved 号。
@@ -1242,17 +1608,46 @@ impl Codegen {
     ///
     /// 按号逐个试（`alloc_temp_named`）而不是先拿 `alloc_temp` 再退让：退让只能靠
     /// `claim` 把号永久钉住，那会让同一个函数里后续每条 asm 可用的号越用越少。
-    fn alloc_asm_mem_scratch(&mut self, clobber_gp: &HashSet<u8>) -> u8 {
-        for &reg in &[3u8, 12, 14, 15] {
-            if clobber_gp.contains(&reg) {
-                continue;
-            }
+    /// 返回值第二项表示这个号是**借来**的（见下）。
+    fn alloc_asm_mem_scratch(
+        &mut self,
+        clobber_gp: &HashSet<u8>,
+        fixed_gp: &HashSet<u8>,
+    ) -> (u8, bool) {
+        let candidates = |clobber_gp: &HashSet<u8>, fixed_gp: &HashSet<u8>| {
+            [3u8, 12, 14, 15]
+                .into_iter()
+                .filter(|reg| !clobber_gp.contains(reg) && !fixed_gp.contains(reg))
+                .collect::<Vec<u8>>()
+        };
+        for reg in candidates(clobber_gp, fixed_gp) {
+            // 被本条 clobber 的号不能用；被固定约束（`"b"`→rbx 等）钉住的号同样
+            // 不能用：地址先装进去、随后被约束值覆盖就是 §5.20 的 cmpxchg16b。
             if self.reg_bank.alloc_temp_named(reg) {
-                return reg;
+                return (reg, false);
             }
         }
-        // 池耗尽：退回最后一个候选（r12，旧行为）；调用方照旧用 `(%r12)`。
-        12
+        // 池里四个号全被活值占着。旧实现「退回 r12」是**静默错值**：r12 正握着还要
+        // 用的值，模板把地址写进去就把它盖掉了 —— 内核实测 `__blk_mq_alloc_disk` 的
+        // `set_bit(GD_OWNS_QUEUE, &disk->state)` 因此让函数返回 `disk + 0x160`，
+        // `add_disk_fwnode` 读到 `disk->queue == NULL`，init 崩在地址 0x10。
+        //
+        // 借一个「正持有值」的号，但在借出前把原值压栈：`sub rsp,8` + `push` 合计
+        // 16 字节，`%rsp` 的 call 点对齐不变式不受影响；asm 主体之后由
+        // `release_asm_mem_scratch` 按 LIFO `pop` 回来（借几个就弹几个，顺序取反）。
+        for reg in candidates(clobber_gp, fixed_gp) {
+            if self.reg_bank.is_allocated(reg) && !self.reg_bank.is_banned(reg) {
+                self.emit_sub_rsp(8);
+                self.push(reg);
+                return (reg, true);
+            }
+        }
+        // 一个都借不到（全被 clobber/固定约束排除，或全被禁用）：没有正确产物可发，
+        // 记错误让本 TU 失败，而不是再静默盖掉一个活值。
+        self.asm_reject(
+            "inline asm 的内存操作数地址找不到可用寄存器（callee-saved 池四个号全被 clobber/固定约束排除）",
+        );
+        (12, false)
     }
     /// Prepare an asm operand.  `is_pure_output` is true when the constraint is
     /// `=r` (write-only — asm will completely overwrite, no need to pre-load

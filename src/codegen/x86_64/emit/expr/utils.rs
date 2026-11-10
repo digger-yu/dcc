@@ -875,7 +875,21 @@ impl Codegen {
         //   Signed 32-bit results must be sign-extended, not zero-extended.
         // This is critical for correct unsigned arithmetic: `0U ^ (short)-0x8000`
         // must use 32-bit XOR to get 0xFFFF8000 (zero-extended), not 0xFFFFFFFFFFFF8000.
-        let op_size = lt.size().max(rt.size());
+        // 指针/数组类操作数的运算宽度恒为**地址宽度**（64 位），不能由 `size()` 推：
+        //   * 不完整数组 `T a[]` 的 `Array(_, Const(0)).size()` 是 0；
+        //   * 遇到无符号下标时 `op_size <= 4 && is_unsigned` 同时成立，`arr + i`
+        //     被编成 `add %r8d,%eax` —— 32 位加法把高 32 位地址清零。
+        // 现场（§5.20）：内核 `cpuhp_get_step()` 的 `return cpuhp_hp_states + state;`
+        // 算出 0x87c5dfb0（应为 0xffffffff87c5dfb0），boot 在
+        // `__cpuhp_setup_state_cpuslocked` 读该地址而 #PF→#DF→triple fault。
+        // C11 6.5.6：指针算术以指针类型为准；数组在此处已衰减为指针。
+        let addr_operand =
+            |t: &Type| matches!(t, Type::Ptr(_) | Type::Array(_, _) | Type::Func(..));
+        let op_size = if addr_operand(lt) || addr_operand(rt) {
+            8
+        } else {
+            lt.size().max(rt.size())
+        };
         let is_unsigned = !is_signed;
         let use_32bit = !is_cmp
             && !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul | BinOp::Shl | BinOp::Shr)
@@ -1511,6 +1525,60 @@ impl Codegen {
         }
     }
 
+    /// 未识别初始化式的零占位长度：**目标槽宽是权威**。
+    ///
+    /// 表达式自身的类型可能大于槽宽（指针字段收到数组类型的成员表达式时就是数组
+    /// 长度）。按它发字节会让调用方（`gen_global_init_list` 的字段写回）把结构体
+    /// 撑大，数组 stride 随之错位（§5.33：`security_hook_list` 从 24 变 64）。
+    fn zero_slot(width: usize, e: &Expr) -> Vec<u8> {
+        let n = if width > 0 { width } else { e.ty().size().max(1) };
+        vec![0u8; n]
+    }
+
+    /// 指针目标收到**数组类型**的复合字面量：这是 C11 6.3.2.1p3 的
+    /// 数组→指针退化，值是那个匿名数组的**地址**，不是数组内容。
+    ///
+    /// 内核到处在用这条写法：`#define CMDS(cmds...) (const u8 []){ cmds, 0 }`
+    /// 让 `.commands = (const u8 []){…}` 生成一张匿名命令字节表。若把它当成
+    /// 「嵌套初始化列表」把内容铺进指针槽，指针值就成了内容的前 8 字节 ——
+    /// kbuild23 的 `ata_eh_cmd_timeout_table[].commands` 因此等于 `{0xec, 0xa1}`
+    /// 这两字节 0xa1ec（`.data` 里**没有**任何重定位），第一次
+    /// `ata_lookup_timeout_table` 解引用即 #PF（CR2 = 0xa1ec）。
+    ///
+    /// 结构体/联合体复合字面量**不在**此列：左值不会退化为指针，
+    /// `struct S *p = (struct S){…}` 本身就是约束违反（gcc 报
+    /// "incompatible types"），取地址必须显式写 `&(struct S){…}`。
+    pub(crate) fn ptr_decay_literal(target_ty: &Type, e: &Expr) -> bool {
+        matches!(target_ty, Type::Ptr(_))
+            && matches!(e, Expr::CompoundLit { .. } | Expr::InitList { .. })
+            && matches!(e.ty(), Type::Array(..))
+    }
+
+    /// 指针退化初始化式的字节生成：物化匿名对象，再发一条 64 位重定位
+    /// （`rel` 的节约定见 [`Self::push_data_symbol_rel`]）。
+    /// 返回 `None` 表示形状不匹配，调用方继续走原有路径。
+    pub(crate) fn ptr_decay_init(
+        &mut self,
+        target_ty: &Type,
+        e: &Expr,
+        rel: Option<(u64, Option<usize>)>,
+        width: usize,
+        rodata_slots: bool,
+    ) -> Option<Vec<u8>> {
+        if !Self::ptr_decay_literal(target_ty, e) {
+            return None;
+        }
+        let sz = width.max(8);
+        if self.relocatable {
+            let (anon_name, _) = self.materialize_compound_literal_rel(e)?;
+            self.push_data_symbol_rel(rel, anon_name, R_X86_64_64, 0);
+            Some(vec![0u8; sz])
+        } else {
+            let (_, vaddr) = self.materialize_compound_literal(e, rodata_slots)?;
+            Some(vaddr.to_le_bytes().to_vec())
+        }
+    }
+
     pub(crate) fn eval_const_expr(
         &mut self,
         e: &Expr,
@@ -1524,6 +1592,12 @@ impl Codegen {
         // 只靠 `width == 16` 无法区分 long double 与 binary128 ⇒ 必须带类型。
         let is_float = target_ty.is_real_float();
         let is_f128 = matches!(target_ty, Type::Float128);
+        // C11 6.3.2.1p3 退化：指针目标的聚合型字面量是匿名对象的地址
+        // （`ptr_decay_literal` 有完整来由）。必须在下面所有「按内容编码」的
+        // 分支之前拦截，否则指针槽会拿到内容的前 8 字节。
+        if let Some(bytes) = self.ptr_decay_init(target_ty, e, rel, width, rodata_slots) {
+            return bytes;
+        }
         // 字符串字面量: 不能走 eval_full —— 它返回 ConstValue::Str, 落到
         // 下方 _ 分支会被 0 填充 (char buf[][8] = {"hello"} 元素全为 0)。
         // 指针类型由调用方在 Ptr 上下文特判 (emit_string_ptr_slot);
@@ -1761,6 +1835,10 @@ impl Codegen {
                         };
                         let c = FloatConst::from_int(&target_ty, v);
                         Self::float_data_bytes(c, size)
+                    } else if matches!(target_ty, Type::Bool) {
+                        // `_Bool` 元素/成员同样要归一化（C11 6.3.1.2p1）：取低字节
+                        // 会把 `static _Bool a[] = { 0x200 };` 写成 0（§5.30）。
+                        vec![(v != 0) as u8]
                     } else {
                         let bytes = v.to_le_bytes();
                         bytes[..size.min(bytes.len())].to_vec()
@@ -1798,10 +1876,14 @@ impl Codegen {
                 _ => {
                     if let Ok(value) = const_eval::eval(e) {
                         let size = width.max(1);
+                        // `_Bool` 标量（含位域/成员）同样要归一化（C11 6.3.1.2p1）。
+                        if matches!(target_ty, Type::Bool) {
+                            return vec![(value != 0) as u8];
+                        }
                         let bytes = value.to_le_bytes();
                         return bytes[..size.min(bytes.len())].to_vec();
                     }
-                    vec![0u8; width.max(e.ty().size())]
+                    Self::zero_slot(width, e)
                 },
             }
         } else {
@@ -1870,10 +1952,10 @@ impl Codegen {
                             let byte_off = (i as usize).min(data.len());
                             self.emit_string_ptr_slot(rel, &data[byte_off..], rodata_slots)
                         } else {
-                            vec![0u8; width.max(e.ty().size())]
+                            Self::zero_slot(width, e)
                         }
                     },
-                    _ => vec![0u8; width.max(e.ty().size())],
+                    _ => Self::zero_slot(width, e),
                 },
                 // Strip casts to handle (void *)&"str"[0],
                 // (char *)&"hello"[1], etc.
@@ -1902,7 +1984,7 @@ impl Codegen {
                     }
                     vec![0u8; width.max(8)]
                 },
-                _ => vec![0u8; width.max(e.ty().size())],
+                _ => Self::zero_slot(width, e),
             }
         }
     }

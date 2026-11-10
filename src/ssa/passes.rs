@@ -65,66 +65,66 @@ pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
     // 产物级判据见 scripts/check_pipe_structure.sh）。
     // 二分定位仍可用：`DCC_SSA_OFF=pipe` 关掉本 pass。
     if !ssa_dbg_off("pipe") {
-        run_pipelining(func);
+        crate::pass_probe::probe_fn("ssa.pipe", || run_pipelining(func));
     }
     // 第一轮: 不依赖 GVN/SCCP 的 pass
     if !ssa_dbg_off("sr") {
-        strength_reduction(func);
+        crate::pass_probe::probe_fn("ssa.sr", || strength_reduction(func));
     }
     if !ssa_dbg_off("ivop") {
-        ivop(func);
+        crate::pass_probe::probe_fn("ssa.ivop", || ivop(func));
     }
     if !ssa_dbg_off("tco") {
-        tail_call_optimization(func);
+        crate::pass_probe::probe_fn("ssa.tco", || tail_call_optimization(func));
     }
     // P4 别名分析 / P13 别名集合 已删（Steensgaard 结果从入口到管线都被丢弃，
     // 对机器码零影响），P6 PGO / P7 自动并行化 已删（它们只往不存在的符号
     // `__dcc_hot_hint` / `__dcc_parallel_hint` 插 Store，而重建名单显式丢弃这些写）。
     // 与已删的 P11 同一类，理由与实测证据见下文「已删除的伪实现」说明。
     if !ssa_dbg_off("specex") {
-        speculative_execution(func);
+        crate::pass_probe::probe_fn("ssa.specex", || speculative_execution(func));
     }
     // P18 DSE: 用自有位置模型（Named/Via/Opaque）判「再没人读」的写。
     if !ssa_dbg_off("dse") {
-        dead_store_elim(func);
+        crate::pass_probe::probe_fn("ssa.dse", || dead_store_elim(func));
     }
     // 第二轮: GVN/SCCP 需要 SSA 值层面分析
     if !ssa_dbg_off("sccp") {
-        sparse_conditional_constant_propagation(func);
+        crate::pass_probe::probe_fn("ssa.sccp", || sparse_conditional_constant_propagation(func));
     }
     // P15a member_store_forward: 跨块把「全路径最后都写同一 SSA 名」的结构体标量
     // 字段的 MemberLoad 折叠成该名 (拷贝传播), 让 `if(c) a.x=i; else a.x=i; if(a.x!=i)`
     // 里的 a.x 变 i。必须排在 VRP 之前: 折叠出的 `i != i` 由 VRP 折恒假、jt/dbe 删除死调用。
     if !ssa_dbg_off("msf") {
-        member_store_forward(func);
+        crate::pass_probe::probe_fn("ssa.msf", || member_store_forward(func));
     }
     // P15b VRP: SCCP 已把能折的常量落到位 (且 eval_binop 不折比较, 正是 vrp13.c
     // 一类"区间可证但非常量"的条件缺的那一环)。VRP 在此把区间事实沿边传播,
     // 只把可证恒定的 Branch cond 写成 Operand::Int; 死块/死调用由随后的
     // P19 穿线 + P18/P20 die/dbe 收尾。只改条件操作数, 不改 CFG, 形状与 SCCP 同构。
     if !ssa_dbg_off("vrp") {
-        value_range_propagation(func);
+        crate::pass_probe::probe_fn("ssa.vrp", || value_range_propagation(func));
     }
     // P17 GVN: SCCP 已把能折的常量落到位, 值编号因此能多归一一批同形计算。
     if !ssa_dbg_off("gvn") {
-        gvn(func);
+        crate::pass_probe::probe_fn("ssa.gvn", || gvn(func));
     }
     // P19 jump threading: 常量条件在此已全露出来, 穿线后需要再扫一遍死代码。
     if !ssa_dbg_off("jt") {
-        jump_threading(func);
+        crate::pass_probe::probe_fn("ssa.jt", || jump_threading(func));
     }
     if !ssa_dbg_off("die") {
-        dead_inst_elim(func);
+        crate::pass_probe::probe_fn("ssa.die", || dead_inst_elim(func));
     }
     if !ssa_dbg_off("dbe") {
-        dead_bb_elim(func);
+        crate::pass_probe::probe_fn("ssa.dbe", || dead_bb_elim(func));
     }
     if level >= 3 {
         if !ssa_dbg_off("sched") {
-            instruction_scheduling(func);
+            crate::pass_probe::probe_fn("ssa.sched", || instruction_scheduling(func));
         }
         if !ssa_dbg_off("ubsan") {
-            ubsan_ir_instrument(func);
+            crate::pass_probe::probe_fn("ssa.ubsan", || ubsan_ir_instrument(func));
         }
         // P7 自动并行化 / P6 PGO 曾在此调用（`DCC_SSA_OFF=par|pgo` 可关），已删：
         // 它们只插入对不存在符号的 Store，且这些写在 SSA→AST 重建时被丢弃名单
@@ -271,7 +271,7 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
             } => {
                 if *volatile {
                     true
-                } else if !output_vars.is_empty() || !outputs.is_empty() {
+                } else if !outputs.is_empty() || output_vars.iter().any(|v| v.is_some()) {
                     // asm with outputs: preserved if results are used
                     if let Some(d) = &i.dest {
                         used.contains(&d.name())
@@ -748,7 +748,7 @@ fn inst_defs(inst: &Inst) -> Vec<String> {
         defs.push(d.name());
     }
     if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
-        defs.extend(output_vars.iter().map(|v| v.name()));
+        defs.extend(output_vars.iter().flatten().map(|v| v.name()));
     }
     // 用户声明 (`Decl::Var` 整体保留下来的那条指令) 也是定义：它把带初值的对象建起来。
     // 不报出来，调度器就看不见「值消费者依赖它」这条边，能把声明挖到读者之后（实测
@@ -766,7 +766,7 @@ fn inst_def_bases(inst: &Inst) -> Vec<String> {
         defs.push(d.base.clone());
     }
     if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
-        defs.extend(output_vars.iter().map(|v| v.base.clone()));
+        defs.extend(output_vars.iter().flatten().map(|v| v.base.clone()));
     }
     // 同 `inst_defs`：基名序就是本 IR 的语义序，声明必须是这个链上的一环。
     if let InstKind::PreservedDecl { var, .. } = &inst.kind {
@@ -2344,6 +2344,16 @@ fn non_propagatable_names(func: &Function) -> HashSet<String> {
             if let Some(d) = &inst.dest {
                 versions.entry(d.base.clone()).or_default().insert(d.name());
             }
+            // `InlineAsm` 的 `output_vars` 同样是这个基名的一次**写**。asm 的写回是后端按
+            // `outputs[idx]` 做的，IR 里没有任何指令会去读它前面那个版本，于是「dest 只
+            // 见过一个版本」的假象让 SCCP 把上一个版本折成常量、再把它的生产者当死代码
+            // 删掉（实测 `int v = 5; asm volatile("addl $1,%0" : "+m"(v)); return v;` 在
+            // -O2 连 `v = 5` 都不再发射，返回未初始化槽位的垃圾；`"+r"` 同构）。
+            if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
+                for v in output_vars.iter().flatten() {
+                    versions.entry(v.base.clone()).or_default().insert(v.name());
+                }
+            }
         }
     }
     for p in &func.params {
@@ -3130,7 +3140,11 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
     }
 }
 
-fn collect_expr_uses(e: &Expr, out: &mut Vec<String>) {
+/// 收集表达式里**按名字**读到的对象（基名，不是 SSA 名）。
+///
+/// 可见性放到 `ssa` 模块级：`liveness` 要用它回答「这条 `PreservedDecl` 的
+/// 初始化式读了哪些基名」—— 那些读取在 IR 里没有 use 边（报告 §5.38）。
+pub(super) fn collect_expr_uses(e: &Expr, out: &mut Vec<String>) {
     match e {
         Expr::Ident { name, .. } => out.push(name.name.clone()),
         Expr::Unary { e, .. }
@@ -5173,7 +5187,7 @@ mod tests {
                     }],
                     output_names: vec![None],
                     output_constraints: vec!["=r".into()],
-                    output_vars: vec![output.clone()],
+                    output_vars: vec![Some(output.clone())],
                     inputs: vec![Operand::Var(input.clone())],
                     input_names: vec![None],
                     input_constraints: vec!["r".into()],

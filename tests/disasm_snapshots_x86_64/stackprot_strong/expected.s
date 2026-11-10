@@ -1,7 +1,7 @@
 scalar_only:
 push %r13
 mov %rsp,%r13
-sub $0xd0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x50(%r13)
@@ -14,14 +14,14 @@ mov $0x3,%r8d
 imul %r8,%rax
 movslq %eax,%rax
 mov -0x10(%r13),%rbx
-add $0xd0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 <nop padding>
 with_array:
 push %r13
 mov %rsp,%r13
-sub $0x100,%rsp
+sub $0x80,%rsp
 mov %fs:0x28,%rax
 mov %rax,-0x8(%r13)
 mov %rbx,-0x10(%r13)
@@ -72,14 +72,14 @@ je <with_array>
 call <with_array>
 mov -0x10(%r13),%rbx
 <nop padding>
-add $0x100,%rsp
+add $0x80,%rsp
 pop %r13
 ret
 <nop padding>
 with_addr:
 push %r13
 mov %rsp,%r13
-sub $0xe0,%rsp
+sub $0x70,%rsp
 mov %fs:0x28,%rax
 mov %rax,-0x8(%r13)
 mov %rbx,-0x10(%r13)
@@ -112,16 +112,16 @@ call <with_addr>
 mov -0x10(%r13),%rbx
 mov -0x18(%r13),%r12
 <nop padding>
-add $0xe0,%rsp
+add $0x70,%rsp
 pop %r13
 ret
 <nop padding>
 plain:
 push %r13
 mov %rsp,%r13
-sub $0xb0,%rsp
+sub $0x50,%rsp
 <nop padding>
 movslq 0x0(%rip),%rax
-add $0xb0,%rsp
+add $0x50,%rsp
 pop %r13
 ret

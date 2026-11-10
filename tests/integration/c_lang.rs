@@ -853,6 +853,147 @@ fn int128_mul_div_mod_run_returns_zero() {
     assert_eq!(rc, 0, "int128_mul_div_mod should return 0, got {rc}");
 }
 
+/// §5.22：`__int128` 聚合成员的初始化式必须真的落盘（store 曾整块静默丢失）
+///
+/// `emit_store` 对 size 不在 {1,2,4,8} 的值不发任何指令，struct/union 字段分支
+/// 曾漏掉 `__int128` 那一臂 —— 成员只剩前面的零初始化。现场是内核
+/// `arch/x86/include/asm/cmpxchg_64.h` 的
+/// `union __u128_halves o = { .full = *(_oldp) }, n = { .full = (_new) };`：
+/// `mm/slub.c` 的 `__slab_update_freelist` 里 `o`/`n` 全是 0，`lock cmpxchg16b`
+/// 永远失败，boot 卡在失败返回路径的 `mfence` 上原地重试。
+///
+/// 四档逐挡与 gcc 对拍（错在 AST/SSA 共用的初始化发射上，每档都错）。
+#[test]
+fn int128_member_initializer_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "int128-member-init",
+        include_str!("../fixtures/c/int128_member_init.c"),
+        "`__int128` 成员/元素初始化式整块丢失或高半补齐错（失败码：1=union 指定初始化器、\
+         2=struct 成员、3=位置初始化器、4=常量、5=零扩展、6=符号扩展、7=数组、\
+         8=内核 try_cmpxchg 循环不收敛）",
+    );
+}
+
+/// §5.33: 数组成员表达式（`static_calls_table.capable`，类型
+/// `struct lsm_static_call[2]`）作指针字段的静态初始化式时，必须按 C11
+/// 6.3.2.1p3 退化成「符号 + 字段偏移」的地址常量：缺这一臂则既不发
+/// 重定位（指针恒 NULL），兜底又按数组长度填零，把元素 stride 撑大。
+/// 内核现场：`capability_hooks[]` 的 stride 从 24 变 64，
+/// `security_add_hooks` 读到 `hl->scalls == NULL`，boot 空指针崩。
+#[test]
+fn global_member_array_address_initializer_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "global-member-array-addr-init",
+        include_str!("../fixtures/c/global_member_array_addr_init.c"),
+        "数组成员地址作静态初始化式未折成符号重定位、或元素 stride 被成员数组长度撑大\
+         （失败码：1=首个 .scalls、2=第二个 .scalls 偏移、3=hook 指针、\
+         4=stride、5=数组总大小、6=extern 全局成员偏移、7=&member[i] 回归）",
+    );
+}
+
+/// §5.34: 数组元素是复合字面量 `(T){…}` 时，它已经是整个元素的初始化器，
+/// 不能再被 brace elision 当成扁平标量分组（内核 `static_calls_table` 形状）。
+#[test]
+fn compound_literal_array_element_init_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "compound-lit-array-elem-init",
+        include_str!("../fixtures/c/compound_literal_array_element_init.c"),
+        "复合字面量元素被 brace elision 拆分合并，元素 stride/字段位移错位\
+         （失败码：1/2=静态 capable[0/1]、3/4=静态 settime[0/1]、5=stride/sizeof、\
+         6/7=局部数组 arr[0/1]、8=扁平标量分组回归、9=二维 char 行回归）",
+    );
+}
+
+/// §5.35: 结构体成员 / 数组元素被 **8 字节聚合语句表达式**初始化时，交付轴
+/// （`rvalue_is_buffer_addr`）成立 —— rax 里是物化槽地址，不是值。成员初始化
+/// 路径旧的「size > 8 或 CompoundLit」两条都不命中，把槽地址当成成员值存下。
+/// 内核现场：`mm/mempolicy.c` 的 `preferred_node_policy[nid].v.nodes =
+/// nodemask_of_node(nid)`，`first_node()` 从栈地址里取出位号 3，
+/// `node_data[3]` 为 NULL，`prepare_alloc_pages` 在 0x1508 上 #PF → #DF。
+#[test]
+fn stmt_expr_aggregate_member_init_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "stmt-expr-agg-member-init",
+        include_str!("../fixtures/c/stmt_expr_aggregate_member_init.c"),
+        "8 字节聚合语句表达式的交付地址被当成员值存储\
+         （失败码：1/2=静态数组元素 .v.nodes、4=直接成员赋值、8=局部数组元素、\
+         16=花括号成员回归、32=寄存器交付 Call 回归、64=>8B 语句表达式回归、\
+         128=Ident 拷贝回归、256=标量成员回归）",
+    );
+}
+
+/// §5.36: `for` 初始化子句里的声明带 `__attribute__((cleanup))` 时，
+/// 析构的作用域是**整个 for 语句**（跨迭代存活），不是 parser 合成的那个块。
+/// 内核 `__scoped_guard` 就是这条形状：一旦析构提前，锁在循环体之前就被放掉，
+/// `try_to_wake_up` 的 p->pi_lock 在 IRQ 打开时被丢弃 ⇒ sched_tick 自旋 rq 锁活锁。
+#[test]
+fn scoped_guard_cleanup_scope_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "scoped-guard-cleanup-scope",
+        include_str!("../fixtures/c/scoped_guard_cleanup_scope.c"),
+        "for-init 声明的 cleanup 被就地收尾，guard 体跑在锁外\
+         （失败码：1=体内未持有、2=嵌套、4=break、8=continue、16=return、\
+         32=出语句仍持锁、64=内层 for 误析构、128=重复构造）",
+    );
+}
+
+/// §5.23: `__attribute__((aligned(<常量表达式>)))` 的 mini-parser 必须
+/// 按常量求值到底：枚举常量是操作数，`1 << WORK_STRUCT_PWQ_SHIFT` 不能
+/// 被折成 `1`（那会把 256 对齐静默降成自然对齐）。内核现场：
+/// `struct pool_workqueue {...} __aligned(1 << WORK_STRUCT_PWQ_SHIFT)`
+/// → KMEM_CACHE 的 `.align` 从 256 变 8 → `init_pwq` 的 BUG_ON。
+///
+/// 四档逐档与 gcc 对拍（对齐在 AST 阶段就定了，每档都错）。
+#[test]
+fn aligned_enum_expr_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "aligned-enum-expr",
+        include_str!("../fixtures/c/aligned_enum_expr.c"),
+        "`aligned(表达式)` 里的枚举常量未被求值、或未知操作数被静默折损\
+         （失败码：1=__alignof__ 枚举左移、2=sizeof 取整、3=指定初始化器、\
+         4=静态对象实际地址对齐、5=__aligned(枚举常量)、6=枚举加法、\
+         7=1<<8 字面量、8=乘法、9=文件作用域折叠、10=init_pwq 形状）",
+    );
+}
+
+/// §5.24: 8 字节聚合变量的初始化必须按「交付轴」判整块拷贝。
+/// 内核 `guard(mutex)` 的 `class_mutex_t`（`struct { struct mutex *lock; }`，
+/// 8 字节）由 `__always_inline` 构造器返回；内联后初始化式是 StmtExpr，
+/// rax 里交付的是物化槽地址。旧判据「size > 8 或 CompoundLit」把它当标量，
+/// 变量槽被写成栈地址，destructor 对栈解锁 ⇒ 真实 mutex 永不解锁 ⇒
+/// 第二次加锁自旋自死锁（boot 停在 `RCU Tasks: Setting shift to 0 …`）。
+///
+/// 四档逐档与 gcc 对拍；三个声明站点（函数顶层/块/语句表达式）全覆盖。
+#[test]
+fn agg_init_guard_mutex_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "agg-init-guard-mutex",
+        include_str!("../fixtures/c/agg_init_guard_mutex.c"),
+        "8 字节聚合初始化把物化槽地址当值存进变量（失败码：1=cleanup 变量槽不是\
+         lock 指针、2=真实 mutex 未解锁、3=计数器错、4=函数顶层 8B struct、\
+         5=顶层 4B struct、6=块内声明、7=语句表达式块内声明、\
+         8-11=Ident 拷贝/Deref 目标等回归护栏）",
+    );
+}
+
+/// §5.25: 链式设计符指向位域（`.bits.p = 1`）必须按 `bit_offset` 打包。
+/// 全局静态初始化（`elf/init_list.rs`）与运行时初始化（`gen_init_list`）原来
+/// 都只对单层 `.field` 取位域信息，链式设计符落进普通标量写：值被放在字段
+/// 起始字节、丢掉单元内移位。内核 `arch/x86/kernel/idt.c` 的 `def_idts[]`
+/// 正是这个形状 —— IDT 门的 `p` 位为 0，第一个 `ud2`（`WARN_ON_ONCE`）
+/// 直接 #GP(0x0032) → #DF → triple fault（boot 停在 `NR_IRQS: 4352…`）。
+#[test]
+fn designator_chain_bitfield_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "designator-chain-bitfield",
+        include_str!("../fixtures/c/designator_chain_bitfield.c"),
+        "链式设计符指向位域时未按 bit_offset 打包\
+         （失败码：1-4=全局 packed 位域链 .p/.type/.ist、5=运行时局部、\
+         6=静态局部、7=非 packed 容器 bit8/bit15、8=普通嵌套字段回归、\
+         9=经 union 成员、10=数组元素后链式位域）",
+    );
+}
+
 /// M13.1: float/double 取模软件实装 (divss/divsd + trunc)
 #[test]
 fn float_mod_run_returns_zero() {
@@ -1950,6 +2091,31 @@ fn bitfield_rmw_header() {
     assert_eq!(code, 0, "bitfield_rmw_header checks failed (exit={code})");
 }
 
+/// §5.42 回归：位域初始化列表的 3 个重写槽（地址/容器/新值）必须落在位域 RMW
+/// 带里，不能写死在帧头的 callee-saved 保存区 -24/-32/-40。帧头收紧成
+/// `16 + 8*cs + 8*temps` 后 `cs=0` 的函数帧头只剩 32B，那三个格会落进变量区，
+/// 同一函数里多个位域结构体的初始化互相覆盖（gcc.c-torture bf64-1 一族）。
+#[test]
+#[cfg(unix)]
+fn bitfield_init_list_uses_rmw_band() {
+    let src = include_str!("../fixtures/c/bitfield_init_list_slots.c");
+    for level in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("bitfield-init-list", src, &[level]);
+        assert!(
+            out.status.success(),
+            "{level}: bitfield_init_list_slots 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (rc, stdout, _) = run_exe_bounded(&exe);
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{level}: 位域初始化列表重写槽踩到了变量区/保存区（rc={rc}）{}",
+            String::from_utf8_lossy(&stdout)
+        );
+    }
+}
+
 /// F1b: mixed bitfield write + inc/dec RMW nesting must not overlap
 /// despite sharing the bf_rmw_depth counter. Regression for H1b.
 #[test]
@@ -2240,6 +2406,113 @@ fn multi_dim_array_compiles_and_runs() {
 }
 
 // =================== 嵌套块重声明 ===================
+
+/// 花括号包一层字符串字面量的字符数组（C11 6.7.9p14）：`static char a[] = { "hello" };`
+/// 维度必须是 6 而不是「一项一个元素」的 1。旧实现让初始化器写 6 字节进 1 字节对象
+/// （踩掉后面的静态变量），`sizeof(a) - 1` 退化成 0 —— 内核真实形态：
+/// `fs/coredump.c` 的 `core_modes[]` 被 sysctl 报 `No maxlen`，整张表注册失败。
+#[test]
+fn braced_string_literal_array_dim() {
+    let source = include_str!("../fixtures/c/braced_string_array.c");
+    harness::assert_all_levels_match_gcc(
+        "braced-string-array-dim",
+        source,
+        "`char a[] = { \"…\" }` 的维度/内容与 gcc 不一致",
+    );
+    let (output, exe) = run_compile_and_run("braced-string-array", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "braced string array should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// §5.46: 指针目标的数组型复合字面量是**地址**（C11 6.3.2.1p3 退化），
+/// 不是数组内容。内核形状：`#define CMDS(cmds...) (const u8 []){ cmds, 0 }`
+/// 让 `ata_eh_cmd_timeout_table[].commands` 指向匿名命令字节表。旧行为把
+/// `{0xec, 0xa1}` 这两字节当指针值 0xa1ec 写进 `.data` 且**不发重定位**，
+/// kbuild23 首次 `ata_lookup_timeout_table()` 解引用即 #PF（CR2=0xa1ec）。
+#[test]
+fn ptr_decay_of_array_compound_literal_emits_relocation() {
+    let source = include_str!("../fixtures/c/ptr_decay_compound_array.c");
+    harness::assert_all_levels_match_gcc(
+        "ptr-decay-compound-array",
+        source,
+        "指针目标的数组型复合字面量被当成内容铺进指针槽\
+         （失败码：1/2/3/4=查表命中、5=顶层指针、6/7=指针数组元素）",
+    );
+    // 目标文件级证据：`.data` 里的指针槽必须有指向 `.L.compound.*` 的重定位。
+    // 只跑通不够 —— 值碰巧小于 0x1000 时“内容当指针”也能跑过，但按道理
+    // 数组内容根本不占地址空间，链接器不会给它重定位。
+    let dir = env::temp_dir();
+    let src = dir.join(format!("dcc-ptr-decay-{}.c", temp_tag()));
+    let obj = dir.join(format!("dcc-ptr-decay-{}.o", temp_tag()));
+    fs::write(&src, source).expect("write C fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-O2", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        out.status.success(),
+        "dcc -c stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rel = Command::new("objdump")
+        .args(["-r", "-j", ".data"])
+        .arg(&obj)
+        .output()
+        .expect("objdump -r");
+    let text = String::from_utf8_lossy(&rel.stdout);
+    assert!(
+        text.matches(".L.compound.").count() >= 4,
+        ".data 应至少有 4 条指向 .L.compound.* 的重定位（tab[0]/tab[1]/head/rows[0]/rows[1]），实际:\n{text}"
+    );
+    let (output, exe) = run_compile_and_run("ptr-decay-compound-array", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "ptr-decay compound array should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(src);
+}
+
+/// §5.47: 赋值表达式作数组下标时，下标必须是**赋值结果**（C11 6.5.16p3），
+/// 不是左值地址；同时下标里赋值的副作用不能被常量折叠吞掉。
+///
+/// kbuild23 的真实现场：`clienttab[client->number = c] = client;`
+/// （sound/core/seq/seq_clientmgr.c）被生成成 `imul $8,%rcx,%rcx`，
+/// 其中 rcx 是 `&client->number` 而不是 c，首次执行即 GPF。
+/// 第二个缺陷：`g[(s.n = 4) + 1]` 的赋值被 `compute_index_offset` 按常量
+/// 折叠后整条 store 消失（-O0/-O1）。
+#[test]
+fn assign_expression_as_index_delivers_value_and_keeps_side_effect() {
+    let source = include_str!("../fixtures/c/assign_as_index_value.c");
+    harness::assert_all_levels_match_gcc(
+        "assign-as-index-value",
+        source,
+        "赋值作下标时用左值地址缩放 / 下标副作用被常量折叠丢弃\
+         （失败码：1-3=->、4-5=.、6-7=下标左值、8-9=解引用、10-11=归约、\
+         12-13=指针数组内核原形、14-15=嵌套表达式、16=移位计数）",
+    );
+    let (output, exe) = run_compile_and_run("assign-as-index-value", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "assign-as-index-value should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
 
 /// 嵌套块重声明: 内层块可遮蔽外层变量 (不同类型不报 E0007)
 #[test]
@@ -4506,4 +4779,134 @@ fn constant_p_accepts_string_literals() {
         let rc = run_gcc_cross_check_opt(&format!("constant-p-string-{}", opt), source, &[opt]);
         assert_eq!(rc, 0, "{opt} 下 __builtin_constant_p 的判定与 gcc 不一致，got rc={rc}");
     }
+}
+
+/// §5.28: `op $imm, sym(%rip)` 的 PC32 加数必须减去 disp32 之后的立即数字节数。
+///
+/// 旧实现一律 `addend = off - 4`，而 CPU 取 RIP 的位置在**指令尾**：`addl $9, g(%rip)`
+/// 偏 1 字节写到 `g+1`（读回 0x900 而不是 9），`addl $0x1234, …` 偏 4 字节。
+/// 同一个臂还把 `addb` 编成 0x83（DWORD 写）。夹具用静态变量/数组元素把两种尾长
+/// （imm8/imm32）、移位、字节宽度与 `imul $imm, sym, reg` 全钉住。
+#[test]
+#[cfg(unix)]
+fn asm_mem_imm_symbol_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "asm-mem-imm-symbol",
+        include_str!("../fixtures/c/asm_mem_imm_symbol.c"),
+        "RIP-relative 符号操作数的立即数形状与 gcc 不一致（失败码：1=add imm8 写偏、\
+         2=add imm32、3=sub、4=addq、5=shl、6=sar、7=addb 符号、8=addb 数组元素\
+         哨兵被 DWORD 写破坏、9=imul imm,sym,reg）",
+    );
+}
+
+/// §5.27: 内联汇编 `"m"` / `"+m"` 操作数在 IR 里存地址、重建回左值。
+///
+/// SSA 往返曾把 `*(volatile u32 *)addr` 物化成临时值，发射侧把 `Ident(_tN)`
+/// 当成对象本身 ⇒ 内核 `writel` 写进帧槽而不是 MMIO（IOAPIC 版本 0 / nr_irqs 33 /
+/// `irq_startup` WARN → double fault）。夹具覆盖指针解引用、volatile 指针参数、
+/// 结构体成员、数组元素与 `"+m"` 读改写；旧二进制 -O2 首项即红。
+#[test]
+#[cfg(unix)]
+fn asm_m_operand_delivers_address() {
+    harness::assert_all_levels_match_gcc(
+        "asm-m-operand-addr",
+        include_str!("../fixtures/c/asm_m_operand_addr.c"),
+        "`\"m\"` 操作数没有落到对象上（失败码：1/2=指针解引用写丢、3=读回错、\
+         4=volatile 指针参数、5=结构体成员、6=数组元素、7=\"+m\" 读改写、\
+         8=两次写互相覆盖）",
+    );
+}
+
+/// §5.30: 任何标量转 `_Bool` 的结果是 `(value != 0)`（C11 6.3.1.2p1），
+/// 不是「按宽度截断到 8 位」。`_Bool` 只占 1 字节，`movzbq %al` 看着像
+/// 同一个转换，实际把 0x200（低字节 0）判成假。
+///
+/// 内核现场：`irqd_is_activated()` 的本地副本编成 `and $0x200,%rax; movzbq`
+/// ⇒ `irq_startup()` 的 `WARN_ON_ONCE(!irqd_is_activated(d))` 每次触发 ⇒
+/// timer 退回 8259A/ExtINT ⇒ `kernel BUG at kernel/irq/matrix.c:196`。
+///
+/// 覆盖 codegen 的 10 个交付轴（局部/全局/成员/数组/解引用赋值、声明
+/// 初始化、形参、返回值、显式 cast、浮点源、复合赋值、赋值表达式值）
+/// 与中端常量折叠（cast/静态初始化/赋值表达式值）：初始 -O0=17、
+/// -O1..3=8，逐挡修完后四档须与 gcc 同为 0。
+#[test]
+fn bool_conversion_nonzero_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "bool-conversion-nonzero",
+        include_str!("../fixtures/c/bool_conversion_nonzero.c"),
+        "标量转 `_Bool` 未按 `(v != 0)` 归一化（失败码：1=局部赋值、2=全局、\
+         3=结构成员、4=数组元素、5=指针解引用、6=声明初始化、7=形参、\
+         8=返回值常量、9=返回值位与、10=显式 cast、11=(_Bool)0.5、\
+         12=复合赋值、13=irqd_is_activated 形状、14=赋值表达式的值、\
+         15=uchar/ushort 源、16=位运算结果、17=数组初始化式、\
+         18=三目/逻辑回归、19=形参→返回值中转、20=静态初始化折叠）",
+    );
+}
+
+
+/// §5.31：`++`/`--` 在栈槽路径上按宽度零扩展读数，随后却是 64 位加法 ——
+/// `int block = -1; ++block` 得到 0x1_0000_0000 而不是 0。
+///
+/// 内核现场：`arch/x86/kernel/cpu/mtrr/generic.c::set_fixed_ranges()` 的
+/// `while (fixed_range_blocks[++block].ranges)`。表地址 0xffffffff87c479c8
+/// 加上 8*0x1_0000_0000 后回绕成 0x787c479cc，boot 在
+/// `set_fixed_ranges+0x20c` 执行 `movslq (%rax)` 时 #PF（cr2 = 该地址）。
+///
+/// 同一个函数内层循环对同一变量用的是 `movslq`（正确），所以缺陷形式是
+/// 「同一条读通道两个口径」，修法是让递增的栈槽分支走单一读入口
+/// `mov_from_stack`（按声明类型发 movsxd/movzx/mov）。
+///
+/// 覆盖：内核循环形状、数组下标前缀/后缀、负起点 for、形参、结构成员、
+/// 无符号与窄类型回归、8 字节回归、指针自减、前缀表达式的值、字节偏移。
+/// 旧二进制在本夹具上 `-O0` 即段错误（rc=139）。
+#[test]
+fn signed_neg_inc_stack_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "signed-neg-inc-stack",
+        include_str!("../fixtures/c/signed_neg_inc_stack.c"),
+        "有符号 int 的 ++/-- 未按声明类型符号扩展（失败码：1=set_fixed_ranges \
+         形状、2=a[++i]、3=i++ 取值、4=-5 递增、5=负起点 for、6=--i 后下标、\
+         7=形参、8=结构成员、9=unsigned 回归、10=short 回归、11=signed char 回归、\
+         12=long 回归、13=i-- 取值、14=指针自减、15=while(++i)、16=++i 参与乘加、\
+         17=字节偏移下标、18=--idx 表下标）",
+    );
+}
+
+/// GNU 范围设计符 `[first ... last] = value` 的**静态**初始化。
+///
+/// `init_list.rs` 的数组分支给范围设计符单独写了一份内联编码，只认标量：
+/// 聚合值被 `eval_const_expr` 当成不支持的表达式写成全 0，链式形式
+/// `[f ... l].field` 更是直接交给 `resolve_designator`（那里 Range 固定返回
+/// None）而被整项静默丢弃。内核 `ucounts_hashtable` 的
+/// `[0 ... 1023] = HLIST_NULLS_HEAD_INIT(0)` 正是这个形状 —— NULLS 哨兵（1）
+/// 退化成 NULL 后空链表不再“空”，`hlist_nulls_for_each_entry_rcu` 把 NULL
+/// 当节点读 `iter->uid`（+0x18），boot 在 devtmpfs 处 #PF。
+#[test]
+fn array_range_designator_init_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "array-range-designator-init",
+        include_str!("../fixtures/c/array_range_designator_init.c"),
+        "GNU 范围设计符的静态初始化丢值（失败码：1=顶层 range+聚合花括号、\
+         2=链式 [f ... l].field、4=标量 range 回归、8=部分 range、\
+         16=range+位域、32=range+char 数组元素、64=range+指针元素、\
+         128=range+复合字面量、256=与普通项混合/回退、\
+         512=内核 hlist_nulls 空表语义）",
+    );
+}
+
+/// §5.38：`PreservedDecl` 的初始化式按**基名**读家，而 `collect_uses_kind` 对它
+/// 返回空集 —— 这次读取在逐点活性里不存在。于是同一条聚合初始化里读到的两个
+/// 内联形参被判成互不干涉、绑到同一个物理号，后者把前者覆盖掉。内核形状是
+/// `struct netdev_notifier_info info = { .dev = dev, .extack = extack };`，
+/// boot 在 `dev_net(NULL)` 读 +0x108 处 #PF。
+///
+/// 旧产物实测：-O0/-O1 rc=0，-O2/-O3 rc=31（五个形态全红）。
+#[test]
+fn preserved_decl_init_readers_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "preserved-decl-init-readers",
+        include_str!("../fixtures/c/preserved_decl_init_readers.c"),
+        "PreservedDecl 初始化式的基名读者未计入活性（失败码：1=内核原形、\
+         2=三字段、4=嵌套聚合成员、8=循环体、16=复合字面量）",
+    );
 }

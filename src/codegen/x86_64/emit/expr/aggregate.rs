@@ -133,40 +133,82 @@ impl Codegen {
     /// 条件，那个在扫描期不可知（它会发指令），所以本谓词只描述形状；形状成立时**保守地当成要
     /// 槽**（宁可多留 16B 也不能少留 —— 多留只花帧字节，少留是硬错）。
     pub(crate) fn assign_needs_addr_slot(lv: &Expr, ty: &Type, rhs: &Expr) -> bool {
-        !matches!(lv, Expr::Ident { .. })
-            && (Self::value_is_whole_copy(ty)
-                || (Self::is_aggregate_shape(ty) && matches!(rhs, Expr::CompoundLit { .. })))
+        !matches!(lv, Expr::Ident { .. }) && Self::assign_needs_whole_copy(ty, rhs)
+    }
+
+    /// 这条聚合赋值是否必须走「整块拷贝」通道（而不是把 rax 低 8 字节标量 store 进目标）。
+    ///
+    /// 两条轴只要有一条成立就必须整块搬:
+    ///  * **类型轴** [`Self::value_is_whole_copy`] —— 对象装不进一个寄存器（尺寸 > 8 或运行时尺寸）；
+    ///  * **交付轴** [`Self::rvalue_is_buffer_addr`] —— 右值本身在 rax 里交付的是**缓冲地址**
+    ///    (复合字面量 / 语句表达式 / 已被整块拷贝的链式赋值 / 物化过的聚合三元)，
+    ///    与对象大小无关。
+    ///
+    /// 交付轴是报告 §5.15 的那条错误：旧写法在**每个站点**各自把「小尺寸 + CompoundLit」
+    /// 硬写一遍（`dispatch.rs` 的 `is_aggregate`、本文件的 `assign_needs_addr_slot`、
+    /// `abi/call.rs` 的两处实参分类），于是 `g = ({ struct s t; …; t; })`（语句表达式，
+    /// 2 B 结构）三条都不命中，rax 里的**地址**被当 8 字节数据写进 `g`。现在两条轴各自
+    /// 只有一个真源，站点只问本函数。
+    pub(crate) fn assign_needs_whole_copy(ty: &Type, rhs: &Expr) -> bool {
+        Self::is_aggregate_shape(ty)
+            && (Self::value_is_whole_copy(ty) || Self::rvalue_is_buffer_addr(rhs))
     }
 
     /// 聚合 **rvalue 的交付形态**: `true` = 求值后 rax 里是**缓冲地址**
     /// (内存交付), `false` = rax(:rdx) 就是**数据** (寄存器交付)。
     ///
-    /// 与上述三条轴同源: 返回轴 `needs_memory_return`、`va_arg` 交付轴
-    /// `va_arg_result_in_memory`、赋值/语句表达式的「目标地址即值」约定。
+    /// 判据按**发射端的实际交付**逐形给答案, 而不是先按大小一刀切 ——
+    /// 只有 `Call`/`VaArg`/`Cond` 三形的交付位置真正由尺寸决定 (SysV 分类 /
+    /// `gen_expr_cond` 的物化门), 其余三形的发射端**恒**交付缓冲地址:
+    ///
+    /// | 形态 | 发射端 | 交付 |
+    /// |---|---|---|
+    /// | `CompoundLit` | `gen_expr_compound_lit` 尾部 `lea -off(%r13), dst` | 恒地址 |
+    /// | `StmtExpr` | `gen_stmt_expr_value` 先整块拷进 sret 槽再 `lea` | 恒地址 |
+    /// | `Assign` | 赋值路由 [`Self::assign_needs_whole_copy`] 一旦成立, dst = 目标地址 | 与路由同判据 |
+    /// | `Call` / `VaArg` | 按 SysV 类 / `va_arg` 缓冲交付 | 由尺寸决定 |
+    /// | `Cond` | [`Self::cond_materializes_aggregate`] | 由尺寸决定 |
+    ///
+    /// 旧写法把 `value_is_whole_copy`（尺寸轴）放在最前面当总门, 于是**小聚合**的
+    /// 上述前/后三形一律被报成「寄存器交付」: `g = ({ struct s t; …; t; })` 把
+    /// 物化槽地址当 8 字节数据写进 `g`（报告 §5.15）。
+    ///
     /// 调用侧按值存实参、下标/成员基址、返值转发等所有「拿 rvalue 当源」
     /// 的地方都只准问本函数, 不得各自重写形态队集 —— 否则会出现
     /// 「把缓冲地址当数据存槽」同型错误 (被调方读出指针字节)。
     pub(crate) fn rvalue_is_buffer_addr(e: &Expr) -> bool {
         let e = Self::skip_noop_casts(e);
         let ty = e.ty();
-        if !Self::value_is_whole_copy(&ty) {
+        if !Self::is_aggregate_shape(&ty) {
             return false;
         }
         match e {
             Expr::Call { .. } => Self::needs_memory_return(&ty),
             Expr::VaArg { .. } => Self::va_arg_result_in_memory(&ty),
-            Expr::Assign { .. } | Expr::StmtExpr { .. } | Expr::CompoundLit { .. } => true,
+            // 发射端无条件把对象放进缓冲并交付其地址, 与大小无关。
+            Expr::CompoundLit { .. } => true,
+            Expr::StmtExpr { .. } => matches!(ty, Type::Struct(..) | Type::Union(..)),
+            // 链式赋值 `a = (b = …)`: 交付位置就是内层赋值走的那条路由。
+            Expr::Assign { r, .. } => Self::assign_needs_whole_copy(&ty, r),
             // 聚合三元 `c ? s1 : s2`: 值是选中那一整个对象, `gen_expr_cond`
             // 把两支都物化进一个帧内临时槽后交付其地址 (与上面同一条约定)。
             // 报告成寄存器交付会让消费端把 rax 当数据存槽 —— sqlite3 lemon
             // parser 的 `tok = (a.n==0 ? a : b);` 因此只写对 `Token.z`,
             // `Token.n` 留残值, CREATE TRIGGER 算出 7.9MB 的拷贝长度。
-            Expr::Cond { ty, .. } => matches!(ty, Type::Struct(..) | Type::Union(..)),
-
+            Expr::Cond { .. } => Self::cond_materializes_aggregate(&ty),
             // 具名变量 / 成员 / 下标 / 解引用等 lvalue 形态由各自的源分支
             // (取地址后按块装载) 处理, 不走 rvalue 通道。
             _ => false,
         }
+    }
+
+    /// 聚合三元是否走「两支各整块拷进帧内临时槽、交付槽地址」那一形。
+    ///
+    /// 这条判据有两个读者, 必须是同一个答案: `gen_expr_cond` 用它**选发射路径**,
+    /// [`Self::rvalue_is_buffer_addr`] 用它**报告交付形态**。两边一旦分叉,
+    /// 消费端与发射端对同一个 rax 的解释就不同 (地址 vs 数据)。
+    pub(crate) fn cond_materializes_aggregate(ty: &Type) -> bool {
+        matches!(ty, Type::Struct(..) | Type::Union(..)) && Self::value_is_whole_copy(ty)
     }
 
     /// 形态分类视图: 剥掉**同类型** (no-op) 的 `Cast` 包装。
@@ -976,6 +1018,53 @@ impl Codegen {
             // rep movsb
         }
     }
+    /// 函数局部 `static` 的运行时初始化：把初始化式的**值**送进它的全局槽。
+    ///
+    /// 为什么需要这一个入口：同一个知识以前在三个发射点各拷了一份
+    /// (`emit/stmt.rs` 的 `gen_block_item`、`emit/functions.rs` 的函数顶层
+    /// 遍历、`emit/expr/dispatch.rs` 的语句表达式块), 三份都只给 `Type::Array`
+    /// 打了「逐元素写」的补丁, 其余聚合一律 `gen_expr(EVAL_BASE)` + 一次标量
+    /// `emit_global_store` —— 而聚合 rvalue 的交付物是**物化缓冲地址** (与
+    /// [`Self::rvalue_is_buffer_addr`] 同一条约定), 于是存进去的是地址而不是值。
+    /// 实测形状 (报告 §5.14, boot 卡死的真因):
+    ///
+    /// ```c
+    /// static DEFINE_SPINLOCK(early_pfn_lock);   // = (spinlock_t){ .raw_lock = … }
+    /// ```
+    /// → `mov %eax, lock(%rip)` 把 `-0x188(%r13)` 的低 32 位写进 4 字节锁字,
+    /// 后续 `queued_spin_lock_slowpath` 对锁做 `cmpxchg` 就是 #PF。
+    ///
+    /// 现在聚合目标只走 [`Self::gen_aggregate_assign_to`] 的
+    /// `AggDst::Global` 那一臂 (整块 `rep movs`), 标量保持直存。
+    pub(crate) fn gen_static_local_init(&mut self, v: &VarDecl) {
+        let Some(init) = &v.init else {
+            return;
+        };
+        if Self::is_aggregate_shape(&v.ty) {
+            // 裸花括号列表 `{…}` 没有 `Expr` 形态的物化入口 (`gen_expr` 对
+            // 非向量/非标量的 InitList 直接发 ud2), 而它与 `(T){…}` 本来就是
+            // 同一个对象表示 (判据单点在 `Codegen::static_brace_list`), 所以先
+            // 归一成复合字面量, 此后「表达式值 → 聚合目标」只剩一处实现。
+            let lit;
+            let src = match init {
+                Expr::InitList { inits, span, .. } => {
+                    lit = Expr::CompoundLit {
+                        ty: v.ty.clone(),
+                        inits: inits.clone(),
+                        span: span.clone(),
+                    };
+                    &lit
+                },
+                other => other,
+            };
+            self.gen_aggregate_assign_to(&AggDst::Global(v.name.name.clone()), &v.ty, src);
+            return;
+        }
+        // 标量: `gen_expr` 后 rax 就是数据。
+        self.gen_expr(init, Self::EVAL_BASE);
+        self.emit_global_store(0, &v.name.name);
+    }
+
     pub(crate) fn gen_init_list(&mut self, var_name: &str, ty: &Type, inits: &[InitItem]) {
         let var_off = self.var_offset(var_name);
 
@@ -1004,6 +1093,57 @@ impl Codegen {
             }
         }
     }
+    /// 把初始化式交付的 128 位标量（低半 rax、高半 rdx）存进 `[r13+off]` 的 16 字节目标。
+    ///
+    /// 这是 `__int128`/`unsigned __int128` 成员/元素初始化的**唯一** store 口径。
+    /// 为什么要单列一个入口：`emit_store` 对 size 不在 {1,2,4,8} 的值**不发任何指令**
+    /// （整块静默丢失，不是截断）。数组/向量分支各自拷过一份同样的补齐逻辑，
+    /// struct/union 字段分支却漏了 —— 现场（§5.22）：内核
+    /// ```c
+    /// union __u128_halves o = { .full = *(_oldp) }, n = { .full = (_new) };
+    /// ```
+    /// 初始化式的 16 字节 store 被静默丢掉，`o`/`n` 只剩前面的零初始化，
+    /// `cmpxchg16b` 的比较值/新值恒为 0:0，slub 的 `__slab_update_freelist`
+    /// 永远失败并原地重试。
+    /// 源不是 128 位时高半需按源有无符号扩展补齐，否则残留垃圾
+    /// (q8: `__int128 a[2]={3,5}` 读 a[0] 得垃圾; pr69909 的 `U f={3,5}` 同根)。
+    pub(crate) fn store_i128_from_rax_rdx(&mut self, value: &Expr, off: i64) {
+        if !matches!(value.ty(), Type::Int128 | Type::UInt128) {
+            let src_unsigned = matches!(
+                value.ty(),
+                Type::Bool
+                    | Type::UChar
+                    | Type::UShort
+                    | Type::UInt
+                    | Type::ULong
+                    | Type::ULongLong
+            );
+            if src_unsigned {
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            2,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                            2,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                    },
+                    &[],
+                )); // xor rdx, rdx (零扩展)
+            } else {
+                self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                )); // cqo (符号扩展)
+            }
+        }
+        self.emit_store(0, off, 8);
+        self.emit_store(2, off + 8, 8);
+    }
+
     pub(crate) fn gen_init_list_at(&mut self, base: i64, ty: &Type, inits: &[InitItem]) {
         match ty {
             Type::Array(elem_ty, _) => {
@@ -1015,10 +1155,10 @@ impl Codegen {
                     &elem_ty.base,
                     Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
                 ) {
-                    // 检查是否需要 brace elision: 首个值是标量 (非 InitList)
-                    let needs_elision = inits.iter().any(|item| {
-                        matches!(item, InitItem::Expr(e) if !matches!(e, Expr::InitList { .. }))
-                    });
+                    // 检查是否需要 brace elision: 首个值是标量 (非 `{}` / `(T){}`)
+                    let needs_elision = inits
+                        .iter()
+                        .any(|item| matches!(item, InitItem::Expr(e) if !Self::is_braced_init(e)));
                     if needs_elision {
                         effective_inits = Self::group_for_brace_elision(&elem_ty.base, inits);
                     } else {
@@ -1090,10 +1230,13 @@ impl Codegen {
                             }
                         },
                     };
-                    if let Expr::InitList { inits: nested, .. } = value {
-                        // 嵌套数组初始化 (如 int m[2][2] = {{1,2},{3,4}}):
-                        // 递归展开子数组 (任意深度), 跳过 gen_expr 对 InitList
-                        // 的简化处理; 子数组不足的尾部零填充由递归内完成
+                    if let Expr::InitList { inits: nested, .. }
+                    | Expr::CompoundLit { inits: nested, .. } = value
+                    {
+                        // 嵌套数组初始化 (如 int m[2][2] = {{1,2},{3,4}}), 或
+                        // 元素是整个聚合值的复合字面量 `(T){...}`: 递归展开
+                        // (任意深度), 跳过 gen_expr 对聚合表达式的简化处理;
+                        // 不足的尾部零填充由递归内完成
                         self.gen_init_list_at(base + (i * elem_size) as i64, &elem_ty.base, nested);
                         covered = covered.max(i + 1);
                         continue;
@@ -1149,6 +1292,24 @@ impl Codegen {
                             continue;
                         }
                     }
+                    // 聚合元素被聚合 rvalue 初始化（标识符 / 语句表达式 / 复合字面量 /
+                    // 链式赋值 / 聚合三元）：整块拷贝。尺寸轴在这里不够用 —— 8 字节
+                    // 结构体的语句表达式在 rax 里交付的是**缓冲地址**，下面
+                    // `gen_expr + emit_store` 会把地址当值存进元素（报告 §5.35）。
+                    if Self::is_aggregate_shape(&value.ty())
+                        && Self::assign_needs_whole_copy(&elem_ty.base, value)
+                    {
+                        self.gen_aggregate_assign_to(
+                            &AggDst::Local {
+                                off: base + (i * elem_size) as i64,
+                                vla: None,
+                            },
+                            &elem_ty.base,
+                            value,
+                        );
+                        covered = covered.max(i + 1);
+                        continue;
+                    }
                     self.gen_expr(value, Self::EVAL_BASE);
                     // 浮点数组元素: int 常量需要转换到 xmm0 (double a[] = {1, 2})
                     if matches!(
@@ -1165,45 +1326,8 @@ impl Codegen {
                     } else if matches!(&elem_ty.base, Type::Float128) {
                         self.store_xmm128_stack(0, off);
                     } else if matches!(&elem_ty.base, Type::Int128 | Type::UInt128) {
-                        // __int128 元素 (16B): 值在 rax(低):rdx(高)。源非 128 位时
-                        // gen_expr 只填 rax, 高半需按源有无符号扩展补齐, 否则残留垃圾
-                        // (q8: `__int128 a[2]={3,5}` 读 a[0] 得垃圾; pr69909 的
-                        // `U f={3,5}` 同根)。旧写法 `emit_store(_, _, 16)` 既漏存
-                        // 高半、对 16B 也不正确。
-                        if !matches!(value.ty(), Type::Int128 | Type::UInt128) {
-                            let src_unsigned = matches!(
-                                value.ty(),
-                                Type::Bool
-                                    | Type::UChar
-                                    | Type::UShort
-                                    | Type::UInt
-                                    | Type::ULong
-                                    | Type::ULongLong
-                            );
-                            if src_unsigned {
-                                self.emit_insn(&Insn::new(
-                                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
-                                        width: crate::codegen::shared::asm_operand::Width::B64,
-                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                            2,
-                                            crate::codegen::shared::asm_operand::Width::B64,
-                                        ),
-                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
-                                            2,
-                                            crate::codegen::shared::asm_operand::Width::B64,
-                                        ),
-                                    },
-                                    &[],
-                                )); // xor rdx, rdx (零扩展)
-                            } else {
-                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                )); // cqo (符号扩展)
-                            }
-                        }
-                        self.emit_store(0, off, 8);
-                        self.emit_store(2, off + 8, 8);
+                        // __int128 元素 (16B)：值模型与成员初始化同一条口径
+                        self.store_i128_from_rax_rdx(value, off);
                     } else {
                         self.emit_store(0, off, elem_size);
                     }
@@ -1233,42 +1357,8 @@ impl Codegen {
                     } else if matches!(elem_ty.base, Type::Double) {
                         self.store_xmm64_stack(0, off);
                     } else if matches!(elem_ty.base, Type::Int128 | Type::UInt128) {
-                        // __int128 向量元素 (16B): 同数组分支, 高半按源符号/零扩展
-                        // 补齐后分两半存 (pr69909: `U f={3,5}` 同根)。
-                        if !matches!(value.ty(), Type::Int128 | Type::UInt128) {
-                            let src_unsigned = matches!(
-                                value.ty(),
-                                Type::Bool
-                                    | Type::UChar
-                                    | Type::UShort
-                                    | Type::UInt
-                                    | Type::ULong
-                                    | Type::ULongLong
-                            );
-                            if src_unsigned {
-                                self.emit_insn(&Insn::new(
-                                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
-                                        width: crate::codegen::shared::asm_operand::Width::B64,
-                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                            2,
-                                            crate::codegen::shared::asm_operand::Width::B64,
-                                        ),
-                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
-                                            2,
-                                            crate::codegen::shared::asm_operand::Width::B64,
-                                        ),
-                                    },
-                                    &[],
-                                )); // xor rdx, rdx (零扩展)
-                            } else {
-                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                )); // cqo (符号扩展)
-                            }
-                        }
-                        self.emit_store(0, off, 8);
-                        self.emit_store(2, off + 8, 8);
+                        // __int128 向量元素 (16B)：同数组/成员分支同一条口径
+                        self.store_i128_from_rax_rdx(value, off);
                     } else {
                         self.emit_store(0, off, elem_size);
                     }
@@ -1320,7 +1410,7 @@ impl Codegen {
                                         | Type::Struct(_, _, _, _)
                                         | Type::Union(_, _, _, _)
                                 );
-                                let is_plain_value = !matches!(e, Expr::InitList { .. });
+                                let is_plain_value = !Self::is_braced_init(e);
                                 // 字符串 ↔ char 数组字段一对一 (C11 6.7.9p14):
                                 // 不能走 brace elision 的连续收集 —
                                 // struct { char a[8]; char b[8]; } = {"x","y"}
@@ -1355,7 +1445,7 @@ impl Codegen {
                                     let mut j = init_idx;
                                     while j < inits.len() {
                                         if let InitItem::Expr(expr) = &inits[j] {
-                                            if !matches!(expr, Expr::InitList { .. }) {
+                                            if !Self::is_braced_init(expr) {
                                                 collected.push(inits[j].clone());
                                                 j += 1;
                                             } else {
@@ -1398,18 +1488,14 @@ impl Codegen {
                                     continue;
                                 },
                             };
-                            // 查找位域信息 (处理直接字段和 designator 路径)
-                            let (bf_w, bf_o) =
-                                if let InitItem::Designated { designator: d, .. } = item {
-                                    match d {
-                                        Designator::Field(fname) => find_field(fields, &fname.name)
-                                            .map(|(f, _)| (f.bit_width, f.bit_offset))
-                                            .unwrap_or((None, 0)),
-                                        _ => (None, 0),
-                                    }
-                                } else {
-                                    (None, 0)
-                                };
+                            // 位域信息：沿链式设计符下潜到**最终字段**（与全局静态
+                            // 初始化路径同一真源 `designator_bitfield`）。旧写法只认
+                            // 单层 `.field`，`.bits.p = 1` 于是被当成普通标量写到字段
+                            // 起始字节上、丢掉单元内移位（报告 §5.25 的 IDT 门 p=0）。
+                            let (bf_w, bf_o) = match designator_bitfield(ty, designator) {
+                                Some((o, w)) => (Some(w), o),
+                                None => (None, 0),
+                            };
                             (resolved.0, resolved.1, Some(resolved.2), value, bf_w, bf_o)
                         },
                     };
@@ -1490,17 +1576,32 @@ impl Codegen {
                             self.mov_imm(0, 0); // rax = 0
                             self.emit_store(0, store_off, container_size);
                         }
-                        // 生成初始化值 → rax
+                        // 三个重写槽走位域 RMW 带（每层 3 槽），不再写死 -40/-24/-32。
+                        // 那三个格是帧头的 callee-saved 保存区（cs 槽 j @ -(16+8j)）：
+                        // 以前 cs=4 恒存，本路径写进去等于毁掉被调者寄存器——只是
+                        // 大多数测试函数没用到池号、保存/恢复被 nop 掉了才没炸。
+                        // §5.42 把帧头收紧到 `16+8*cs+8*temps` 后，cs=0 的函数
+                        // 帧头只有 32B，这三个格直接落进变量区：实测
+                        // `struct tmp a = {0x123, 0xFFF000FFF000F}` 里值槽 -0x28
+                        // 与下面的结构体 b 同格、地址槽 -0x18/容器槽 -0x20 与 a 同格，
+                        // 两个结构体的初始化互相覆盖（gcc.c-torture 的 bf64-1 一族）。
+                        let depth = self.bf_rmw_depth as i64;
+                        let addr_off = self.bf_rmw_slot(depth, 0);
+                        let val_off = self.bf_rmw_slot(depth, 1);
+                        let new_off = self.bf_rmw_slot(depth, 2);
+                        // 生成初始化值 → rax（内部位域 RMW 用更深一层）
+                        self.bf_rmw_depth += 1;
                         self.gen_expr(value, Self::EVAL_BASE);
-                        // 保存值到栈临时槽: [r13-40]
+                        self.bf_rmw_depth -= 1;
+                        // 保存值到帧内新值槽
                         self.emit_insn(&Insn::mov_rm_mem(
                             false,
                             crate::codegen::shared::asm_operand::Width::B64,
                             0,
                             13,
-                            -40,
-                        )); // mov [r13-40], rax
-                            // 用 mov rax, r13 + add rax, imm32 计算地址, 保存到 [r13-24]
+                            new_off,
+                        )); // mov [r13+new_off], rax
+                            // 用 mov rax, r13 + add rax, imm32 计算地址, 保存到地址槽
                         self.emit_insn(&Insn::mov_rm_reg(
                             crate::codegen::shared::asm_operand::Width::B64,
                             0,
@@ -1520,8 +1621,8 @@ impl Codegen {
                             crate::codegen::shared::asm_operand::Width::B64,
                             0,
                             13,
-                            -24,
-                        )); // mov [r13-24], rax
+                            addr_off,
+                        )); // mov [r13+addr_off], rax
                             // 加载容器值 → rax
                         match container_size {
                             4 => {
@@ -1594,22 +1695,22 @@ impl Codegen {
                             },
                             _ => {},
                         }
-                        // 保存容器值 → [r13-32]
+                        // 保存容器值 → 容器槽
                         self.emit_insn(&Insn::mov_rm_mem(
                             false,
                             crate::codegen::shared::asm_operand::Width::B64,
                             0,
                             13,
-                            -32,
-                        )); // mov [r13-32], rax
+                            val_off,
+                        )); // mov [r13+val_off], rax
                             // 加载保存的新值 → rax
                         self.emit_insn(&Insn::mov_rm_mem(
                             true,
                             crate::codegen::shared::asm_operand::Width::B64,
                             0,
                             13,
-                            -40,
-                        )); // mov rax, [r13-40]
+                            new_off,
+                        )); // mov rax, [r13+new_off]
                             // 掩码新值: and eax, (1<<bw)-1
                         if bw < 64 {
                             let mask: u64 = (1u64 << bw) - 1;
@@ -1653,8 +1754,8 @@ impl Codegen {
                             crate::codegen::shared::asm_operand::Width::B64,
                             1,
                             13,
-                            -32,
-                        )); // mov rcx, [r13-32]
+                            val_off,
+                        )); // mov rcx, [r13+val_off]
                             // 清除目标位: and rcx, inv_mask
                         let mask: u64 = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
                         let inv_mask = !(mask << effective_bit_o);
@@ -1697,22 +1798,22 @@ impl Codegen {
                                 ));
                             }
                         }
-                        // 保存更新后的容器值回 [r13-32]
+                        // 保存更新后的容器值回容器槽
                         self.emit_insn(&Insn::mov_rm_mem(
                             false,
                             crate::codegen::shared::asm_operand::Width::B64,
                             1,
                             13,
-                            -32,
-                        )); // mov [r13-32], rcx
+                            val_off,
+                        )); // mov [r13+val_off], rcx
                             // 加载地址 → rdx
                         self.emit_insn(&Insn::mov_rm_mem(
                             true,
                             crate::codegen::shared::asm_operand::Width::B64,
                             2,
                             13,
-                            -24,
-                        )); // mov rdx, [r13-24]
+                            addr_off,
+                        )); // mov rdx, [r13+addr_off]
                             // 存储容器 (如果是最后一个位域且 reverse_sso, 需要先字节序反转)
                             // 检查是否还有后续位域在同一容器
                         let has_more_bitfields_in_container = {
@@ -1745,8 +1846,8 @@ impl Codegen {
                                         crate::codegen::shared::asm_operand::Width::B64,
                                         1,
                                         13,
-                                        -32,
-                                    )); // mov rcx, [r13-32]
+                                        val_off,
+                                    )); // mov rcx, [r13+val_off]
                                     self.emit_insn(&Insn::rol_reg_imm8_b16(1, 8)); // rol cx, 8
                                     self.emit_insn(&Insn::mov_rm_mem(
                                         false,
@@ -1762,8 +1863,8 @@ impl Codegen {
                                         crate::codegen::shared::asm_operand::Width::B64,
                                         1,
                                         13,
-                                        -32,
-                                    )); // mov rcx, [r13-32]
+                                        val_off,
+                                    )); // mov rcx, [r13+val_off]
                                     self.emit_insn(&Insn::bswap_reg(
                                         crate::codegen::shared::asm_operand::Width::B32,
                                         1,
@@ -1794,8 +1895,8 @@ impl Codegen {
                                         crate::codegen::shared::asm_operand::Width::B64,
                                         1,
                                         13,
-                                        -32,
-                                    )); // mov rcx, [r13-32]
+                                        val_off,
+                                    )); // mov rcx, [r13+val_off]
                                     self.emit_insn(&Insn::bswap_reg(
                                         crate::codegen::shared::asm_operand::Width::B64,
                                         1,
@@ -2028,11 +2129,10 @@ impl Codegen {
                         // 同样只写对首字节）。那条 `sz > 8` 是 pr94482 当时只遇到宽向量
                         // 面留的口子，不是语义判据。
                         if matches!(&field_ty_opt, Some(Type::Vector(_, _)))
-                            || (sz > 8
-                                && matches!(
-                                    &field_ty_opt,
-                                    Some(ft) if Self::is_aggregate_shape(ft)
-                                ))
+                            || matches!(
+                                &field_ty_opt,
+                                Some(ft) if Self::assign_needs_whole_copy(ft, value)
+                            )
                         {
                             let addr_slot = self.alloc_sret_slot(8);
                             self.emit_lea_r13(0, store_off);
@@ -2060,6 +2160,14 @@ impl Codegen {
                                 } else {
                                     self.store_xmm64_stack(0, store_off);
                                 }
+                                init_idx += 1;
+                                continue;
+                            }
+                            // __int128 成员 (16B)：与数组/向量元素同一条 store 口径。
+                            // 漏了这一臂时 `emit_store(_, _, 16)` 静默丢掉整块 store，
+                            // 成员只剩前面的零初始化（§5.22 的内核现场）。
+                            if matches!(ft, Type::Int128 | Type::UInt128) {
+                                self.store_i128_from_rax_rdx(value, store_off);
                                 init_idx += 1;
                                 continue;
                             }
@@ -2267,6 +2375,19 @@ impl Codegen {
             _ => self.mov_imm(dst, ty.size() as i128),
         }
     }
+    /// `{...}` 或 `(T){...}`：**自带花括号**的初始化值（判据单一真源）。
+    ///
+    /// 数组元素本身是复合字面量时，它已经是**整个元素**的初始化器，不能再被
+    /// brace elision 当成扁平标量分组。旧判据只认 `Expr::InitList`，于是内核
+    /// `static_calls_table` 的 `(struct lsm_static_call){…}` 元素被按「字段数」
+    /// 拆散并与相邻元素合并：`capable[0].trampoline` 槽拿到 `capable[1].key`、
+    /// `capable[0].hl` 拿到 `capable[1].trampoline`（非 NULL ⇒ `security_add_hooks`
+    /// 跳过该槽），`capable[1].key` 拿到 static_key 地址 ⇒ boot 在
+    /// `__static_call_update` 里 `mod->static_call_sites` double fault（§5.34）。
+    pub(crate) fn is_braced_init(e: &Expr) -> bool {
+        matches!(e, Expr::InitList { .. } | Expr::CompoundLit { .. })
+    }
+
     pub(crate) fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
         // 每组吞多少标量 = 填满一个**元素**所需的标量数。
         // 元素本身是数组时要下钻到叶容量: `struct S b[][1]` 的元素类型是
@@ -2296,11 +2417,16 @@ impl Codegen {
         let mut result = Vec::new();
         let mut idx = 0;
         while idx < inits.len() {
-            if let InitItem::Expr(Expr::InitList { .. }) = &inits[idx] {
-                // 已有花括号, 保持原样
-                result.push(inits[idx].clone());
-                idx += 1;
-            } else {
+            if let InitItem::Expr(e) = &inits[idx] {
+                if Self::is_braced_init(e) {
+                    // 已有花括号（含 `(T){...}` 复合字面量）, 保持原样: 它是一个
+                    // 完整的元素初始化器, 不能再拆
+                    result.push(inits[idx].clone());
+                    idx += 1;
+                    continue;
+                }
+            }
+            {
                 // 收集 sub_count 个标量值到一个 InitList
                 let mut group = Vec::new();
                 for _ in 0..sub_count {
@@ -2359,6 +2485,38 @@ impl Codegen {
         }
     }
 }
+/// 沿（可链式的）设计符解析到**最终字段**的位域信息 `(bit_offset, bit_width)`。
+///
+/// `resolve_designator` 只返回最终子对象的字节偏移/大小/类型；位域还需要最终
+/// 字段自己的 `bit_offset` 才能把值打包进存储单元。全局静态初始化
+/// （`elf/init_list.rs`）与运行时初始化（`gen_init_list`）原来都只对单层
+/// `Designator::Field` 取这一对，链式设计符（`.bits.p = 1`）于是落进普通标量
+/// 写：值被放在字段起始字节、单元内移位丢失。内核 `arch/x86/kernel/idt.c` 的
+/// `def_idts[]` 正是这个形状 —— IDT 门的 p 位为 0，第一个 `ud2` 就
+/// #GP(0x0032) → #DF → triple fault（报告 §5.25）。
+pub(crate) fn designator_bitfield(ty: &Type, d: &Designator) -> Option<(u32, u32)> {
+    match d {
+        Designator::Field(name) => {
+            let fields = match ty {
+                Type::Struct(_, fs, _, _) | Type::Union(_, fs, _, false) => fs.as_ref(),
+                _ => return None,
+            };
+            let (f, extra) = find_field(fields, &name.name)?;
+            f.bit_width.map(|bw| (f.bit_offset + (extra as u32) * 8, bw))
+        },
+        Designator::Chain(items) => {
+            let (last, parents) = items.split_last()?;
+            let mut cur = ty.clone();
+            for sub in parents {
+                let (_, _, next) = resolve_designator(&cur, sub)?;
+                cur = next;
+            }
+            designator_bitfield(&cur, last)
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)> {
     match d {
         Designator::Field(name) => {

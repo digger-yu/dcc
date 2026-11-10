@@ -46,6 +46,18 @@ pub struct AsmFacts {
     /// 之后每一条 `rep movs`/`rep stos` 前的 `cld` 都必须保留（省掉就是错值）；
     /// 消费方是 `Codegen::emit_direction_clear`。
     pub sets_direction: bool,
+    /// 本函数体里**任何**一条内联汇编的约束文本（outputs + inputs，原始写法）。
+    ///
+    /// 消费方是 `Codegen::compute_callee_plan`（报告 §5.42）：帧头的 callee-saved
+    /// 保存槽现在是按需的，而 `"b"`（或 `{rbx}` 这类显式名）约束会把某个池号**钉死**
+    /// 在本函数的产物里 —— 那个号必须提前进计划，否则序言没有它的保存槽。
+    pub constraints: Vec<String>,
+    /// 本函数里出现过内联汇编（任何形态）。
+    ///
+    /// 消费方同上：asm 的内存操作数地址寄存器走 `alloc_asm_mem_scratch`，池耗尽时
+    /// 回退到 r12（旧行为）。为了让那条回退仍然被保存槽盖住，含 asm 的函数
+    /// 至少把 r12 留在计划里。
+    pub has_asm: bool,
 }
 
 /// 收集 [`AsmFacts`]。刻意不拆成两次遍历：两张判据看的是同一棵 AST，分开走就会
@@ -167,9 +179,14 @@ fn walk_stmt(st: &Stmt, out: &mut AsmFacts) {
             goto_labels,
             outputs,
             inputs,
+            output_constraints,
+            input_constraints,
             ..
         } => {
             out.sets_direction |= template_sets_direction(asm_str);
+            out.has_asm = true;
+            out.constraints.extend(output_constraints.iter().cloned());
+            out.constraints.extend(input_constraints.iter().cloned());
             // 只有真的带着跳出目标才算「逃得出守护区间」。
             if !goto_labels.is_empty() {
                 for c in clobbers {
@@ -264,9 +281,17 @@ fn walk_expr(e: &Expr, out: &mut AsmFacts) {
         // 普通的 `asm`（含 `Expr::AsmExpr` 形态的语句）永远能被 fall-through 守护覆盖：
         // 它没有跳出目标，所以只进发射点的名单，不进本函数级判据。操作数里仍可能有 asm。
         Expr::AsmExpr {
-            asm_str, outputs, inputs, ..
+            asm_str,
+            outputs,
+            inputs,
+            output_constraints,
+            input_constraints,
+            ..
         } => {
             out.sets_direction |= template_sets_direction(asm_str);
+            out.has_asm = true;
+            out.constraints.extend(output_constraints.iter().cloned());
+            out.constraints.extend(input_constraints.iter().cloned());
             for x in outputs.iter().chain(inputs.iter()) {
                 walk_expr(x, out);
             }

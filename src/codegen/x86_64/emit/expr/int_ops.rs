@@ -113,6 +113,16 @@ impl Codegen {
             self.emit_from_float128(int_ty);
             return;
         }
+        // `_Bool` 目标：C11 6.3.1.2p1 是 `(value != 0)`，不是「截断到 8 位」。
+        // 0.5 属于必须为真的情形，任何「先转整数再归一化」的实现都会把它判假
+        // （夹具 `boolwide.c` 第 7 项）。判据与发射在 `emit_xmm0_to_bool` 一处。
+        if matches!(int_ty, Type::Bool) {
+            if self.float_in_st0(float_ty) {
+                self.emit_x87_to_xmm0();
+            }
+            self.emit_xmm0_to_bool(dst, float_ty);
+            return;
+        }
         // 无符号目标: 不能沿用「有符号截断转换 + INT_MAX 饱和」—— 见
         // `emit_float_to_unsigned` 的根因说明。值通道与有符号路径同一条
         // (long double 从 x87 st(0) 落 f64 到 xmm0), 因此先跳一次再分流。
@@ -520,10 +530,47 @@ impl Codegen {
             self.mov(dst, 0);
         }
     }
+    /// `值 → _Bool` 的唯一真源：C11 6.3.1.2p1 —— 任何标量转换为 `_Bool` 的结果是
+    /// `(value != 0)`，**不是按宽度截断**。`_Bool` 只占 1 字节，于是「截断到 8 位」
+    /// （`movzbq %al`）看着像同一个转换，实际是另一个运算：`0x200` 的低字节是 0，
+    /// 截断把它变成「假」。
+    ///
+    /// 内核里的实际后果（§5.30）：`irq_data.state` 的 `IRQD_ACTIVATED` 是 bit 9
+    /// （0x200），`chip.c::irqd_is_activated()` 的本地副本被编成
+    /// `and $0x200, %rax; movzbq %al, %rax`，恒返回 false ⇒ `irq_startup()` 的
+    /// `WARN_ON_ONCE(!irqd_is_activated(d))` 每次启动中断都触发 ⇒ timer 退回
+    /// 8259A/ExtINT ⇒ `kernel BUG at kernel/irq/matrix.c:196`。
+    ///
+    /// 所有「值 → _Bool」的站点只调这一个函数：
+    ///   * `gen_int_narrow_cast`（显式 cast 与内部窄化）
+    ///   * `reduce_assign_value_to_lvalue`（赋值左值路径的值归约）
+    ///   * `emit_truncate_to_unsigned`（浮点→无符号窄化）
+    ///   * `mov_to_stack`（具名变量的所有 store，含声明初始化）
+    ///   * `stmt.rs` 返回值宽度截断块（`return` 到 `_Bool` 返回类型）
+    ///   * `abi/call.rs` 标量实参（形参为 `_Bool` 的赋值语义）
+    pub(crate) fn emit_normalize_bool(&mut self, dst: u8) {
+        use crate::codegen::shared::asm_operand::Width;
+        // test dst64, dst64
+        self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst));
+        // setne dst8：`0F 95 /r` 的目的在 r/m ⇒ dst>=8 需要 REX.B（编码层处理）。
+        // 不用 `setne %al` 再搬：`dst` 可以是任意号（归约轴允许 dst=%rax/%rcx/…）。
+        self.emit_insn(&Insn::setcc_reg(
+            crate::codegen::x86_64::opcode::CondCode::Ne,
+            dst,
+        ));
+        // movzbq dst8, dst64：0/1 落到整个 64 位寄存器，后续按任意宽度读都对。
+        self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst));
+    }
     pub(crate) fn gen_int_narrow_cast(&mut self, dst: u8, target_ty: &Type) {
+        // `_Bool` 不是「无符号 1 字节整数」：宽度截断会把 0x200 变成 0，必须先归一化。
+        // 旧写法把 Bool 并进下面 `UChar` 分支（`movzbq %al`），这正是 §5.30 的根因。
+        if matches!(target_ty, Type::Bool) {
+            self.emit_normalize_bool(dst);
+            return;
+        }
         let is_signed = Self::is_signed_int(target_ty) || matches!(target_ty, Type::Char);
         match target_ty {
-            Type::Bool | Type::Char | Type::SChar | Type::UChar => {
+            Type::Char | Type::SChar | Type::UChar => {
                 if is_signed {
                     // movsbq dst_low8, dst: 截断到 8 位并符号扩展
                     self.emit_insn(&Insn::mov_ext(
@@ -617,9 +664,16 @@ impl Codegen {
             // 浮点 / 复数 / 聚合 / 指针左值各有自己的值模型（值通道不同），不在此列
             return;
         }
+        // `_Bool` 左值不是「无符号 1 字节整数」：C11 6.3.1.2p1 要求把右值归一化成
+        // 0/1 再作为赋值结果交付（`bool b; long v = (b = 0x200);` 的值必须是 1，
+        // 而 `movzbq` 会给 0 —— 与内核 §5.30 同一个根因）。
+        if matches!(lty, Type::Bool) {
+            self.emit_normalize_bool(reg);
+            return;
+        }
         let signed = match lty {
             Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
-            Type::Bool | Type::UChar | Type::UShort | Type::UInt => false,
+            Type::UChar | Type::UShort | Type::UInt => false,
             _ => true,
         };
         use crate::codegen::shared::asm_operand::Width;
@@ -665,6 +719,29 @@ impl Codegen {
             _ => return,
         };
         self.emit_insn_expect(&insn);
+    }
+
+    /// 标量内存左值（Index / Deref / Member / 通用回退）在 store 之后把赋值表达式
+    /// 的值交付到调用方请求的 `dst`。
+    ///
+    /// C11 6.5.16p3：赋值表达式有值。store 只写内存，归约后的值留在 `rax`；而
+    /// 调用方可能点名别的号——数组下标的消费者固定用 `rcx`（`gen_expr(idx, 1)`），
+    /// 移位计数、部分函数实参也各自点名。旧写法只有 Deref 臂在 `dst==1` 时补了
+    /// 一条 `mov rcx, rax`，Member / Index 两条主力臂没有：`g[s->n = c]` 于是把
+    /// **左值地址**当索引缩放（`imul $4,%rcx,%rcx`，rcx=&s->n），kbuild23 在
+    /// `seq_create_client1` 的 `clienttab[client->number = c] = client` 首次执行
+    /// 即 GPF（报告 §5.47；dcc -O0/-O1 段错误的最小复现）。
+    ///
+    /// 只收单寄存器标量（`stage_scalar_ty` 加枚举）：浮点值通道是 xmm0/st(0)，
+    /// 复数/聚合/int128 各有自己的交付约定，调用点本来也不经过这条臂。
+    pub(crate) fn deliver_scalar_assign_value(&mut self, dst: u8, lty: &Type) {
+        if dst == Self::EVAL_BASE {
+            return;
+        }
+        if !Self::stage_scalar_ty(lty) && !matches!(lty, Type::Enum(..)) {
+            return;
+        }
+        self.mov(dst, 0);
     }
 
     /// 赋值右值进内存左值之前的完整归约：先把浮点右值按左值内型截断，再按左值宽度

@@ -99,6 +99,23 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             name: name.name.clone(),
             offset: 0,
         }),
+        // 数组成员表达式的值就是该成员的地址（C11 6.3.2.1p3 数组退化），与上面的
+        // 「数组名退化」同一口径。缺这一臂时，`static_calls_table.capable`（extern
+        // 全局的结构体成员，类型 `struct lsm_static_call[2]`）作为指针字段的静态
+        // 初始化式会落到后端兜底：既不发符号重定位，又按**数组长度**填零 —— 内核
+        // `LSM_HOOK_INIT` 的 `.scalls = static_calls_table.NAME` 因此全为 NULL，
+        // 且把整个 `security_hook_list` 元素撑到数组长度（§5.33）。
+        Expr::Member {
+            ty: Type::Array(_, _),
+            ..
+        } => eval_full(
+            &Expr::AddrOf {
+                e: Box::new(expr.clone()),
+                ty: Type::Ptr(Box::new(crate::ast::QualType::new(expr.ty()))),
+                span: crate::diagnostics::Span::point("", 0, 0),
+            },
+            fenv_access,
+        ),
         Expr::String { data, .. } => {
             // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
             // 调用方需要确保同源字符串复用同一 label
@@ -421,6 +438,14 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         Expr::Cast { ty, e, .. } => {
             // 强制类型转换: 数值保留, 指针转换产生 NotConstant
             let v = eval_full(e, fenv_access)?;
+            // 目标类型是 `_Bool` 时**不是**「截断到 8 位」而是 `(v != 0)`
+            // （C11 6.3.1.2p1）。下面 `int_type_bits` 给 Bool 答 8、
+            // `is_unsigned_int_ty` 答 true，于是 `(_Bool)0x200` 会被折成
+            // `0x200 & 0xFF = 0` —— 与 §5.30 的 codegen 截断是同一个错。
+            // 地址/字符串常量按「非空指针」判真，与 truthy_value 同口径。
+            if matches!(ty, Type::Bool) {
+                return Ok(ConstValue::Int(if truthy_value(&v)? { 1 } else { 0 }));
+            }
             // 整数类型间: 根据目标类型位宽截断/零扩展/符号扩展
             // (否则 `~0U` 转为 u64 会保持 -1, 与 C 语义不符)
             if let ConstValue::Int(i) = v {
@@ -656,14 +681,24 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             l: _,
             r,
             op: _,
-            ty: _,
+            ty,
             span: _,
         } => {
             // Assignment expression as sub-expression: return the value of RHS
             // after evaluation, so that parent expression can continue constant folding.
             // Side effects (storing to LValue) cannot be done in compile-time constant evaluation,
             // so they will be handled at runtime. We just need to return the value of RHS.
-            eval_full(r, fenv_access)
+            //
+            // 但「赋值表达式的值」是**转换到左值类型之后**的 RHS（C11 6.5.16p3），
+            // 不是 RHS 原值。`ty` 是 parser 记下的左值类型（`lhs.ty()`），复合赋值
+            // 也已在 parser 展开成 `target = (target op rhs)`，所以这里只要按
+            // 左值类型收口即可。左值是 `_Bool` 时归一化为 0/1（6.3.1.2p1）：
+            // `v = (lb = 0x200)` 必须得 1，按原值传播就会得到 512（§5.30）。
+            let v = eval_full(r, fenv_access)?;
+            if matches!(ty, Type::Bool) {
+                return Ok(ConstValue::Int(if truthy_value(&v)? { 1 } else { 0 }));
+            }
+            Ok(v)
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1395,8 +1430,15 @@ fn interp_stmt(
     }
     match s {
         Stmt::Expr { e, .. } => {
-            if let Expr::Assign { l, r, .. } = e {
+            if let Expr::Assign { l, r, ty, .. } = e {
                 let val = eval_with_env(r, env, fenv_access)?;
+                // 同样按左值类型收口：`_Bool` 局部在语句表达式里绑定的是
+                // `(v != 0)`，不是 RHS 原值（§5.30 / C11 6.3.1.2p1）。
+                let val = if matches!(ty, Type::Bool) {
+                    ConstValue::Int(if truthy_value(&val)? { 1 } else { 0 })
+                } else {
+                    val
+                };
                 return match &**l {
                     // 赋值目标必须是**本语句表达式自己声明的局部**。这条不是洁癖而是
                     // 前置条件：`opt::fold_expr` 会把求值成功的语句表达式**整个换成常量**，
@@ -1596,7 +1638,14 @@ fn eval_with_env(
                 },
             }
         },
-        Expr::Cast { e, .. } => eval_with_env(e, ctx, fenv_access),
+        Expr::Cast { ty, e, .. } => {
+            let v = eval_with_env(e, ctx, fenv_access)?;
+            // 与 eval_full 的 Cast 分支同一口径：目标 `_Bool` 做真值归一化。
+            if matches!(ty, Type::Bool) {
+                return Ok(ConstValue::Int(if truthy_value(&v)? { 1 } else { 0 }));
+            }
+            Ok(v)
+        },
         _ => eval_full(expr, fenv_access),
     }
 }

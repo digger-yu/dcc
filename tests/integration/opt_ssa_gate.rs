@@ -94,8 +94,10 @@
 //      ⇒ `int`。于是 `int x=-1; unsigned int y=1; return x>y;` 被 SCCP 把**带类型的**
 //      `Var(y.1: UInt)` 换成**无类型的** `Int(1)` 后，重建只能猜回 `int` ⇒ 有符号条件码
 //      （实测 -O2/-O3 得 0，应 1；`DCC_SSA_OFF=sccp` 时 IR 仍保留两个带类型 Var，就正确）。
-//      现在比较指令的两个操作数类型在 build 期按 `dest` 名记进 `Function::cmp_operand_tys`，
-//      重建时用它给「裸 `Expr::Int` 操作数」补回类型。
+//      现在指令的两个操作数类型在 build 期按 `dest` 名记进 `Function::bin_operand_tys`，
+//      重建时用它给「裸 `Expr::Int` 操作数」补回类型。这张表今天盖住两个轴：比较的
+//      **符号性**（上面那条）与算术的**宽度** —— 内核 `put_dec_full8` 的
+//      `(r * (u64)0x28f5c29) >> 32` 少了宽度就被压回 32 位，`>> 32` 恒得 0。
 //
 // 全部通过 `run_gcc_cross_check_opt` 运行：带 `-O` 档位、带超时、与 gcc 逐字节对照。
 // 共用的逐档对照助手 `assert_all_levels_match_gcc`、汇编归一助手 `asm_body` 与
@@ -2486,5 +2488,102 @@ fn o2_compound_assign_and_decl_init_shapes_expand_under_gate() {
     assert!(
         def_calls >= 4,
         "op= / 声明初值 两类默认必须关着（实测是负的）：实得 {def_calls} 次 call\n{def_body}"
+    );
+}
+
+/// 执行级：`(unsigned) * (u64)字面量 >> 32` 的乘法宽度在 SSA 往返后仍是 64 位。
+///
+/// 内核 `lib/vsprintf.c` 的 `put_dec_full8` 用这一形做 `r / 100` 的免除法；宽度一丢，
+/// 发射序就成了 `imul; mov %eax,%eax; shr $32`（先截低 32 位再右移 32），恒得 0，
+/// 于是 `decpair[r - 100*q]` 越界，PVH 启动在 `put_dec_full8+0x8a` 以 #DF 收场
+/// （报告 §5.17）。`Function::bin_operand_tys` 按指令槽位还原两个操作数的 AST 类型，
+/// 这条用例与 `src/ssa/tests.rs::bin_operand_ty_records_arithmetic_width_too`
+/// 一头一尾把这个事实钉住：那边看 SSA 记账，这边看四档产物一致。
+#[test]
+fn ssa_mulhi_operand_width_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "ssa-mulhi-operand-width",
+        include_str!("../fixtures/opt/mulhi_operand_width.c"),
+        "`(u64)` 字面量的宽度在 SSA 往返里丢失 ⇒ 乘法压回 32 位，`>> 32` 恒得 0\
+         （退出码 1/2=免除法与真除法不符，3/4=有符号与无符号的宽移位错，\
+         5/6=指针算术的裸常量被刷成指针型或指针差退回 32 位）",
+    );
+}
+
+/// 执行级：前导零计数的**宽度**来自内建名，不来自重建后的实参类型。
+///
+/// 内核 `mm/sparse.c` 的 `mem_section_usage_size()` 经 `roundup_pow_of_two(4)` →
+/// `fls64(3)` → `64 - __builtin_clzll(3ULL)` 算 usemap 的字节数。实参是裸字面量时
+/// `Operand::Int` 不带类型，重建按量级阶梯猜成 `int`，前导零就按 32 位口径算：
+/// `1UL << 34`，memblock 拒给 1 TB，`sparse_init_subsection_map` 在 NULL 的
+/// `ms->usage` 上取 `->map`，PVH 启动在 `__bitmap_set+0x183` 以 #GP 收场
+/// （报告 §5.18）。发射端现在按内建名答（与 `const_eval.rs` 同口径），
+/// 另有一张 `Function::call_arg_tys` 把实参的 AST 类型补回去，两边都不再依赖猜测。
+#[test]
+fn ssa_clz_width_comes_from_builtin_name() {
+    harness::assert_all_levels_match_gcc(
+        "ssa-clz-width-by-name",
+        include_str!("../fixtures/opt/clz_width_by_builtin_name.c"),
+        "`__builtin_clzll/clzl` 的宽度丢了（按 32 位口径算前导零 ⇒ \
+         `roundup_pow_of_two(4)` 得 1<<34）或者 `__builtin_clz` 被反过来改成 64 位\
+         （退出码低位：1/2=clzll 与 clzl 的字面量形态，4/8/16/32/64/128/256/512=其余形状，\
+         1024/2048/4096=变量实参，8192=静态初始化那一眼）",
+    );
+}
+
+/// 发射级：指针/数组算术的宽度由操作数**是不是地址**决定，不由 `size()` 推。
+///
+/// 不完整数组 `T a[]` 在 AST 里是 `Array(_, Const(0))`，`size()` 为 0；下标是无符号
+/// 或枚举（`Type::is_int()` 与 `is_signed_int()` 都不认枚举）时，
+/// `op_size <= 4 && is_unsigned` 同时成立，`binop()` 把 `arr + i` 发成
+/// `add %r8d, %eax` —— 32 位加法把 64 位基址的高 32 位清零。
+///
+/// 现场（报告 §5.20）：内核 `kernel/cpu.c` 的
+/// `static inline struct cpuhp_step *cpuhp_get_step(enum cpuhp_state state)
+///  { return cpuhp_hp_states + state; }`（`cpuhp_hp_states` 是前置不完整声明）
+/// 被编成 `add %r8d,%eax`，得到的 0x87c5dfb0 代替 0xffffffff87c5dfb0；
+/// boot 在 `__cpuhp_setup_state_cpuslocked` 读该地址而 #PF→#DF→triple fault。
+///
+/// 判据只看**宽度**，不看整行文本：寄存器家与帧偏移随 regalloc 变，
+/// 盯整行等于把判据绑到跑分无关的分配结果上。
+#[test]
+fn ptr_arith_width_comes_from_address_operand_not_size() {
+    let src = include_str!("../fixtures/opt/ptr_arith_incomplete_array.c");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        for func in ["hp_step", "hp_step_u", "hp_step_rev", "name_via_ptr"] {
+            let body = harness::dcc_fn_body_at("ptr-arith-width", src, opt, func);
+            let adds: Vec<&str> = body
+                .lines()
+                .map(str::trim_start)
+                .filter(|l| l.starts_with("add "))
+                .collect();
+            assert!(
+                !adds.is_empty(),
+                "{opt} {func}: 体里找不到 add（夹具被优化掉或符号没发射？）\n{body}"
+            );
+            for l in adds {
+                let dst = l.rsplit(',').next().unwrap_or("").trim();
+                assert!(
+                    !dst.starts_with("%e"),
+                    "{opt} {func}: 指针算术按 32 位宽度发射 ⇒ 64 位基址高 32 位被清零\n{l}\n{body}"
+                );
+            }
+        }
+    }
+}
+
+/// 执行级：不完整数组 / 枚举下标 / 交换律 / 指针差在四档下与 gcc 同结果。
+///
+/// 与上一条用例分工：那边钉发射宽度（缺修复时必红，且不受二进制装载基址影响），
+/// 这边钉语义（夹具里的地址等式与真读）。非 PIE 产物的装载基址是 0x40xxxx，
+/// 高 32 位本来就是 0，截断在运行期看不出来 —— 所以两条都要。
+#[test]
+fn ptr_arith_incomplete_array_runtime_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "ptr-arith-incomplete-array",
+        include_str!("../fixtures/opt/ptr_arith_incomplete_array.c"),
+        "`arr + i` 的地址算术错了（退出码位：1=无符号下标、2=枚举下标、4=真读、\
+         8=结果落指针槽、16=交换律 `i + arr`、32=完整数组回归、64=真指针回归、\
+         128=`(arr + 7) - arr` 的指针差）",
     );
 }

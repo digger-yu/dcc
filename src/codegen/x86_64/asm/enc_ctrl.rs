@@ -24,11 +24,22 @@ impl Codegen {
             AsmOperand::Sym(label) => {
                 self.call_label(label);
             },
-            AsmOperand::SymDisp(label, _off) => {
-                // call *sym@PLT: lea rax, [rip+label]; call *rax
-                self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]));
-                self.asm_rel32_symbol(label, 7);
-                self.emit_insn(&Insn::raw(&[0xFF, 0xD0])); // call *%rax
+            AsmOperand::SymDisp(label, off) => {
+                // `call *sym+off(%rip)`：GAS 编成 `FF /2` + RIP-relative disp32（共 6 字节）。
+                // 旧实现是 `lea rax,[rip+sym]; call *%rax` —— 语义相同，但**形状**不同：
+                // 内核 `ALT_FLAG_DIRECT_CALL` 的 `alt_replace_call()` 只认
+                // `ff 15 disp32`（instrlen==6），否则 BUG()。boot 1.9 s 在
+                // `arch/x86/kernel/alternative.c:558` 停下的就是这一族站点
+                // （`call *%[paravirt_opptr]`，operand 是 `"m" (pv_ops.op)`）——§5.32。
+                let sym = if *off != 0 {
+                    format!("{label}{:+}", off)
+                } else {
+                    label.clone()
+                };
+                let gas = format!("call *{sym}(%rip)");
+                self.emit_insn(&Insn::raw_with_mnemonic(&[0xFF, 0x15, 0, 0, 0, 0], &gas));
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym));
             },
             AsmOperand::Reg(r, _) => {
                 if *r >= 8 {
@@ -42,7 +53,9 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base)]));
+                // REX 只在真的需要时发：空 0x40 不改变语义，但会让 objdump 写成
+                // `rex call *(%rbx)`，与 GAS 的 `ff 13` 对不上（§5.32 的 -c vs -S 对照）。
+                self.emit_rex_if_used(false, 0, index.unwrap_or(0), *base, false);
                 self.emit_asm_modrm_mem(0xFF, 2, *disp, *base, *index, *scale, false);
             },
             AsmOperand::SegMem {
@@ -54,7 +67,7 @@ impl Codegen {
             } => {
                 let (_code, pfx) = Self::seg_meta(*seg);
                 self.emit_insn(&Insn::raw(&[pfx]));
-                self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base)]));
+                self.emit_rex_if_used(false, 0, index.unwrap_or(0), *base, false);
                 self.emit_asm_modrm_mem(0xFF, 2, *disp, *base, *index, *scale, false);
             },
             AsmOperand::Imm(v) => {
@@ -209,12 +222,18 @@ impl Codegen {
                 self.emit_insn(&Insn::raw(&[0xE9, 0, 0, 0, 0]));
                 self.asm_rel32_symbol(label, 5);
             },
-            AsmOperand::SymDisp(label, _off) => {
-                // jmp *sym@PLT 或 jmp *sym: 走 RIP-relative 间接
-                // 模拟方式: lea rax, [rip+label]; jmp *rax
-                self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]));
-                self.asm_rel32_symbol(label, 7);
-                self.emit_insn(&Insn::raw(&[0xFF, 0xE0])); // jmp *%rax
+            AsmOperand::SymDisp(label, off) => {
+                // jmp *sym+off(%rip)：与 call 同形（`FF /4` + RIP-relative disp32，6 字节）。
+                // 旧实现的 lea+jmp *%rax 同样破坏 ALT_FLAG_DIRECT_CALL 的字节形状（§5.32）。
+                let sym = if *off != 0 {
+                    format!("{label}{:+}", off)
+                } else {
+                    label.clone()
+                };
+                let gas = format!("jmp *{sym}(%rip)");
+                self.emit_insn(&Insn::raw_with_mnemonic(&[0xFF, 0x25, 0, 0, 0, 0], &gas));
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym));
             },
             AsmOperand::Reg(r, _) => {
                 // jmp reg: FF /4

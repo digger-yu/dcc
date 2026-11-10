@@ -1,14 +1,14 @@
 classify:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x50,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 movslq %edi,%rax
 test %eax,%eax
 jge <classify>
 mov $0xffffffffffffffff,%rax
-add $0xc0,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 movslq -0x40(%r13),%rax
@@ -16,19 +16,19 @@ test %eax,%eax
 jne <classify>
 mov $0x0,%eax
 <nop padding>
-add $0xc0,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 mov $0x1,%eax
 <nop padding>
-add $0xc0,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 <nop padding>
 sum_range:
 push %r13
 mov %rsp,%r13
-sub $0xf0,%rsp
+sub $0x80,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 <nop padding>
@@ -69,6 +69,6 @@ movslq %r12d,%rax
 mov -0x10(%r13),%rbx
 mov -0x18(%r13),%r12
 <nop padding>
-add $0xf0,%rsp
+add $0x80,%rsp
 pop %r13
 ret

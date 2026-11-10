@@ -264,7 +264,7 @@ pub fn build_dep_graph(
             def_at.entry(d.name()).or_insert(i);
         }
         if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
-            for v in output_vars {
+            for v in output_vars.iter().flatten() {
                 def_at.entry(v.name()).or_insert(i);
             }
         }

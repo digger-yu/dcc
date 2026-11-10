@@ -2798,6 +2798,30 @@ impl Codegen {
     /// 逐元素运行时初始化 (如 `static const void *l[] = {&&a, &&b};`).
     pub fn emit_global_store_offset(&mut self, reg: u8, name: &str, elem_off: i32) {
         let resolved = self.resolve_global_key(name).to_string();
+        // fail-closed: 一个标量 store 写不完一个「装不进寄存器」的对象。本函数
+        // 只按 `globals_raw` 里的尺寸发一条 `mov [rip+disp], reg`，sz>8 或运行时
+        // 尺寸（VM struct/VLA）时**剩下那部分从未被写** —— 静默误编译。
+        // 正确入口是整块搬运：`Codegen::gen_aggregate_assign_to(&AggDst::Global(..), ..)`。
+        //
+        // 判据为什么只问「装不装得进」而不问「形状是不是聚合」：实测后者是错的。
+        // `gcc.c-torture/execute/20040707-1.c` 的 `static struct s s1; s1 = s;`
+        // （`struct s { char c1, c2; }`，SysV 把 2 字节的值整个装在 gp 寄存器里）
+        // 是一条**语义正确**的标量存，按形状禁区会把合法代码报成内部错误 ——
+        // 与 E0321 初版那次的教训同一型：判据本身错了，闸门只会把噪声放大。
+        // 「把物化缓冲**地址**当值写进 4 字节锁字」那一族（报告 §5.14）由发射侧
+        // 构造性排除：`Codegen::gen_static_local_init` 对所有聚合形状都只走整块
+        // 拷贝，不再经过这里。
+        // `elem_off != 0` 那支是「写聚合的一个元素」，天然不在禁区。
+        if elem_off == 0 {
+            if let Some(g) = self.globals_raw.get(&resolved) {
+                assert!(
+                    !Self::value_is_whole_copy(&g.ty),
+                    "emit_global_store: `{name}` ({} B, 装不进一个寄存器) 被当成标量存入；\
+                     必须整块拷贝（AggDst::Global）",
+                    g.size
+                );
+            }
+        }
         // 同 load：段前缀只改指令字节，`is_tls` 只改重定位种类，两条轴不合并。
         self.emit_global_seg(&resolved);
         let (sz, is_tls, _off) = self
@@ -2843,10 +2867,14 @@ impl Codegen {
     // Local variable registration / slot allocation
     // ========================================================================
 
-    /// 帧头字节数: 16 (保存的 r13 + 返回地址) + 32 (callee-saved) + temp_slots*8。
+    /// 帧头字节数（§5.42）: 16(canary 格 + 变量区第一槽) + 8*cs_slots(计划 popcount)
+    /// + temp_slots*8。变量区第一个槽的偏移就是 `-hdr`，cs=4 时与旧口径 48+8t 同值。
     /// 变量区与 sret/物化槽区都从帧头之下向下生长, 两条边界必须同口径。
     pub fn frame_hdr(&self) -> i64 {
-        crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(self.temp_slots as i64)
+        crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(
+            self.temp_slots as i64,
+            self.callee_plan.count_ones() as i64,
+        )
     }
 
     /// **变量区**当前已占用的最低字节地址: 其它帧区只允许排在它之下。
@@ -3008,7 +3036,18 @@ impl Codegen {
         // 规划期路径：变量区水位。此时 sret/物化区与晚分配带都还没定坐标（帧尚未解算），
         // 新登记的变量就是普通局部，往下压变量区水位，后面由 `LayoutMap::resolve` 统一安排。
         let hdr = self.frame_hdr();
-        let used = self.var_map_total_slots.saturating_mul(8);
+        let mut used = self.var_map_total_slots.saturating_mul(8);
+        // 对齐圆整（与 `ScopedVarAlloc::alloc_one` 同一条判据）：基址是
+        // `-(used + hdr) - (slots-1)*8`，必须能被类型对齐整除。以前 16 字节对齐
+        // 靠帧头的数值巧合成立，§5.42 换成 `8+8cs+8t` 后巧合不再 —— 对齐必须显式。
+        let align = ty.align().max(8) as i64;
+        if align > 8 {
+            let target = hdr + (slots.saturating_sub(1) * 8);
+            let rem = (used + target).rem_euclid(align);
+            if rem != 0 {
+                used += align - rem;
+            }
+        }
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
         self.var_map.insert(name.to_string(), (off, ty.clone()));
         self.note_volatile_var_slots(name, off);
@@ -3122,7 +3161,29 @@ impl Codegen {
     /// （旧的同名常量 `Codegen::CX_FRAME_BAND` 与镜像字段 `Codegen::frame_size` 已删，
     /// 帧的坐标只剩 `LayoutMap` 一个出处。）
     pub fn complex_result_off(&self) -> i64 {
-        self.frame_layout.rvalue_off
+        // 调用方这一层的断言只为把「哪个函数」带进文本；几何判据与 `LayoutMap` 里那条
+        // 同源（带尺寸单源于 `abi::layout::cx_band_reserve`）。
+        assert!(
+            self.frame_layout.cx_band > 0 || self.frame_layout.frame_size == 0,
+            "complex/聚合 rvalue 物化槽被使用，但 `{}` 没有那条带（frame_size={}）",
+            self.current_func_name,
+            self.frame_layout.frame_size,
+        );
+        self.frame_layout.cx_rvalue_off()
+    }
+
+    /// 位域 RMW 帧槽的地址。几何判据只住 `LayoutMap::bf_rmw_slot`；本层只为报错时能
+    /// 把「哪个函数」说出来（与 [`Codegen::complex_result_off`] 同一手法）。
+    pub fn bf_rmw_slot(&self, depth: i64, slot_idx: i64) -> i32 {
+        assert!(
+            self.frame_layout.bf_rmw_reserve > 0 || self.frame_layout.frame_size == 0,
+            "位域 RMW 槽被使用，但 `{}` 没有那条带（bf_rmw_reserve=0, frame_size={}, \
+             depth={depth} slot={slot_idx}）—— 扫描漏了一种写位域/位域自增的形态，判据见 \
+             `emit/func_setup.rs::Codegen::member_names_bitfield`",
+            self.current_func_name,
+            self.frame_layout.frame_size,
+        );
+        self.frame_layout.bf_rmw_slot(depth, slot_idx)
     }
 
     /// 保存当前 sret 槽水位 (用于嵌套求值作用域)。配合

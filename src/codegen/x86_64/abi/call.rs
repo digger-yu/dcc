@@ -1142,6 +1142,12 @@ impl Codegen {
                 {
                     self.emit_implicit_float_to_int(0, &sc_arg_ty, &effective_ty);
                 }
+                // 形参是 `_Bool`：参数初始化是赋值语义（C11 6.5.2.2p4 + 6.3.1.2p1），
+                // 实参必须先归一化为 0/1 再传。旧路径只按 8 位传原值，被调方拿到
+                // `gid(0x200)` 的 512 当 bool 用（`b + 1` 得 513 而非 2）。
+                if matches!(&effective_ty, Type::Bool) {
+                    self.emit_normalize_bool(0);
+                }
                 // 零大小类型 (如空结构体) 无 ABI 槽位, 只求值不传参
                 if arg_locs.is_empty() {
                     continue;

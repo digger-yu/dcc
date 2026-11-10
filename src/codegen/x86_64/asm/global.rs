@@ -24,6 +24,7 @@ impl Codegen {
     ) {
         let mut bindings = Vec::new();
         let op_map = self.build_asm_operand_map(
+            asm_str,
             outputs,
             output_names,
             output_constraints,

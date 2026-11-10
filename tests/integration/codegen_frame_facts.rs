@@ -840,3 +840,109 @@ fn nested_call_sites_are_16_byte_aligned() {
         "call 处 rsp 未 16 对齐（偏移 {bad:?}；合法值只有 0）:\n{body}"
     );
 }
+
+// ============================================================================
+// §5.26 帧槽复用（frame economy）
+// ============================================================================
+
+/// 块作用域退出即回收水位：兄弟块 / 已退出的内联块共用同一批栈槽。
+///
+/// 判据是**产物里的帧大小**，不是行为：这是纯经济性属性，四档对拍只能证明
+/// 「复用没有把两个同时活着的变量写到一起」，那是本条的语义半边（也一起跑）。
+///
+/// 红法：把 `ScopedVarAlloc::block` 的 `release` 去掉（退回扁平水位）⇒ 夹具里
+/// 12 块 × 6 个唯一 volatile 局部 + 4 份内联 `mix` 全部相加，`frame_subject`
+/// 的帧从 256B 涨回 1312B（旧二进制实测），本条按 0x180 的上界立刻变红。
+#[test]
+fn block_scopes_reuse_frame_slots() {
+    const SRC: &str = include_str!("../fixtures/c/scoped_frame_reuse.c");
+    let body = dcc_fn_body_at("scoped-frame-reuse", SRC, "-O2", "frame_subject");
+    let mut frame = 0i64;
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("sub $") {
+            if let Some((imm, dst)) = rest.split_once(',') {
+                if dst.trim() == "%rsp" {
+                    if let Ok(v) = imm.trim().parse::<i64>() {
+                        frame = frame.max(v);
+                    }
+                }
+            }
+        }
+    }
+    assert!(frame > 0, "没找到 frame_subject 的 `sub $N, %rsp`:\n{body}");
+    assert!(
+        frame <= 0x180,
+        "§5.26: frame_subject 的帧 {frame}B 超过 0x180 —— 块作用域的槽没有被复用\n\
+         （扁平水位下这份夹具是 1312B；作用域复用后实测 256B）:\n{body}"
+    );
+    // 语义半边：复用只能发生在生命周期不相交的变量之间，四档与 gcc 对拍。
+    assert_all_levels_match_gcc(
+        "scoped-frame-reuse",
+        SRC,
+        "§5.26 帧槽复用后活变量被已退出块的变量覆盖",
+    );
+}
+
+// ===== §5.29 过对齐帧锚点：必须在零初始化**之后**写 =====
+
+/// 过对齐帧（`aligned(32/64)` 局部对象）的序言先把「对齐前的帧顶」存进锚点槽，
+/// 再 `and $-64, %r13` / `mov %r13, %rsp`；尾声用 `mov -N(%r13), %rsp` 恢复。
+///
+/// `-ftrivial-auto-var-init=zero` 清的是 `[r13-frame_size, r13)`，锚点槽正落在
+/// 这一段里 —— 先写锚点再清帧，槽就是 0，尾声把 rsp 置 0、`pop %r13` 当场
+/// #PF→#DF（kbuild14 boot 的停点）。
+///
+/// 红法：把 `emit_over_align_anchor()` 的调用挪回 `emit_zero_init_frame()` 之前
+/// ⇒ `anchor > zero` 立刻变红。锚点偏移由尾声自己给出，不写死 -0x50。
+#[test]
+fn over_align_anchor_written_after_zero_init() {
+    let src = r#"
+typedef unsigned long ulong;
+__attribute__((noinline)) int f(void)
+{
+	int buf[4] __attribute__((aligned(64)));
+	buf[0] = 7;
+	buf[1] = (int)((ulong)buf & 63);
+	return buf[0] + buf[1];
+}
+"#;
+    let (asm, _) = harness::compile_asm_text_with_env(
+        "over-align-anchor-order",
+        src,
+        &["-std=gnu23", "-O0", "-ftrivial-auto-var-init=zero"],
+        &[],
+    );
+    let lines: Vec<&str> = asm.lines().collect();
+    let epi = lines
+        .iter()
+        .position(|l| {
+            let t = l.trim();
+            t.starts_with("mov") && t.contains("(%r13), %rsp")
+        })
+        .expect("尾声必须从过对齐锚点槽恢复 rsp");
+    let off = lines[epi]
+        .split("(%r13)")
+        .next()
+        .unwrap()
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .to_string();
+    let zero = lines
+        .iter()
+        .position(|l| l.contains("rep stos"))
+        .expect("零初始化帧必须发出 rep stos");
+    let anchor = lines
+        .iter()
+        .position(|l| {
+            let t = l.trim();
+            t.starts_with("mov") && t.contains(&format!(", {}(%r13)", off))
+        })
+        .expect("序言必须写锚点槽");
+    assert!(
+        anchor > zero,
+        "锚点写在第 {anchor} 行、零初始化在第 {zero} 行：{off}(%r13) 会被清成 0\
+         （§5.29 回归）:\n{asm}"
+    );
+}

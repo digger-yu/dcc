@@ -130,7 +130,11 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
                 other => other.clone(),
             }
         };
-        let is_int_like = |t: &Type| t.is_int();
+        // C11 6.2.5p17：枚举类型属于**整数类型**，与 `int` 一样可作指针算术的下标。
+        // `Type::is_int()` 只列标准整型变体，枚举单独一支，所以这里不能只问它：
+        // 否则 `arr + enum` 会掉到本函数末尾的 `Type::Int` 兜底，SSA→AST 重建把
+        // 结果标成 32 位（§5.20：内核 `cpuhp_hp_states + state` 的地址被截断）。
+        let is_int_like = |t: &Type| t.is_int() || matches!(t, Type::Enum(..));
         if is_ptr(&lt) && is_int_like(&rt) {
             return decay(&lt);
         }
@@ -388,8 +392,8 @@ fn unary_result_ty(dest_ty: Option<&Type>, op: &UnOp, inner_ty: &Type) -> Type {
 /// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
 /// `inst_dest` 是该指令的 `dest` 变器：它的**类型**是 `AddrOf` 重建 `&base` 与
 /// `Un` 重建一元结果（`-d` 必须仍是 double）这两个分支的类型**唯一真源**；它的
-/// **名字**则是 [`crate::ssa::ir::Function::cmp_operand_tys`] 的索引 —— 比较操作数被
-/// 常量传播抹成无类型 `Operand::Int` 后，只有按指令还能找回它们在 AST 里的类型。
+/// **名字**则是 [`crate::ssa::ir::Function::bin_operand_tys`] 的索引 —— 操作数被
+/// 常量传播或 cast 折叠抹成无类型 `Operand::Int` 后，只有按指令还能找回它们在 AST 里的类型。
 pub(super) fn inst_to_expr_resolved(
     kind: &InstKind,
     subst: &HashMap<String, Option<Expr>>,
@@ -404,15 +408,18 @@ pub(super) fn inst_to_expr_resolved(
         InstKind::Bin { op, l, r } => {
             let mut l_expr = resolve_operand(l, &fake_env, subst, func);
             let mut r_expr = resolve_operand(r, &fake_env, subst, func);
-            // 把被 SCCP/拷贝传播抹掉的字面量类型补回去（只在两个操作数都重建为
-            // 裸 `Expr::Int` 时改它的 `ty`），否则下面 `infer_binop_type` 与 codegen
-            // 只能拿量级阶梯猜出的类型去定比较的符号性。
-            if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
-                if let Some(d) = inst_dest {
-                    if let Some((lt, rt)) = func.cmp_operand_ty(&d.name()) {
-                        restore_int_operand_ty(&mut l_expr, &lt);
-                        restore_int_operand_ty(&mut r_expr, &rt);
-                    }
+            // 把被 SCCP/拷贝传播、以及被 `Expr::Cast{整型, 常量}` 折叠抹掉的操作数类型
+            // 补回去。两个面都需要：符号性（比较的条件码）与**宽度**（算术的发射口径，
+            // 实测内核 `put_dec_full8` 少了宽度就把 `(r*(u64)magic) >> 32` 编成
+            // `imul; mov %eax,%eax; shr $32` 恒得 0）。判据与记账条件见
+            // [`crate::ssa::ir::Function::bin_operand_tys`]；两边都只在操作数重建为
+            // 裸 `Expr::Int` 时改动 `ty`，带类型的 Var / 临时量一律不碰。
+            let mut ty_from_inst_slot = false;
+            if let Some(d) = inst_dest {
+                if let Some((lt, rt)) = func.bin_operand_ty(&d.name()) {
+                    restore_int_operand_ty(&mut l_expr, &lt);
+                    restore_int_operand_ty(&mut r_expr, &rt);
+                    ty_from_inst_slot = true;
                 }
             }
             // 移位的结果类型在 C 里就是「左操作数整数提升后的类型」（右操作数只是计数）。
@@ -427,7 +434,10 @@ pub(super) fn inst_to_expr_resolved(
             // 真实受害者：`sqlite3WhereGetMask()` 的 `return MASKBIT(i);` —— 第 33 号游标的
             // maskSelf 记成 0，查询规划器把同一个游标开两遍、最后一个游标从未打开，字节码在
             // OP_Column 读 [NULL+0x50] 段错误（docs §7 的 H）。
-            if matches!(op, BinOp::Shl | BinOp::Shr) {
+            // 本位只作为「指令槽上没有记账」时的退路（pass 克隆出的新 dest）：槽上那份是
+            // AST 当场留下的操作数类型，而 dest 型可能比它窄（`unsigned q = (u64)… >> 32;`
+            // 的 dest 是 UInt），拿 dest 型反过来刷左操作数就是把乘法压回 32 位。
+            if !ty_from_inst_slot && matches!(op, BinOp::Shl | BinOp::Shr) {
                 if let Some(ty) = dest_ty {
                     if ty.is_int() {
                         restore_int_operand_ty(&mut l_expr, ty);
@@ -542,14 +552,27 @@ pub(super) fn inst_to_expr_resolved(
             callee,
             args,
             ret_ty,
-        } => Expr::Call {
-            callee: Box::new(resolve_operand(callee, &fake_env, subst, func)),
-            args: args
+        } => {
+            let mut call_args: Vec<Expr> = args
                 .iter()
                 .map(|a| resolve_operand(a, &fake_env, subst, func))
-                .collect(),
-            span: sp.clone(),
-            ty: ret_ty.clone(),
+                .collect();
+            // 实参被常量传播/折叠抹成裸 `Expr::Int` 时，把它在 AST 里的类型补回去
+            // （判据与记账条件见 [`crate::ssa::ir::Function::call_arg_tys`]）。
+            // 只碰裸整常量：带类型的 Var / 嵌套表达式一律不动。
+            if let Some(d) = inst_dest {
+                if let Some(tys) = func.call_arg_ty(&d.name()) {
+                    for (a, t) in call_args.iter_mut().zip(tys.iter()) {
+                        restore_int_operand_ty(a, t);
+                    }
+                }
+            }
+            Expr::Call {
+                callee: Box::new(resolve_operand(callee, &fake_env, subst, func)),
+                args: call_args,
+                span: sp.clone(),
+                ty: ret_ty.clone(),
+            }
         },
         // C++ 零成本 EH: 受保护调用的**正常路径**与普通调用完全同形 (落地垫由
         // unwinder 按地址区间进入, 不是表达式的一部分)。`rebuild_bb` 会先把这条
@@ -690,17 +713,16 @@ pub(super) fn inst_to_expr_resolved(
                 .iter()
                 .enumerate()
                 .map(|(idx, output)| {
-                    output_vars
-                        .get(idx)
-                        .map(|v| Expr::Ident {
-                            name: crate::ast::Ident {
-                                name: v.base.clone(),
-                                span: v.span.clone(),
-                            },
-                            span: v.span.clone(),
-                            ty: v.ty.clone(),
-                        })
-                        .unwrap_or_else(|| output.clone())
+                    // `output_vars` 与 `outputs` 逐位对齐（见 `InstKind::InlineAsm::output_vars`）；
+                    // 没 def 的位置一律保持原表达式，不要把相邻输出的名字搬过来。
+                    // 名字走 `local_splits.ast_name`，与 `resolve_operand` 同一事实：
+                    // 版本分裂过的局部要代回它自己在 AST 里的名字。
+                    match output_vars.get(idx).and_then(|v| v.as_ref()) {
+                        Some(v) if matches!(output, Expr::Ident { .. }) => {
+                            ssa_ident_expr(&func.local_splits.ast_name(v), v)
+                        },
+                        _ => output.clone(),
+                    }
                 })
                 .collect();
             Expr::AsmExpr {
@@ -711,7 +733,28 @@ pub(super) fn inst_to_expr_resolved(
                 inputs: inputs
                     .iter()
                     .take(input_names.len())
-                    .map(|o| resolve_operand(o, &fake_env, subst, func))
+                    .enumerate()
+                    .map(|(idx, o)| {
+                        let raw = input_constraints.get(idx).map(String::as_str).unwrap_or("r");
+                        let expr = resolve_operand(o, &fake_env, subst, func);
+                        // `"m"` / `"+m"` 操作数在 IR 里存的是**地址**（与 `ssa/build.rs` 的
+                        // 降级同一份判据）：发射侧需要的是一个左值，把地址直接当成值会
+                        // 变成「拿指针值当地址」（内核实测 triple fault）。这里还原成
+                        // `*addr`：`asm_memory_operand_str` 对 `Deref` 走的就是求地址那条路。
+                        if crate::codegen::shared::asm_constraints::constraint_prefers_memory(
+                            raw,
+                            raw.contains('+'),
+                        ) {
+                            if let Type::Ptr(q) = expr.ty() {
+                                return Expr::Deref {
+                                    e: Box::new(expr),
+                                    span: sp.clone(),
+                                    ty: q.base.clone(),
+                                };
+                            }
+                        }
+                        expr
+                    })
                     .collect(),
                 input_names: input_names.clone(),
                 input_constraints: input_constraints.clone(),
@@ -1173,10 +1216,24 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             clobbers,
             volatile,
             ty,
+            output_vars,
             ..
         } => Expr::AsmExpr {
             asm_str: asm_str.clone(),
-            outputs: outputs.clone(),
+            // 与 `inst_to_expr_resolved` 同一代回规则（逐位对齐 + 只在 Ident 位上代），
+            // 两处不一致会让「走哪条重建路径」决定 asm 输出绑到哪个对象上。
+            outputs: outputs
+                .iter()
+                .enumerate()
+                .map(|(idx, output)| {
+                    match output_vars.get(idx).and_then(|v| v.as_ref()) {
+                        Some(v) if matches!(output, Expr::Ident { .. }) => {
+                            ssa_ident_expr(&func.local_splits.ast_name(v), v)
+                        },
+                        _ => output.clone(),
+                    }
+                })
+                .collect(),
             output_names: output_names.clone(),
             output_constraints: output_constraints.clone(),
             inputs: inputs

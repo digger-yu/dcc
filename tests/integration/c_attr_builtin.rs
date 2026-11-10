@@ -289,6 +289,29 @@ fn attr_cleanup_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
+/// 同一批 cleanup 形状在 `-O2` 下也必须成立 —— 内核就是用 `-O2` 编的。
+///
+/// 现场是 PVH 启动：`include/linux/cleanup.h` 的 `guard(raw_spinlock_irqsave)
+/// (&ioapic_lock);` 展开成一个**函数体层**的 `__cleanup__` 声明符，而
+/// `end_cleanup_scope` 以前只在 `Stmt::Block` 的出口被调用 —— 那一层没有块出口，
+/// 于是解锁从未被发射。`ioapic_lock` 的锁字停在 `0x101`（locked=1、pending=1），
+/// 下一次取锁进 `queued_spin_lock_slowpath` 的等待环，启动走到
+/// `Processor #0 (Bootup-CPU)` 就静默卡死（报告 §5.16）。
+///
+/// 夹具另钉了两件事：返回值要跨过 cleanup 那次 `call` 活下来（所以整数交付
+/// 先 `push rax,rdx`），以及一个函数的**每个** `return` 站点都要发自己那一份
+/// （登记栈只有一份，消费式写法只会让后发射的站点拿到空栈）。
+#[test]
+#[cfg(unix)]
+fn attr_cleanup_at_kernel_opt_level() {
+    let source = include_str!("../fixtures/c/attr_cleanup.c");
+    let (output, exe) = run_compile_and_run_flags("attr-cleanup-o2", source, &["-O2"]);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "attr_cleanup -O2 should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// __attribute__((target_clones(...))): 解析并存入 FuncDecl.target_clones
 #[test]
 #[cfg(unix)]

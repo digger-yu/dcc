@@ -667,7 +667,16 @@ impl Codegen {
             // 夹成 INT_MAX), 负源值钳 0。
             (
                 src @ (Type::Float | Type::Double | Type::LongDouble),
-                Type::Bool | Type::UChar | Type::UShort | Type::UInt,
+                Type::Bool,
+            ) => {
+                // 浮点 → _Bool 是 `(value != 0)`（NaN 算真），不是「先截断成整数」：
+                // `(_Bool)0.5` 必须为真（gcc 为真，§5.30 夹具 `boolwide.c`）。
+                // 值已在 xmm0（LongDouble 在 `src_is_ld` 段已落 f64，不做二次弹出）。
+                self.emit_xmm0_to_bool(dst, src);
+            },
+            (
+                src @ (Type::Float | Type::Double | Type::LongDouble),
+                Type::UChar | Type::UShort | Type::UInt,
             ) => {
                 // long double 内部为 double, 值已在 xmm0
                 self.emit_float_to_unsigned(dst, src, ty);
@@ -687,7 +696,13 @@ impl Codegen {
                 // 目标为无符号小类型: 截断到目标宽度 (零扩展语义)
                 // 目标为有符号小类型: 截断后符号扩展
                 match dst_ty {
-                    Type::Bool | Type::UChar => {
+                    Type::Bool => {
+                        // `_Bool` 不是「无符号 1 字节整数」：C11 6.3.1.2p1 要求
+                        // `(value != 0)` 归一化，而 `and $0xFF` 把 0x200 抹成 0
+                        // (§5.30: `(_Bool)0x200` 实测得 0，gcc 得 1)。
+                        self.emit_normalize_bool(dst);
+                    },
+                    Type::UChar => {
                         // P11: and dst64, 0xFF via AluRm B64 imm32 typed (REX.W=0x48|B).
                         self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
                             0x4, /* /4=and */

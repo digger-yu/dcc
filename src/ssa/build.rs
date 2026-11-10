@@ -606,6 +606,26 @@ impl Builder {
         }
     }
 
+    /// 左值的**地址**降级：`*p` 直接取指针值（`&*p == p`），其余形态（`s.f` /
+    /// `a[i]` / 变量）造一条 `Expr::AddrOf` 走那条已验证的降级（`AddrOf` /
+    /// `MemberAddr` / `IndexAddr`）。
+    ///
+    /// 两个调用点（`lower_mem_rmw` 的读—改—写、`Expr::AsmExpr` 的 `"m"`/`"+m"`
+    /// 操作数）共用这一份：地址是 SSA 值，左值形态不是。
+    fn lower_lvalue_addr(&mut self, lv: &Expr, span: &Span) -> Operand {
+        match lv {
+            Expr::Deref { e, .. } => self.lower_expr(e),
+            other => {
+                let addr_node = Expr::AddrOf {
+                    e: Box::new(other.clone()),
+                    span: span.clone(),
+                    ty: Type::Ptr(Box::new(QualType::new(other.ty()))),
+                };
+                self.lower_expr(&addr_node)
+            },
+        }
+    }
+
     /// 内存左值（`*p` / `a[i]` / `s.f` / `q->g`）的**读—改—写**降级：自增自减与复合
     /// 赋值共用这一条。地址只求一次，旧值与新值各是一个 SSA 临时值，写回同一个地址。
     ///
@@ -647,17 +667,7 @@ impl Builder {
         // 符号性就跟着错。
         let new_ty = res_ty.cloned().unwrap_or_else(|| ty.clone());
         let is_volatile = self.lvalue_is_volatile(lv);
-        let addr: Operand = match lv {
-            Expr::Deref { e, .. } => self.lower_expr(e),
-            other => {
-                let addr_node = Expr::AddrOf {
-                    e: Box::new(other.clone()),
-                    span: span.clone(),
-                    ty: Type::Ptr(Box::new(QualType::new(ty.clone()))),
-                };
-                self.lower_expr(&addr_node)
-            },
-        };
+        let addr: Operand = self.lower_lvalue_addr(lv, span);
         let old = self.fresh("rmwld", ty.clone(), span);
         self.emit(Inst {
             dest: Some(old.clone()),
@@ -876,14 +886,19 @@ impl Builder {
                     return Operand::Int(0);
                 }
                 let dest = target.unwrap_or_else(|| self.fresh("bin", ty.clone(), span));
-                // 比较的符号性由两个操作数的**公共类型**决定（C11 6.3.1.8），而公共类型
-                // 只能从操作数类型推。`Operand::Int` 不带类型，SCCP 把 `Var(y.1: UInt)`
-                // 换成 `Int(1)` 后这份事实就消失了（重建只能按量级把 `1` 猜成 `int` ⇒
-                // 无符号比较编成有符号条件码），所以在还看得见 AST 类型的此刻按 `dest`
-                // 名记一笔，交给 `expr_rebuild` 消费。
-                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
-                    let (lt, rt) = (l.ty(), r.ty());
-                    self.func.note_cmp_operand_tys(dest.name(), &lt, &rt);
+                // 操作数的 AST 类型只能在这里记下：`Operand::Int` 不带类型，SCCP/拷贝
+                // 传播会把 `Var(y.1: UInt)` 换成 `Int(1)`，`Expr::Cast{u64, 常量}` 也会
+                // 被折叠成裸 `Operand::Int` —— 字面量的**符号性与宽度**就在这一步
+                // 消失（两族实测见 `Function::bin_operand_tys`：无符号比较拿到有符号
+                // 条件码，以及内核 `put_dec_full8` 的 `(r * (u64)0x28f5c29) >> 32` 被编成
+                // `imul; mov %eax,%eax; shr $32` 恒得 0）。
+                // 比较那一支保持旧口径（浮点比较的整型字面量也要被刷成操作数自己的
+                // 类型，今天就是那样工作的）；其余运算只在**两边都是整数**时记账，
+                // 指针算术里的 `1` 不该被刷成指针型。
+                let is_cmp = matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge);
+                let (lt, rt) = (l.ty(), r.ty());
+                if is_cmp || (lt.is_int() && rt.is_int()) {
+                    self.func.note_bin_operand_tys(dest.name(), &lt, &rt);
                 }
                 self.emit(Inst {
                     dest: Some(dest.clone()),
@@ -1164,6 +1179,20 @@ impl Builder {
                 } else {
                     Some(target.unwrap_or_else(|| self.fresh("call", ret_ty.clone(), span)))
                 };
+                // 实参的 AST 类型只能在这里记（`Operand::Int` 不带类型）：裸字面量重建回
+                // AST 时只能按量级阶梯猜，而按实参类型定语义的内建（`__builtin_clzll` 的
+                // 宽度等）问的正是它。只记阶梯会猜错的槽位（判据见
+                // `Function::call_arg_tys`）。
+                if let Some(ref d) = dest {
+                    let arg_tys: Vec<Type> = args.iter().map(|a| a.ty()).collect();
+                    let guessed_wrong = args.iter().zip(arg_tys.iter()).any(|(a, t)| {
+                        matches!(a, Expr::Int { v, .. }
+                            if crate::ssa::expr_rebuild::int_const_ty(*v) != *t)
+                    });
+                    if guessed_wrong {
+                        self.func.note_call_arg_tys(d.name(), &arg_tys);
+                    }
+                }
                 self.emit(Inst {
                     dest: dest.clone(),
                     kind: InstKind::Call {
@@ -1688,22 +1717,61 @@ impl Builder {
                         return Operand::Int(0);
                     }
                 }
-                let mut input_ops: Vec<Operand> =
-                    inputs.iter().map(|e| self.lower_expr(e)).collect();
-                let mut output_vars = Vec::new();
+                // `"m"` / `"+m"` 操作数降级成**地址**，不是值。
+                //
+                // 为什么（报告 §5.27，实测 kernel `writel()`）：`"m"(*(volatile u32 *)addr)`
+                // 走值通道时，volatile 读是不可消除的可观察事件，必须物化成临时值，
+                // 重建回 AST 就只剩 `Ident(_tN)`；发射侧把「是 Ident」读成「对象就住在
+                // 这个变量的帧槽里」，模板里的 `movl %0,%1` 于是写进**临时值的槽**。
+                // 内核后果：IOAPIC 的索引寄存器永远收不到写，`readl` 读回 0 ——
+                // `IOAPIC[0]: … version 0 … GSI 0-0`、`nr_irqs 33`（gcc：version 32 /
+                // GSI 0-23 / 256），`irq_startup` 靠在未激活的门上 WARN。
+                //
+                // 地址走 `lower_lvalue_addr`（与 `lower_mem_rmw` 同一真源）；重建侧按
+                // **同一份约束表**（`input_constraints` → `constraint_prefers_memory`）
+                // 把地址包回 `*addr`。两边只要有一边不按这份表走，IR 里“值是值还是
+                // 地址”就没人说得清 —— 这类「静默错值」的代价比一次 lea 高得多。
+                let mut input_ops: Vec<Operand> = Vec::with_capacity(inputs.len() + outputs.len());
+                for (idx, e) in inputs.iter().enumerate() {
+                    let raw = input_constraints.get(idx).map(String::as_str).unwrap_or("r");
+                    if crate::codegen::shared::asm_constraints::constraint_prefers_memory(
+                        raw,
+                        raw.contains('+'),
+                    ) {
+                        input_ops.push(self.lower_lvalue_addr(e, span));
+                    } else {
+                        input_ops.push(self.lower_expr(e));
+                    }
+                }
+                // `output_vars` 与 `outputs` 逐位对齐：不是 Ident 的输出（`*v`、`a[i]`、
+                // `s.f`）在 IR 里建不出 def，但**必须占一个 `None` 位**，否则后面的
+                // 写侧变量会整体上移一位，重建时把某个操作的地址换成另一个变量的名字
+                // （§5.11 的根因）。
+                let mut output_vars: Vec<Option<SsaVar>> = Vec::with_capacity(outputs.len());
                 for (idx, out) in outputs.iter().enumerate() {
                     if output_constraints.get(idx).is_some_and(|c| c.contains('+')) {
-                        input_ops.push(self.lower_expr(out));
+                        // `+m` 是读—改—写的内存对象：与 inputs 侧同一条口径，存地址。
+                        let raw = output_constraints.get(idx).map(String::as_str).unwrap_or("");
+                        if crate::codegen::shared::asm_constraints::constraint_prefers_memory(
+                            raw, true,
+                        ) {
+                            input_ops.push(self.lower_lvalue_addr(out, span));
+                        } else {
+                            input_ops.push(self.lower_expr(out));
+                        }
                     }
-                    if let Expr::Ident { name, ty, .. } = out {
-                        let v = SsaVar {
-                            base: name.name.clone(),
-                            version: self.next_version(&name.name),
-                            ty: ty.clone(),
-                            span: span.clone(),
-                        };
-                        self.define(v.clone());
-                        output_vars.push(v);
+                    match out {
+                        Expr::Ident { name, ty, .. } => {
+                            let v = SsaVar {
+                                base: name.name.clone(),
+                                version: self.next_version(&name.name),
+                                ty: ty.clone(),
+                                span: span.clone(),
+                            };
+                            self.define(v.clone());
+                            output_vars.push(Some(v));
+                        },
+                        _ => output_vars.push(None),
                     }
                 }
                 let dest = if matches!(ty, Type::Void) {
@@ -1723,7 +1791,15 @@ impl Builder {
                         input_names: input_names.clone(),
                         input_constraints: input_constraints.clone(),
                         clobbers: clobbers.clone(),
-                        volatile: *volatile,
+                        // `asm` 没有输出操作数就是**隐式 volatile**（GCC 手册：
+                        // “asm statements that have no output operands … are
+                        // implicitly volatile”）。IR 侧的 `volatile` 是「不可删、
+                        // 不可越序」的判据（`passes::inst_is_side_effecting` /
+                        // `rebuild::inst_has_side_effect`），只抄 AST 上的关键字会让
+                        // `asm("nop")` 在 -O2 的 SSA 通道里整条消失（实测退出码
+                        // 不变、只剩 `.file` 里的字符串）。AST 的 `volatile` 字段保持
+                        // 原样：它另控制发射端的 mfence 序列，两件事不混。
+                        volatile: *volatile || outputs.is_empty(),
                         ty: ty.clone(),
                     },
                     span: span.clone(),

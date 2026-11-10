@@ -189,8 +189,16 @@ impl Codegen {
             },
             Stmt::While { body, .. }
             | Stmt::Do { body, .. }
-            | Stmt::For { body, .. }
             | Stmt::Label { stmt: body, .. } => Self::collect_stmt_decls(body, out),
+            // `for` 的声明在 `init` 里（`for (int i = 0; ...)`）—— 漏掉它就会让
+            // 一个真住在池号上的循环变量跑到计划外（实测 `-O2` 冷格外置夹具的
+            // `i` 落 r12 ⇒ E1137）。
+            Stmt::For { init, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_stmt_decls(i, out);
+                }
+                Self::collect_stmt_decls(body, out);
+            },
             Stmt::Block { b, .. } => Self::collect_local_decls(&b.items, out),
             Stmt::Switch { cases, prelude, .. } => {
                 Self::collect_local_decls(prelude, out);
@@ -359,6 +367,72 @@ impl Codegen {
         }
     }
 
+    /// 本函数帧头要开几个 callee-saved 保存槽的**计划位图**（报告 §5.42）。
+    ///
+    /// 为什么必须是个静态计划而不是「发完了再数」：序言里的 `sub $帧长`、变量区顶、
+    /// temp 槽坐标全部在函数体发射前就算完（单遍发射），所以帧头的 cs 槽数一旦
+    /// 定下就回不了头。旧口径恒给 4 个槽（32B）+ 8B 洞，内核 trace 上 119 帧里平均
+    /// 只真用 1.11 个号 —— 白付接近 3KB，直接吃掉 16KB 任务栈的余量。
+    ///
+    /// 计划来源（全部在发射前可定稿）：
+    ///  1. 已定稿的家表：file-scope `register asm`、形参家（`DCC_HOME_PARAMS`）、
+    ///     后端自选家（`plan_auto_homes`）；
+    ///  2. 函数体里**所有**局部声明：分配器写的 `home` 与用户写的 `register_name`
+    ///     （`collect_local_decls` 是递归的，块内/语句表达式里的都收）；
+    ///  3. 内联汇编：固定寄存器约束点名的池号（`"b"`→rbx、显式名 `{r12}` 等，
+    ///     判据单源于 `fixed_gp_of_constraint`）；另外只要含 asm 就留 r12 ——
+    ///     `alloc_asm_mem_scratch` 池耗尽时回退它（旧行为），不保存就是毁调用者。
+    ///
+    /// 计划之外的号在发射期不会被发出（`RegBank::set_plan_mask` 的过滤），
+    /// 而 `claim` 撞图外号会被记下并由收尾报 `E1137`（fail-closed）。
+    pub(crate) fn compute_callee_plan(&self, f: &FuncDecl) -> u8 {
+        use crate::codegen::x86_64::abi::regbank::RegBank;
+        // 验收/回归用的 A/B 开关：强制旧口径（四个号全部预留）。帧几何在新公式下
+        // 与旧 `48 + 8*temps` 逐字节相等（`hdr_of` 的 16 = 48 - 4*8），所以这一个
+        // 环境变量就能把「按需化前/后」做成**同一编译器**上的对照，而不是拿两个
+        // 不同日期的二进制比帧。未设置时零副作用。
+        if std::env::var_os("DCC_CS_PLAN_ALL").is_some() {
+            return 0x0F;
+        }
+        fn add(mask: &mut u8, n: u8) {
+            if let Some(bit) = RegBank::pool_bit_of(n) {
+                *mask |= bit;
+            }
+        }
+        let mut mask = 0u8;
+        for (loc, _) in self.homes.values() {
+            if let Some(r) = loc.reg() {
+                add(&mut mask, r.n);
+            }
+        }
+        let Some(body) = &f.body else { return mask };
+        let mut decls: Vec<&crate::ast::VarDecl> = Vec::new();
+        Self::collect_local_decls(&body.items, &mut decls);
+        for v in decls {
+            if let Some(loc) = &v.home {
+                if let Some(r) = loc.reg() {
+                    add(&mut mask, r.n);
+                }
+            }
+            if let Some(rn) = &v.register_name {
+                if let Some(n) = Self::parse_reg_name(rn) {
+                    add(&mut mask, n);
+                }
+            }
+        }
+        let facts = crate::ast_asm::collect_asm_facts(body);
+        if facts.has_asm {
+            // 含 asm ⇒ 四个池号全部预留。为什么不能只算固定约束：`q`/`Q` 是「任一
+            // legacy 号」，而且一条 asm 的 `r` 操作数 + clobber 可能把 9 个
+            // caller-saved 号吃光（`call_on_stack` 形态：8 clobber + 4 个 `r`
+            // 操作数），规划器只能从池里补。逐句复算发射期的 owned/scratch 状态
+            // 是做两份真源，而少预留的后果是**编不过**（E0311）或毁调用者。
+            // 多付的上限是 (4-实用数)*8B，小于一个 16 字节对齐单位。
+            mask |= 0x0F;
+        }
+        mask
+    }
+
     /// 号 → 家。复用 `parse_reg_home` 的名字表，避免在这里再编一份「几号对应谁」。
     fn reg_home_location(reg: u8) -> Option<crate::location::Location> {
         const NAMES: [&str; 16] = [
@@ -423,6 +497,11 @@ impl Codegen {
         // 刚分出去的 callee-saved 号当空闲临时号发掉（覆盖变量家 = 静默错值）。
         self.auto_homes.clear();
         self.plan_auto_homes(f);
+        // §5.42：帧头 cs 保存槽的静态计划。必须在 `reset_reg_tracker`（序言内）
+        // 与任何 `claim`/`alloc_temp` **之前**定稿：帧尺寸、变量区顶、temp 槽坐标
+        // 全跟着它走，而 `RegBank` 的发号器从此刻起只在这个集合里取号。
+        self.callee_plan = self.compute_callee_plan(f);
+        self.reg_bank.set_plan_mask(self.callee_plan);
         // 绑定表定稿了，把钉住集合重投影一遍。**为什么现在就要做**：`naked` 分支在
         // 下面的 `reset_reg_tracker()` 之前就 `return`，而旧代码的 `owned_gp` 是当时现查
         // `reg_bindings` 算的；如果 `pinned` 等到 reset 才清，naked 函数里的内联 asm
@@ -690,6 +769,11 @@ impl Codegen {
         }
         let temp_slots = (self.max_expr_depth as i32 + 1).max(2);
         self.temp_slots = temp_slots;
+        // §5.42：帧头里 callee-saved 保存槽的个数 = 计划位图的 popcount。
+        // 它是帧几何的一个输入（`hdr_of(temp_slots, cs_slots)`），所以必须在
+        // 第一处形参偏移计算之前就定下 —— 而计划本身在 `compile_func` 入口由
+        // `compute_callee_plan` 写完（homes/局部声明的家/asm 固定约束）。
+        let cs_slots = self.callee_plan.count_ones() as i64;
         // sret/物化槽最大同时存活字节水位 (与运行时分配器同口径静态扫描)
         let sret_need: i64 = f
             .body
@@ -731,6 +815,7 @@ impl Codegen {
                     &mut self.var_map,
                     &body.items,
                     temp_slots,
+                    cs_slots as i32,
                     kasan_rz_slots,
                     &self.static_local_map,
                     &f.name.name,
@@ -831,7 +916,7 @@ impl Codegen {
                     let aligned = (stack_arg_off + 15) & !15;
                     stack_arg_off = aligned + 32;
                     if let Some(nm) = nm_opt {
-                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                         // 32 字节 (real@off, imag@off+16) 在帧槽中占 4 个
                         // 8 字节槽。局部槽公式与标量 LD (16B→-(SIZE-8)=-8)
                         // 及通用聚合 base=-(u+hdr)-(chunks-1)*8 一致:
@@ -855,7 +940,7 @@ impl Codegen {
                     // SysV ABI: 聚合参数可以部分通过寄存器、部分通过栈传递。
                     // 例如 _Complex double 在只有 1 个 XMM 可用时，实部用寄存器，
                     // 虚部通过栈传递。必须逐个 chunk 处理，不能整体判断。
-                    let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                    let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                     let base_off = -(used_before + hdr) - (chunks as i64 - 1) * 8;
                     if let Some(nm) = nm_opt {
                         self.var_map
@@ -980,7 +1065,7 @@ impl Codegen {
                     let aligned = (stack_arg_off + 15) & !15;
                     stack_arg_off = aligned + 16;
                     if let Some(nm) = nm_opt {
-                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                         let off = -(used_before + hdr) - 8;
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         // 不走逐字 8+8 搬运：改由 ld_param_stores 在入口降级。
@@ -1005,7 +1090,7 @@ impl Codegen {
                         let saved_fp = fp_idx;
                         fp_idx += 1;
                         if let Some(nm) = nm_opt {
-                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                             let off = -(used_before + hdr) - 8;
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             // wide128=true ⇒ 入口用 movups 保存完整 16 字节。
@@ -1017,7 +1102,7 @@ impl Codegen {
                         let aligned = (stack_arg_off + 15) & !15;
                         stack_arg_off = aligned + 16;
                         if let Some(nm) = nm_opt {
-                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                             let off = -(used_before + hdr) - 8;
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             stack_param_stores.push((aligned, off));
@@ -1032,7 +1117,7 @@ impl Codegen {
                         let saved_fp = fp_idx;
                         fp_idx += 1;
                         if let Some(nm) = nm_opt {
-                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                             let off = -(used_before + hdr);
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             xmm_param_stores.push((saved_fp as u8, off, p.ty.clone(), false));
@@ -1042,7 +1127,7 @@ impl Codegen {
                         let my_stack_off = stack_arg_off;
                         stack_arg_off += 8;
                         if let Some(nm) = nm_opt {
-                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                             let off = -(used_before + hdr);
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             stack_param_stores.push((my_stack_off, off));
@@ -1055,7 +1140,7 @@ impl Codegen {
                     param_used_total += 8;
                     gp_idx += 1;
                     if let Some(nm) = nm_opt {
-                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                         let off = -(used_before + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         // 家有号 ⇒ 入站值直接搬到家号，不写帧槽。两边都是 GP 号且
@@ -1080,7 +1165,7 @@ impl Codegen {
                     let my_stack_off = stack_arg_off;
                     stack_arg_off += 8;
                     if let Some(nm) = nm_opt {
-                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64, cs_slots);
                         let off = -(used_before + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         stack_param_stores.push((my_stack_off, off));
@@ -1096,18 +1181,34 @@ impl Codegen {
             // 使后续 register_var 运行时分配 (如 compound literal 临时变量)
             // 不会与参数栈槽重叠 (根因: compound lit temp 分配到参数 s 的
             // 栈位导致 pr114207.c 等测试 segfault/abort)
+            //
+            // 赋值而不是累加（报告 §5.39-d）：`param_used_total` 的初值就是
+            // `var_map_total_slots * 8`（局部变量区已占字节），每个形参再往上加 ——
+            // 它本身就是「局部 + 形参」的**总数**。以前写成
+            // `var_map_total_slots += param_used_total / 8`，于是局部变量被数了两遍，
+            // 变量区大约翻倍：实测 `__schedule` 的 37 槽局部 + 1 个形参被算成 76 槽
+            // （608 B，而帧里真正用到的只有 296 B）。
             let param_slots = param_used_total / 8;
-            self.var_map_total_slots = self.var_map_total_slots.saturating_add(param_slots);
+            self.var_map_total_slots = param_slots;
             // 与上面同一根因、同一条轴: 复合字面量 / VM 尺寸元信息等只在代码生成
             // 时才 `register_var` 的对象现在有自己的一条带（§11.23 步 3），它的尺寸就是
             // 本函数在这里定下的 `late_slot_budget`，没有再挤变量区。
-            self.plan_late_slot_budget(f.body.as_ref(), &f.params);
+            self.plan_late_slot_budget(f.body.as_ref(), &f.params, &f.ret_ty);
             // 帧布局**解算**（P12 Phase 2）：以前这里是一段现场求和，现在只保留
             // 输入；所有带边界由 `abi::layout::LayoutMap::resolve` 一次算完。
             // 求和项与求和顺序与搬迁前字面一致（`var_bytes + hdr + sret_need +
             // sc_slot + cx_band + va_slots + vec_reserve + bf_rmw_reserve +
             // tramp_reserve + stack_reserve`，再 16 对齐）。
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
+            if std::env::var_os("DCC_SLOT_HOME").is_some() {
+                eprintln!(
+                    "VARBYTES {} slots={} param_used={} params={}",
+                    f.name.name,
+                    self.var_map_total_slots,
+                    param_used_total,
+                    f.params.len()
+                );
+            }
             let sc_slot: i64 = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
                                                                 // P3 (honest reservation): 有多少直接嵌套函数就需要多少个 32B trampoline。
                                                                 // 之前固定 256B 意味着无嵌套函数每帧白开 256B；现在从「全函数统一」
@@ -1119,8 +1220,15 @@ impl Codegen {
                 p3_nested_count = collected.len() as i64;
             }
             let tramp_reserve_honest: i64 = p3_nested_count.saturating_mul(32);
-            // bf_rmw: 无静态扫描时沿用固定 64B (P3 之后会接入位域深度扫描)。
-            let bf_rmw_reserve_honest: i64 = crate::codegen::x86_64::abi::layout::BF_RMW_RESERVE;
+            // bf_rmw 带也改成**按需**（§5.12）：尺寸 = 本函数最深那条位域 RMW 链的层数
+            // × 32B，判据与发射器同源（`Codegen::bf_rmw_chain_depth`）。这一步同时修掉了
+            // 一个旧坑：恒 64B 只容 2 层，而 `bitfield_rmw_deep_nest.c` 的
+            // `s.a = (s.b = (s.c = …))` 是 9 层，它一直在往带外写 224B，只是外面碰巧是
+            // 恒预留的富余。trampoline / complex / bitfield 三条带现在各占自己的区间，
+            // 见 `abi/layout.rs` 里 `bf_rmw_band_top` / `tramp_top` 的推导。
+            let bf_rmw_reserve_honest: i64 =
+                crate::codegen::x86_64::abi::layout::bf_rmw_band_reserve(self.bf_rmw_max_depth);
+            let cx_band: i64 = crate::codegen::x86_64::abi::layout::cx_band_reserve(self.needs_cx_band);
             let vec_reserve_honest: i64 =
                 crate::codegen::x86_64::abi::layout::vec_band_reserve(self.max_vec_bytes);
             let va_slots: i64 = if f.is_variadic {
@@ -1145,11 +1253,14 @@ impl Codegen {
             {
                 self.cur_func_do_align = true;
                 self.cur_func_anchor_off =
-                    -crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(temp_slots as i64);
+                    -crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(
+                        temp_slots as i64,
+                        cs_slots,
+                    );
             }
-            let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(
-                &crate::codegen::x86_64::abi::layout::FramePlan {
+            let plan = crate::codegen::x86_64::abi::layout::FramePlan {
                     temp_slots: temp_slots as i64,
+                    cs_slots,
                     var_bytes,
                     // 晚分配带（§11.23 步 3）：尺寸就是规划期那份可枚举预算。
                     // 带为 0 的函数（一个发射期对象也没有）仍与今天逐字节相同。
@@ -1158,12 +1269,14 @@ impl Codegen {
                     va_slots,
                     static_chain_slot: sc_slot,
                     bf_rmw_reserve: bf_rmw_reserve_honest,
+                    cx_band,
                     vec_reserve: vec_reserve_honest,
                     tramp_reserve: tramp_reserve_honest,
                     stack_reserve: self.stack_reserve_bytes(),
                     spill_slots,
-                },
-            );
+                };
+            self.frame_dump(&f.name.name, &plan);
+            let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(&plan);
             self.frame_layout = layout;
             // sret/物化槽区顶界：紧邻变量区底（变量区占 -(hdr+var_bytes)）。
             // 这一条**生成期会变**（`register_var` 会把它跟变量区一起往下压），
@@ -1180,8 +1293,6 @@ impl Codegen {
                     self.emit_sub_rsp(self.frame_layout.frame_size);
                 }
             }
-            // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后.
-            self.emit_over_align_anchor();
             // 帧已分配 ⇒ 此刻 rsp 正落在帧线上，从这里开始记「体内比帧线低多少」的账
             // （尾声据此决定发 `add $帧长,%rsp` 还是退回 `mov %r13,%rsp`）。
             self.arm_rsp_ledger();
@@ -1192,6 +1303,13 @@ impl Codegen {
             {
                 self.emit_zero_init_frame(self.frame_layout.frame_size);
             }
+            // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后,
+            // 且**必须晚于零初始化**: 零初始化覆盖 `[r13-frame_size, r13)`，锚点槽
+            // （`-hdr_of(temp_slots)`，实测 -0x50）正落在这一段里 —— 先写锚点再清帧
+            // 会把「对齐前的帧顶」清成 0，尾声 `mov -0x50(%r13),%rsp` 于是把 rsp
+            // 置 0，`pop %r13` 当场 #PF→#DF（kbuild14 boot 的停点）。
+            // emit_zero_init_frame 自行 push/pop rax，对齐前的帧顶跨它存活。
+            self.emit_over_align_anchor();
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
             if self.func_canary && self.frame_layout.canary_fits() {
                 // mov rax, <guard> → 加载 canary（guard 的寻址形态见 `emit_canary_load`）
@@ -1212,71 +1330,42 @@ impl Codegen {
             if self.kasan && self.frame_layout.frame_size > 0 {
                 self.emit_kasan_stack_poison_redzones();
             }
-            // 被调用者保存寄存器: rbx, r12, r14, r15 保存在帧顶部
-            // (r13-16 到 r13-40), 用作表达式求值的额外暂存寄存器.
-            // 这些寄存器在函数调用后被调用者保证保留, 因此可以跨 call 使用.
-            // 生成时先无条件发射 (单遍编译, 此时函数体尚未生成,
-            // callee_saved_used 未知), 记录补丁点; 函数体生成完毕后,
-            // 未使用的寄存器指令由 patch_callee_saves 改写为 nop.
-            // mov [r13 - 16], rbx  (REX.WB: r13 needs REX.B)
+            // 被调用者保存寄存器: 只保存**计划里有的**号（§5.42 按需化）。
+            //
+            // 旧口径无条件发 4 条、函数体发完后再把没用到的改 nop，而帧槽恒占 32B ——
+            // 内核 trace 上 119 帧平均只真用 1.11 个号，白付的槽直接吃任务栈余量。
+            // 现在帧头的槽数 = plan 的 popcount，第 j 个被规划的号落在 -(16+8j)；
+            // 发射顺序仍是 rbx/r12/r14/r15（位序即产物，换序就是换产物）。
+            //
             // 补丁点只在**真发了字节**时登记：`emit_insn` 可能因块内等价事实而整条
             // 不发（P13 阶段6），而 `patch_callee_saves` 是按「起点 + 4 字节」写 nop 的，
             // 一条没发的指令留下一个陈旧起点就会把后面 4 字节（可能是 `mov %r13,%rsp`
             // 的前半）涂成 nop —— 实测症状是尾声只剩 `pop %rbp; ret`，SIGSEGV。
-            Self::emit_callee_save_site(
-                self,
-                0x01,
-                Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    3,
-                    13,
-                    -16,
-                )
-                .with_gas("mov %rbx, -16(%r13)".to_string()),
-            );
-            // mov [r13 - 24], r12  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
-            Self::emit_callee_save_site(
-                self,
-                0x02,
-                Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    12,
-                    13,
-                    -24,
-                )
-                .with_gas("mov %r12, -24(%r13)".to_string()),
-            );
-            // mov [r13 - 32], r14  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
-            Self::emit_callee_save_site(
-                self,
-                0x04,
-                Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    14,
-                    13,
-                    -32,
-                )
-                .with_gas("mov %r14, -32(%r13)".to_string()),
-            );
-            // mov [r13 - 40], r15  (REX.WRB: r15 需要 REX.R, r13 需要 REX.B)
-            // 这里的 modrm 是 `mod=01 rm=101`（r13+disp8），**没有 SIB**，所以 REX.X
-            // 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 老实标成
-            // `rex.WRXB mov %r15,-0x28(%r13)`。X 只在有 SIB 时表达 index 扩展。
-            Self::emit_callee_save_site(
-                self,
-                0x08,
-                Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    15,
-                    13,
-                    -40,
-                )
-                .with_gas("mov %r15, -40(%r13)".to_string()),
-            );
+            let mut cs_j: i64 = 0;
+            for (bit, reg, name) in [
+                (0x01u8, 3u8, "rbx"),
+                (0x02, 12, "r12"),
+                (0x04, 14, "r14"),
+                (0x08, 15, "r15"),
+            ] {
+                if self.callee_plan & bit == 0 {
+                    continue;
+                }
+                let off = -(16 + cs_j * 8) as i32;
+                Self::emit_callee_save_site(
+                    self,
+                    bit,
+                    Insn::mov_rm_mem(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        reg,
+                        13,
+                        off,
+                    )
+                    .with_gas(format!("mov %{name}, {off}(%r13)")),
+                );
+                cs_j += 1;
+            }
             // 跳表基址常驻 `%rbp`（阶段 6 批 4）：先把调用者的 `%rbp` 存进帧顶那一格，
             // 再把表地址取一次。存槽与金丝雀共用 `%r13-8`，两者由
             // `decide_disptab_base_reg` 的互斥判据分开，所以下面必须先问「帧里放得下吗」
@@ -1305,11 +1394,13 @@ impl Codegen {
                 }
             }
             // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
-            // 帧布局 (自下而上):
+            // 帧布局 (自下而上, §5.42):
             //   r13+0 saved r13 / r13+8 ret addr
-            //   r13-16..-48 callee-saved 保存区 (rbx/r12/r14/r15)
-            //   r13-48..-(48+temp_slots*8) binop temp_slots (槽 d 在 -(48+d*8))
-            //   r13-(48+temp_slots*8)..-(48+temp_slots*8+var_bytes) 变量
+            //   r13-8 canary / 跳表基址槽
+            //   r13-16..-(16+8*cs) callee-saved 保存区 (仅计划内的号, 紧凑编号)
+            //   往下 temp_slots 个 binop 槽 (槽 d 在 -(16+8*cs+8*d))
+            //   再往下 var_bytes 变量区（帧头 hdr = 16 + 8*cs + temp_slots*8；
+            //   `+16` 的第二个 8 就是变量区第一槽，可参见 `LayoutMap::hdr_of`）
             //   r13-frame_size..r13-frame_size+cx_band 复数 rvalue 物化带 (见 CX_FRAME_BAND)
             //   r13-frame_size+cx_band..+cx_band+va_slots 变参 reg save area
             // 关键: save area 必须在变量下方, 否则 XMM 槽位会与
@@ -1438,6 +1529,7 @@ impl Codegen {
                     &mut self.var_map,
                     &body.items,
                     temp_slots,
+                    cs_slots as i32,
                     kasan_rz_slots,
                     &self.static_local_map,
                     &f.name.name,
@@ -1450,33 +1542,41 @@ impl Codegen {
             if self.cur_func_over_align > 0 {
                 self.cur_func_do_align = true;
                 self.cur_func_anchor_off =
-                    -crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(temp_slots as i64);
+                    -crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(
+                        temp_slots as i64,
+                        cs_slots,
+                    );
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
-            self.plan_late_slot_budget(f.body.as_ref(), &f.params);
+            self.plan_late_slot_budget(f.body.as_ref(), &f.params, &f.ret_ty);
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             // 同一份布局解算（无参/`main` 分支）。该分支今天不**参与**变参 save area /
-            // 静态链 / 位域 RMW 三个预留（见 `abi/layout.rs` 文件头记的「不对称 1」），
-            // 于是这三个带在这里传 0：不对称从「两份公式」变成「可见的输入」，
-            // Phase 2 不改它（改了就是改产物）。
+            // 静态链 两个预留（见 `abi/layout.rs` 文件头记的「不对称 1」），于是这两条带
+            // 在这里传 0：不对称从「两份公式」变成「可见的输入」。位域 RMW 带与变参分支
+            // 同口径按需给：`bf_rmw_slot` 已不再保留历史回退坐标（那三个格与金丝雀、
+            // callee-saved 保存区同格），两个分支必须走同一套几何。
             // 同一尺寸判据只算一次（与上面变参分支同口径）。
             let main_vec_reserve =
                 crate::codegen::x86_64::abi::layout::vec_band_reserve(self.max_vec_bytes);
-            let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(
-                &crate::codegen::x86_64::abi::layout::FramePlan {
+            let plan = crate::codegen::x86_64::abi::layout::FramePlan {
                     temp_slots: temp_slots as i64,
+                    cs_slots,
                     var_bytes,
                     late_slots: self.late_slot_budget,
                     sret_need,
                     va_slots: 0,
                     static_chain_slot: 0,
-                    bf_rmw_reserve: 0,
+                    bf_rmw_reserve: crate::codegen::x86_64::abi::layout::bf_rmw_band_reserve(self.bf_rmw_max_depth),
+                    cx_band: crate::codegen::x86_64::abi::layout::cx_band_reserve(
+                        self.needs_cx_band,
+                    ),
                     vec_reserve: main_vec_reserve,
                     tramp_reserve: 0,
                     stack_reserve: self.stack_reserve_bytes(),
                     spill_slots,
-                },
-            );
+                };
+            self.frame_dump(&f.name.name, &plan);
+            let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(&plan);
             self.frame_layout = layout;
             // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
             self.sret_region_base = layout.sret_region_base;
@@ -1490,8 +1590,6 @@ impl Codegen {
                     self.emit_sub_rsp(self.frame_layout.frame_size);
                 }
             }
-            // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后.
-            self.emit_over_align_anchor();
             // 帧已分配 ⇒ 此刻 rsp 正落在帧线上，从这里开始记「体内比帧线低多少」的账
             // （尾声据此决定发 `add $帧长,%rsp` 还是退回 `mov %r13,%rsp`）。
             self.arm_rsp_ledger();
@@ -1502,6 +1600,13 @@ impl Codegen {
             {
                 self.emit_zero_init_frame(self.frame_layout.frame_size);
             }
+            // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后,
+            // 且**必须晚于零初始化**: 零初始化覆盖 `[r13-frame_size, r13)`，锚点槽
+            // （`-hdr_of(temp_slots)`，实测 -0x50）正落在这一段里 —— 先写锚点再清帧
+            // 会把「对齐前的帧顶」清成 0，尾声 `mov -0x50(%r13),%rsp` 于是把 rsp
+            // 置 0，`pop %r13` 当场 #PF→#DF（kbuild14 boot 的停点）。
+            // emit_zero_init_frame 自行 push/pop rax，对齐前的帧顶跨它存活。
+            self.emit_over_align_anchor();
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
             if self.func_canary && self.frame_layout.canary_fits() {
                 // mov rax, <guard> → 加载 canary（guard 的寻址形态见 `emit_canary_load`）
@@ -1656,32 +1761,10 @@ impl Codegen {
                                 .static_local_map
                                 .needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
-                                // static local 需要运行时初始化: 发射初始化代码到全局地址
-                                if let Some(init) = &v.init {
-                                    if let Expr::InitList { inits, .. } = init {
-                                        if let Type::Array(elem_ty, _) = &v.ty {
-                                            let elem_size = elem_ty.size();
-                                            let mut off: i32 = 0;
-                                            for item in inits.iter() {
-                                                if let InitItem::Expr(e) = item {
-                                                    self.gen_expr(e, Self::EVAL_BASE);
-                                                    self.emit_global_store_offset(
-                                                        0,
-                                                        &v.name.name,
-                                                        off,
-                                                    );
-                                                    off += elem_size as i32;
-                                                }
-                                            }
-                                        } else {
-                                            self.gen_expr(init, Self::EVAL_BASE);
-                                            self.emit_global_store(0, &v.name.name);
-                                        }
-                                    } else {
-                                        self.gen_expr(init, Self::EVAL_BASE);
-                                        self.emit_global_store(0, &v.name.name);
-                                    }
-                                }
+                                // static local 需要运行时初始化: 发射初始化代码到全局
+                                // 地址。形状判据与发射都在 `gen_static_local_init`
+                                // 一处 (与 `gen_block_item` 同一个入口)。
+                                self.gen_static_local_init(v);
                                 continue;
                             }
                             continue; // static 局部变量已在全局数据段分配
@@ -1697,7 +1780,9 @@ impl Codegen {
                         if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
                             self.gen_vm_type_bind(&v.ty);
                         }
-                        self.register_var(&v.name.name, &v.ty);
+                        if !self.decl_skips_frame_slot(v) {
+                            self.register_var(&v.name.name, &v.ty);
+                        }
                         if Self::type_has_vla(&v.ty) {
                             self.gen_vla_alloc(v);
                         } else if let Some(init) = &v.init {
@@ -1718,23 +1803,13 @@ impl Codegen {
                                 }
                             } else {
                                 let is_vec_init = matches!(&v.ty, Type::Vector(_, _));
-                                let is_agg = matches!(
-                                    &v.ty,
-                                    Type::Struct(_, _, _, _)
-                                        | Type::Union(_, _, _, _)
-                                        | Type::Array(_, ArraySize::Const(_))
-                                        | Type::Atomic(_)
-                                ) && v.ty.size() > 8;
-                                // CompoundLit returns an address in rax, not a value.
-                                // For struct/union types (any size), we must copy the
-                                // struct bytes from the compound-literal temp to the
-                                // variable, not store the pointer itself.
-                                let needs_compound_copy = matches!(init, Expr::CompoundLit { .. })
-                                    && matches!(
-                                        &v.ty,
-                                        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
-                                    );
-                                if is_vec_init || is_agg || needs_compound_copy {
+                                // 聚合初始化一律问 `assign_needs_whole_copy`（类型轴 ||
+                                // 交付轴，报告 §5.15 的单一真源）。旧写法在这里另抄了一份
+                                // 「尺寸 > 8 或 CompoundLit」的判据，漏掉了**内联展开后的
+                                // StmtExpr**：`__always_inline` 构造器返回的 8 字节聚合在
+                                // rax 里交付的是物化槽地址，标量 `mov_to_stack` 会把地址
+                                // 写进变量（内核 `guard(mutex)` 的 `class_mutex_t`，§5.24）。
+                                if is_vec_init || Self::assign_needs_whole_copy(&v.ty, init) {
                                     // struct/array/vector 初始化: 整体拷贝
                                     let dst_ty = v.ty.clone();
                                     let dst_name = v.name.name.clone();

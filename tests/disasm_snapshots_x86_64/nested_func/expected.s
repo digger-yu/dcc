@@ -1,7 +1,7 @@
 outer:
 push %r13
 mov %rsp,%r13
-sub $0xf0,%rsp
+sub $0x80,%rsp
 <nop padding>
 mov %rdi,-0x48(%r13)
 mov %r13,%rdi
@@ -12,7 +12,7 @@ mov $0x7,%edx
 mov $0xa,%eax
 syscall
 lea 0x0(%rip),%rax
-lea -0x98(%r13),%rdi
+lea -0x78(%r13),%rdi
 movb $0x49,(%rdi)
 movb $0xba,0x1(%rdi)
 mov %r13,0x2(%rdi)
@@ -38,16 +38,16 @@ call <outer>
 add $0x20,%rsp
 movslq %eax,%rax
 <nop padding>
-add $0xf0,%rsp
+add $0x80,%rsp
 pop %r13
 ret
 <nop padding>
 inner_outer.0:
 push %r13
 mov %rsp,%r13
-sub $0xe0,%rsp
+sub $0x70,%rsp
 <nop padding>
-mov %r10,-0xb0(%r13)
+mov %r10,-0x70(%r13)
 mov %rdi,-0x48(%r13)
 mov %r10,%r11
 mov -0x48(%r11),%eax
@@ -57,6 +57,6 @@ mov %r10,%r11
 mov -0x40(%r11),%r8d
 add %r8,%rax
 movslq %eax,%rax
-add $0xe0,%rsp
+add $0x70,%rsp
 pop %r13
 ret

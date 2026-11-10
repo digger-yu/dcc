@@ -339,6 +339,31 @@ pub struct ResolvedOperand {
 // 约束解析
 // ---------------------------------------------------------------------------
 
+/// 约束是否把操作数**当内存对象**（`"m"` / 带 `m` 且没有寄存器备选 / `"+m"`）。
+///
+/// 单一真源：x86_64 发射层的两个副本（`asm/constraint.rs`、`asm/expansion.rs`）
+/// 与 SSA 往返（`ssa/build.rs` 降级成地址、`ssa/expr_rebuild.rs` 把地址包回左值）
+/// 必须用同一份判据。两边口径一旦分叉，IR 里存的是值还是地址就没人说得清 ——
+/// 错的那一侧会把 `movl %0,%1` 写进一个帧槽而不是 MMIO（报告 §5.27）。
+pub fn constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
+    if constraint.is_empty() {
+        return false;
+    }
+    let letters: Vec<char> = constraint
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .collect();
+    let has_m = letters.contains(&'m');
+    let has_r = letters
+        .iter()
+        .any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
+    // "p" 表示内存地址, 但仍需填入寄存器 (地址本身), 不当作内存操作数直接替换
+    if has_m && (!has_r || is_inout) {
+        return true;
+    }
+    letters == vec!['m']
+}
+
 /// 约束里**只有**立即数类字母（没有任何寄存器/内存类备选）。
 ///
 /// GCC 对这种约束的要求是「操作数必须是编译期常量」，给不出常量就直接报
@@ -358,6 +383,79 @@ pub fn constraint_is_immediate_only(constraint: &str) -> bool {
         .filter(|c| c.is_ascii_alphabetic() && !matches!(c, '=' | '+'))
         .collect();
     !letters.is_empty() && letters.iter().all(|c| IMM.contains(c))
+}
+
+/// 立即数类字母在 x86 上的**取值范围**（gcc `config/i386/constraints.md` 口径）。
+///
+/// `i`/`n` 是「任意常量」，不在表里；返回 `None` 的字母意思是「本表不管它」，
+/// 保持旧行为（`X/E/F/G/H` 是浮点常量类）。
+///
+/// 这张表存在的理由是一次实测事故：内核 `init_rt_rq` 的
+/// `__set_bit(MAX_RT_PRIO /*100*/, array->bitmap)`，约束是 `"Ir"`。`I` 只接 0..31，
+/// gcc 于是把 100 放进寄存器 ⇒ `bts %r,%m`，由 CPU 按 `nr/64*8` 调整地址；
+/// dcc 当时无视范围当 `i` 代成 `$100` ⇒ `btsq $100,(%rax)` 由 CPU 按 `imm & 63`
+/// 取位、**不做地址调整** ⇒ 置的是第 36 位（100 & 63）。RT 队列的 prio 36 正是
+/// 空队列，于是启动 3 秒后 `pick_next_rt_entity` 的 `WARN_ON_ONCE(list_empty(queue))`
+/// 必响，并在 WARN 报告路径上打穿任务栈。
+pub fn immediate_letter_range(letter: char) -> Option<(i128, i128)> {
+    Some(match letter {
+        'I' => (0, 31),           // 32 位移位量
+        'J' => (0, 63),           // 64 位移位量
+        'K' => (0xff, 0xff),      // 恰好 0xff
+        'L' => (0xffff, 0xffff),  // 恰好 0xffff
+        'M' => (0, 3),            // lea 的 scale
+        'N' => (0, 255),          // out 的端口号
+        'O' => (0, 0x7fff_ffff),  // imm31
+        _ => return None,
+    })
+}
+
+/// 约束里有没有「任意常量」类字母（`i`/`n`）：有它才允许符号/重定位立即数。
+pub fn constraint_takes_any_immediate(constraint: &str) -> bool {
+    constraint
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .any(|c| matches!(c, 'i' | 'n'))
+}
+
+/// 整型立即数 `v` 能不能落在该约束的立即数备选里。
+///
+/// 判据：带 `i`/`n` 的约束一律可以；否则逐个受限字母过范围。表里没有的字母
+/// （浮点常量类）按「管不着」处理 —— 这条函数只在「约束含立即数类字母」时被问。
+pub fn immediate_value_fits(constraint: &str, v: i128) -> bool {
+    if constraint_takes_any_immediate(constraint) {
+        return true;
+    }
+    let mut ranged = false;
+    for c in constraint.chars().filter(|c| c.is_ascii_alphabetic()) {
+        if let Some((lo, hi)) = immediate_letter_range(c) {
+            ranged = true;
+            if v >= lo && v <= hi {
+                return true;
+            }
+        }
+    }
+    // 一个受限字母都没有（纯 X/E/F/G/H）时保持旧行为。
+    !ranged
+}
+
+/// [`immediate_value_fits`] 的文本版：`eval_asm_operand` 给出的是十进制/符号串。
+///
+/// 解析不出整数（符号、字符串 label）时不按整数判：只有 `i`/`n` 才允许符号立即数
+/// —— 这正是 `bts $符号` 那种形态；受限字母（`I`/`N`/`O`…）接符号在 gcc 里就是
+/// impossible constraint。
+pub fn immediate_text_fits(constraint: &str, text: &str) -> bool {
+    let t = text.trim().strip_prefix('$').unwrap_or(text.trim());
+    let parsed = if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("-0x")) {
+        let neg = t.starts_with('-');
+        i128::from_str_radix(hex, 16).ok().map(|v| if neg { -v } else { v })
+    } else {
+        t.parse::<i128>().ok()
+    };
+    match parsed {
+        Some(v) => immediate_value_fits(constraint, v),
+        None => constraint_takes_any_immediate(constraint),
+    }
 }
 
 /// 解析单个约束字符串
@@ -1044,6 +1142,31 @@ pub fn strip_asm_quotes(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immediate_range_follows_letter_semantics() {
+        // `I` = 0..31：内核 `__set_bit(MAX_RT_PRIO=100, …)` 的 `"Ir"` 正是这一形。
+        assert!(immediate_value_fits("Ir", 31));
+        assert!(!immediate_value_fits("Ir", 32));
+        assert!(!immediate_value_fits("Ir", 100));
+        // `i`/`n` 是任意常量，不受范围约束。
+        assert!(immediate_value_fits("i", 100));
+        assert!(!immediate_value_fits("Ir", 1000));
+        assert!(immediate_value_fits("rn", 1000));
+        // `N` = 0..255，`O` = 0..0x7fffffff。
+        assert!(immediate_value_fits("N", 255));
+        assert!(!immediate_value_fits("N", 256));
+        assert!(immediate_value_fits("O", 0x7fff_ffff));
+        assert!(!immediate_value_fits("O", 0x8000_0000));
+        // 非整数文本（符号）只有 `i`/`n` 接。
+        assert!(immediate_text_fits("i", "__once_key"));
+        assert!(!immediate_text_fits("Ir", "__once_key"));
+        // 十进制/十六进制/负号都要认。
+        assert!(!immediate_text_fits("I", "0x64"));
+        assert!(immediate_text_fits("J", "$63"));
+        assert!(immediate_text_fits("K", "255"));
+        assert!(!immediate_text_fits("K", "254"));
+    }
 
     #[test]
     fn parse_output_reg_constraint() {

@@ -47,6 +47,8 @@ pub mod opt;
 pub mod output_format;
 pub mod parse_profile;
 pub mod parser;
+// `DCC_PASS_STATS=1` 下的优化 pass 体检（只读诊断，不进产物）。
+pub mod pass_probe;
 pub mod pratt;
 pub mod preproc;
 pub mod profile;

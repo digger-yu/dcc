@@ -11,6 +11,351 @@ use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::Codegen;
 use std::collections::{HashMap, HashSet};
 
+/// 作用域感知的变量槽分配器（§5.12 frame economy / 报告 §5.26）。
+///
+/// 旧 `pre_register_vars` 把函数体摊平后再单调累加水位：每个内联副本的局部变量都
+/// **永久**占一格。`perf_event_task_tick` 因此有 11736B 变量区（1467 槽）⇒ 单帧
+/// 0x2e80，在 16KB IRQ 栈上一个 `call` 就打穿守卫页（gcc 同函数零帧）。
+///
+/// C 的块作用域保证「已退出的块」的槽可以复用，所以这里按块边界保存-恢复水位；
+/// 函数体顶层不回收（形参与顶层局部同帧，参数在峰值之下另行分配）。两条保守规则：
+/// * 同名变量在全函数共用一格（`var_map` 以名字索引，发射期分不出作用域），
+///   所以出现次数 >1 的名字在走作用域前**钉在**顶层，不参与回收；
+/// * `switch` 的 prelude 与所有 case 共用一个作用域（C 语义：声明对后续 case 可见）。
+struct ScopedVarAlloc<'a> {
+    var_map: &'a mut HashMap<String, (i64, Type)>,
+    maxima: &'a HashMap<String, (i64, Type)>,
+    pinned: &'a HashSet<String>,
+    static_local_map: &'a crate::static_locals::StaticLocalMap,
+    func_name: &'a str,
+    temp_slots: i32,
+    /// 帧头里 callee-saved 保存槽的个数（§5.42；`compute_callee_plan` 的 popcount）。
+    /// 槽数与 temp 槽区一起把变量区推下去，所以每个声明槽的偏移都跟着它走。
+    cs_slots: i32,
+    kasan_rz_slots: i32,
+    over_align: usize,
+    /// 当前水位（槽数，向下生长）
+    total: i64,
+    /// 历史最高水位（含已被回收的块）
+    peak: i64,
+    spill: i64,
+}
+
+/// 「有寄存器家的变量还占不占帧槽」（`DCC_FRAME_SKIP_HOMED`，只读一次）。
+///
+/// 规划期给体内**每一个**声明都留一个槽（[`ScopedVarAlloc`]），因为那时还不知道
+/// 谁会拿到寄存器家。但 `v.home == Location::Reg(_)` 的变量在发射期每一次读写都
+/// 直接走号，`var_offset` 根本不会被问到它 —— 槽是白留的。
+///
+/// 为什么值得（报告 §5.39）：`__schedule` 实测帧 992 B 里 `var` 占 776 B（97 槽），
+/// 而反汇编只触及其中 24 个槽；同一函数 gcc 是 96 B。缺口不是「局部变量多」，是
+/// 「内联展开的临时量每个都占一格，而它们绝大多数住在寄存器里」。
+///
+/// 安全性靠 `var_offset` 的 fail-closed 兜底：真有一个 Reg 家的名字被问到帧偏移，
+/// 那里报 `E1134` 让本次编译失败，而不是静默按 `Type::Int` 猜一个槽读错宽度。
+fn skip_homed_frame_slots() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DCC_FRAME_SKIP_HOMED").is_some())
+}
+
+/// 逐笔帧槽分配追踪（`DCC_SLOT_TRACE`，只读一次）。
+fn slot_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DCC_SLOT_TRACE").is_some())
+}
+
+impl<'a> ScopedVarAlloc<'a> {
+    /// 给一个声明分槽（同名已在 `var_map` 里就不动）。对齐圆整与 KASAN 红区口径
+    /// 与原扁平实现逐字一致。
+    fn alloc_one(&mut self, v: &VarDecl) {
+        let name = &v.name.name;
+        if slot_trace_on() || std::env::var_os("DCC_SLOT_HOME").is_some() {
+            eprintln!(
+                "SLOT-HOME {} name={} home={:?} skip={}",
+                self.func_name,
+                name,
+                v.home,
+                skip_homed_frame_slots()
+            );
+        }
+        let (slots, alloc_ty) = match self.maxima.get(name) {
+            Some((s, t)) => (*s, t.clone()),
+            None => (Codegen::var_alloc_slots(&v.ty), v.ty.clone()),
+        };
+        if self.var_map.contains_key(name) {
+            return;
+        }
+        // §5.39 实验：**已经拿到物理寄存器家**（`Location::Reg`）的变量不再占一个
+        // 帧槽。它的每一次读写都走寄存器，`var_offset` 在发射期不会被问到它；
+        // 真的问到了会在 `var_offset` 报 `E1134`（fail-closed），不是静默错值。
+        //
+        // 为什么值得：`__schedule` 实测 var=776 B（97 槽）里绝大多数是内联展开留下
+        // 的 `__inlN$_p` 临时量，而反汇编只触及 24 个槽。gcc 对同一函数是 96 B。
+        if skip_homed_frame_slots()
+            && matches!(v.home, Some(crate::location::Location::Reg(_)))
+        {
+            return;
+        }
+        let mut used = self.total.saturating_mul(8);
+        let total_before = self.total;
+        let hdr = LayoutMap::hdr_of(self.temp_slots as i64, self.cs_slots as i64);
+        // 过对齐局部：把游标上圆整, 使其基址
+        // -(used+hdr)-(slots-1)*8 成为该变量有效对齐的整数倍。
+        //
+        // 以前这里只处理 `va > 16`（那时整帧会把 %r13 动态对齐到 va）。§5.42 把帧头
+        // 从 `48+8t` 换成 `8+8cs+8t` 后，16 字节对齐的局部原先靠「hdr 与
+        // (slots-1)*8 恰好凑成 16 倍数」的巧合被打破了（实测
+        // `struct_field_aligned.c`：hdr=32、4 个槽 ⇒ 基址 -56，退码 6）。
+        // 对齐是类型要求，不能依赖帧头的数值巧合 ⇒ va > 8 一律圆整。
+        let va = v.alignment.unwrap_or(0).max(v.ty.align()).max(8) as i64;
+        if va > 8 {
+            let target = hdr + (slots.saturating_sub(1) * 8);
+            let rem = (used + target).rem_euclid(va);
+            if rem != 0 {
+                used += va - rem;
+            }
+        }
+        let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
+        self.var_map.insert(name.clone(), (off, alloc_ty));
+        // 诊断窗口（`DCC_SLOT_TRACE`）：帧水位的每一笔都要能对账。实测 `__schedule` 的
+        // `var=608`（76 槽）里只有 38 个不同偏移、且最深那一格在 -688 而前一笔只到 -384
+        // ——没有逐笔水位就去猜「哪一笔把 _total 推上去」，那是编故事。
+        if slot_trace_on() {
+            eprintln!(
+                "SLOT {} name={} off={} slots={} total_before={} total_after={}",
+                self.func_name,
+                name,
+                off,
+                slots,
+                total_before,
+                total_before.saturating_add(slots),
+            );
+        }
+        let advanced = used.saturating_sub(self.total.saturating_mul(8));
+        self.total = self.total.saturating_add(advanced / 8).saturating_add(slots);
+        self.total = self.total.saturating_add(self.kasan_rz_slots as i64);
+        if self.total > self.peak {
+            self.peak = self.total;
+        }
+        for j in 0..self.kasan_rz_slots {
+            let rz_name = format!("__kasan_rz_{}_{}", name, j);
+            // 红区紧贴对象**下方**一个槽起算：`off` 已经是对象的最低槽，再减 `slots*8`
+            // 就是往下多跳一个对象（实测 `struct S s; char b[8];` 里多槽变量的最后
+            // 一条红区正好落在下一个变量 `b` 的槽上，libc 的 `memcpy` 被报
+            // use-after-poison）。`self.total` 的推进是 `slots + kasan_rz_slots` 个连续
+            // 槽，所以红区第 j 条必须是 `off - 8 - 8j`。
+            let rz_off = off - 8 - j as i64 * 8;
+            self.var_map.entry(rz_name).or_insert((rz_off, Type::Void));
+        }
+    }
+
+    fn decl(&mut self, v: &VarDecl) {
+        Codegen::count_spill_slot(v, &mut self.spill);
+        if !self.pinned.contains(&v.name.name) {
+            self.alloc_one(v);
+        }
+        // 初始化式里也能嵌着语句表达式块（`int r = ({…})`）：那里的声明属于同一帧。
+        if let Some(init) = &v.init {
+            self.expr(init);
+        }
+    }
+
+    /// 一个块。`release=false` 用于函数体顶层 / switch 全体 / for 的 init 块：
+    /// 这些声明的作用域比块本身长。
+    fn block(&mut self, items: &[BlockItem], release: bool) {
+        let base = self.total;
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) => {
+                    if v.is_extern && v.init.is_none() {
+                        continue;
+                    }
+                    if v.is_static
+                        && self.static_local_map.is_static_local(self.func_name, &v.name.name)
+                    {
+                        continue;
+                    }
+                    self.decl(v);
+                },
+                BlockItem::Decl(_) => {},
+                BlockItem::Stmt(s) => self.stmt(s),
+            }
+        }
+        if release {
+            self.total = base;
+        }
+    }
+
+    /// 语句子树。穷举写：新增 `Stmt` 变体会直接编不过（与收集器同一条纪律）。
+    fn stmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Block { b, .. } => self.block(&b.items, true),
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
+                self.expr(cond);
+                self.stmt(then_);
+                if let Some(e) = else_ {
+                    self.stmt(e);
+                }
+            },
+            Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+                self.expr(cond);
+                self.stmt(body);
+            },
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
+                // `for (int i = 0; …)` 的 init 声明作用域覆盖整个循环：块形 init 必须
+                // 在循环作用域内分配、循环结束才回收（按普通块走会提前释放）。
+                let base = self.total;
+                if let Some(i) = init {
+                    match i.as_ref() {
+                        Stmt::Block { b, .. } => self.block(&b.items, false),
+                        other => self.stmt(other),
+                    }
+                }
+                if let Some(c) = cond {
+                    self.expr(c);
+                }
+                if let Some(st) = step {
+                    self.expr(st);
+                }
+                self.stmt(body);
+                self.total = base;
+            },
+            Stmt::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => {
+                // 整个 switch 一个作用域（C 语义：声明对后续 case 可见）。
+                let base = self.total;
+                self.expr(expr);
+                self.block(prelude, false);
+                for case in cases {
+                    self.block(&case.body.items, false);
+                }
+                self.total = base;
+            },
+            Stmt::Label { stmt, .. } => self.stmt(stmt),
+            Stmt::Invoke { call, .. } => self.stmt(call),
+            Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => self.expr(e),
+            Stmt::GotoIndirect { expr, .. } => self.expr(expr),
+            Stmt::AsmGoto {
+                outputs, inputs, ..
+            } => {
+                for x in outputs.iter().chain(inputs.iter()) {
+                    self.expr(x);
+                }
+            },
+            Stmt::Return { val: None, .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Goto { .. }
+            | Stmt::Fallthrough { .. }
+            | Stmt::EhLandingPad { .. } => {},
+        }
+    }
+
+    /// 表达式子树里的 `({...})` 块也能带声明。穷举写：新增 `Expr` 变体编不过。
+    fn expr(&mut self, e: &Expr) {
+        use crate::ast::Expr as E;
+        match e {
+            E::StmtExpr { block, .. } => self.block(&block.items, true),
+            E::Int { .. }
+            | E::Float { .. }
+            | E::ComplexLit { .. }
+            | E::ComplexIntLit { .. }
+            | E::String { .. }
+            | E::Char { .. }
+            | E::Ident { .. }
+            | E::SizeofTy { .. }
+            | E::AlignofTy { .. }
+            | E::LabelAddr { .. }
+            | E::VaArgPack { .. } => {},
+            E::Unary { e: x, .. }
+            | E::Cast { e: x, .. }
+            | E::AddrOf { e: x, .. }
+            | E::Deref { e: x, .. }
+            | E::Real { e: x, .. }
+            | E::Imag { e: x, .. }
+            | E::SizeofExpr { e: x, .. }
+            | E::AlignofExpr { e: x, .. }
+            | E::VaArg { ap: x, .. }
+            | E::Member { expr: x, .. }
+            | E::PostInc { e: x, .. }
+            | E::PostDec { e: x, .. }
+            | E::PreInc { e: x, .. }
+            | E::PreDec { e: x, .. } => self.expr(x),
+            E::Offsetof { indices, .. } => {
+                for x in indices {
+                    self.expr(x);
+                }
+            },
+            E::Binop { l, r, .. }
+            | E::Assign { l, r, .. }
+            | E::Comma { l, r, .. }
+            | E::Index { arr: l, idx: r, .. } => {
+                self.expr(l);
+                self.expr(r);
+            },
+            E::Cond {
+                cond, then_, else_, ..
+            } => {
+                self.expr(cond);
+                self.expr(then_);
+                self.expr(else_);
+            },
+            E::Call { callee, args, .. } => {
+                self.expr(callee);
+                for x in args {
+                    self.expr(x);
+                }
+            },
+            E::CompoundLit { inits, .. } | E::InitList { inits, .. } => {
+                for it in inits {
+                    match it {
+                        InitItem::Expr(x) => self.expr(x),
+                        InitItem::Designated { designator, value } => {
+                            self.designator(designator);
+                            self.expr(value);
+                        },
+                    }
+                }
+            },
+            E::AsmExpr {
+                outputs, inputs, ..
+            } => {
+                for x in outputs.iter().chain(inputs.iter()) {
+                    self.expr(x);
+                }
+            },
+        }
+    }
+
+    fn designator(&mut self, d: &Designator) {
+        match d {
+            Designator::Field(_) => {},
+            Designator::Index(x) => self.expr(x),
+            Designator::Range(a, b) => {
+                self.expr(a);
+                self.expr(b);
+            },
+            Designator::Chain(items) => {
+                for sub in items {
+                    self.designator(sub);
+                }
+            },
+        }
+    }
+}
+
 /// 用户写了不是寄存器的寄存器名（与 `report_internal_bug` 不同：这是**用户代码错误**，
 /// 不是后端不变量破坏）。
 const DIAG_BAD_REG_NAME: &str = "E0316";
@@ -45,6 +390,14 @@ pub struct LateNeed {
     /// 每个表达式与声明的类型（连 VLA 维度里的子类型都进去），新增一个遍历器只会多一处
     /// 「静默少扫一棵子树」的机会。
     max_vec_bytes: usize,
+    /// 本函数是否需要帧底那条 **complex / 聚合 rvalue 物化带**（§5.12）。
+    ///
+    /// 搭 `max_vec_bytes` 同一趟穷举扫描：带为 0 后「漏扫一种来源」的代价由
+    /// `LayoutMap::cx_rvalue_off` 的断言兑底（当场报错，不静默写坏相邻区域）。
+    needs_cx_band: bool,
+    /// 本函数里**嵌套最深的那条位域 RMW 链**的层数（0 = 没有写位域 / 位域自增的站点）。
+    /// 它是 BF RMW 带的尺寸输入，单源于 `abi::layout::bf_rmw_band_reserve`（§5.12）。
+    bf_rmw_depth: usize,
     /// 已展开过的 `Arc<Vec<Field>>` 字段表地址。
     ///
     /// 内核类型图是 DAG：`struct list_head` 这类枢纽被成千上万个结构体引用，`Ptr` 层
@@ -145,19 +498,23 @@ impl Codegen {
     }
 
     pub fn stack_reserve_bytes(&self) -> i64 {
-        // 向量/bitcast 临时槽需要 3 个 16 字节槽: slot0 是
-        // vector 结果约定, slot1/2 用于同尺寸重解释 cast。
+        // §5.12：恒返 0。
         //
-        // 没有向量类型的函数（`max_vec_bytes == 0`）**不需要**这三格：向量临时槽
-        // 的唯一入口是 `vector_temp_base`，它的每个调用点都在「类型是向量」的分支里
-        // （见 `abi/layout.rs` 的 `vec_band_reserve`）。以前无向量也白开 48B，加上
-        // 那条恒 512B 的向量带，内核里一个平函数要 880B 帧。
-        let vector_scratch = if self.max_vec_bytes == 0 { 0 } else { 48 };
-        if self.target.red_zone {
-            vector_scratch
-        } else {
-            128 + vector_scratch
-        }
+        // 以前分两种：`red_zone` 目标 0/48，`-mno-red-zone`（内核）再加 128。两个数
+        // 都没人按它寻址：
+        //   * 那 48B「3 个 16 字节向量槽」与向量临时带重复计费 —— 向量临时槽的唯一
+        //     入口是 `vector_temp_base` → `LayoutMap::vec_temp`，住在 `vec_reserve` 那条
+        //     带里（`max_vec_bytes > 0` 时它至少 512B）；
+        //   * 那 128B 也买不到「红区」：本后端把它加进 `frame_size`，于是它落在
+        //     **%rsp 以上**的帧内空隙里，不是硬件/被调者会去碰的那 128 字节。对 16KB
+        //     内核栈就是一个函数白贴 128B。
+        //
+        // 为什么本项与「帧底那摞带是否装得下」无关（这点容易误判，本轮就这么碎过一次
+        // 帧）：带底约束 `cx+va+sc+8+vec+bf ≥ trampoline 实测用量` 里 `frame_size` 与
+        // `stack_reserve` 全部抵消，本项既不提供也不拿走分隔量。真正托着 trampoline 的
+        // 是 cx/bf/vec 三条带，见 `abi/layout.rs::BF_RMW_RESERVE` 与 `cx_band_reserve` 的
+        // 门控条件。
+        0
     }
 
     /// 用户写的寄存器文本名 → 号。名字表只有一份（`abi/regnames.rs`）：本函数以前是
@@ -254,6 +611,27 @@ impl Codegen {
     /// sites_base: compile_func 开头记录的 sites 起始下标 (嵌套函数隔离).
     pub fn patch_callee_saves(&mut self, sites_base: usize) {
         let used = self.reg_bank.used_mask();
+        // §5.42 fail-closed：发射期用到的号必须是计划的一部分。
+        // 图外号一旦被 claim/发出，帧头就没有它的保存槽 —— 此时把补丁点 nop 掉
+        // 就是静默毁调用者。报错而不是“就势扩图”：帧大小、变量区顶都已按计划发射。
+        //
+        // 除「收尾时还握着」的号以外，还要算上 `plan_violation`：一个图外号可能被
+        // claim 过又释放（`used_mask` 就不再含它），但存进去的值已经落在那个号里，
+        // 帧头却没有槽。两个读数取并集才是「本函数碰过图外池号」的完整事实。
+        let touched = used | self.reg_bank.plan_violation();
+        let stray = touched & !self.callee_plan;
+        if stray != 0 {
+            self.report_internal_bug(
+                "E1137",
+                format!(
+                    "本函数用了未规划的 callee-saved 号（used={:#06b} touched={:#06b} plan={:#06b}）：\
+                     帧头没有它的保存槽，序言/尾声已按计划发射",
+                    used, touched, self.callee_plan
+                ),
+                "把这类号的来源收进 `compute_callee_plan`（homes / 局部声明 / asm 固定约束），\
+                 不得静默扩图",
+            );
+        }
         for (pos, bit) in self.callee_save_patch_sites.drain(sites_base..) {
             if used & bit == 0 {
                 let p = pos as usize;
@@ -302,6 +680,12 @@ impl Codegen {
     /// 保留号（栈指针 / 帧基址 / 帧指针）不得当变量之家：诊断码也只定在这里一处
     /// （`asm/emit.rs` 的 clobber 侧引用同一个常量）。
     pub(crate) const DIAG_RESERVED_REG: &'static str = "E0318";
+
+    /// 同一条 asm 的两个输出被绑到同一块存储（`asm/opmap.rs` 的 fail-closed 闸门）。
+    /// 与 `DIAG_RESERVED_REG` 同一家族（031x/032x = 寄存器名与操作数绑定），但不走
+    /// `E0311` 那条「指令编不出来」的透传通道：这里编得出来，错的是**绑定**，
+    /// 拿 `--asm-fallback=gas` 兼掉只会把一个后端缺陷变成没人看得到的默认行为。
+    pub(crate) const DIAG_ASM_OPERAND_CONFLICT: &'static str = "E0321";
 
     /// 批 4 开关：`DCC_DISPTAB_RBP=0` 关掉「跳表基址常驻 `%rbp`」。
     ///
@@ -412,6 +796,43 @@ impl Codegen {
             ),
             source_line: None,
         });
+    }
+
+    /// 声明发射点要不要为本变量登记帧槽（`DCC_FRAME_SKIP_HOMED` 的判据单源）。
+    ///
+    /// 规划期已经不给「有寄存器家」的标量留槽（`ScopedVarAlloc::alloc_one` +
+    /// `plan_late_slot_budget` 的补登记过滤），但三个声明发射点仍无条件
+    /// `register_var`；帧规划之后那一步就是**晚分配**，于是刚省下的槽以
+    /// `E1133` 的形状回来（实测 `agg_member_store_base`：`rc` 与
+    /// `__inl1$rv`/`__inl2$rv`/`__inl4$rv` 四个有家的名字全被捡回，预算只有 1 格）。
+    ///
+    /// 判据收窄到「这个声明真的需要一格内存」：
+    /// * 家必须是 **GP 寄存器**（`mov_to_stack`/`mov_from_stack` 先看家；Fp 家没有
+    ///   这条通道，`unplumbed_home` 会报错）；
+    /// * VLA 的元数据槽、聚合类型的按地址初始化都离不开内存，照旧登记；
+    /// * `_Complex`/向量/宽浮点不进 GP 家，判据本身把它们排除在外。
+    ///
+    /// 跳过的名字若真被 `var_offset` 问到，会报 `E1134`（fail-closed），不是静默错值。
+    pub(crate) fn decl_skips_frame_slot(&self, v: &VarDecl) -> bool {
+        if !skip_homed_frame_slots() {
+            return false;
+        }
+        let home = v
+            .home
+            .or_else(|| self.auto_homes.get(&v.name.name).copied());
+        let Some(crate::location::Location::Reg(r)) = home else {
+            return false;
+        };
+        if r.bank != crate::location::RegBank::Gp {
+            return false;
+        }
+        if Self::type_has_vla(&v.ty) || v.ty.size() > 8 {
+            return false;
+        }
+        !matches!(
+            v.ty,
+            Type::Array(..) | Type::Struct(..) | Type::Union(..) | Type::Vector(..) | Type::Complex(..)
+        )
     }
 
     /// 变量声明处的**家**写入的唯一入口（P12 Phase 4.1c）。
@@ -719,6 +1140,7 @@ impl Codegen {
         match s {
             Stmt::Expr { e, .. } => Self::sret_bytes_expr(e),
             Stmt::Return { val: Some(e), .. } => Self::sret_bytes_expr(e),
+            Stmt::Return { val: None, .. } => 0,
             Stmt::If {
                 cond, then_, else_, ..
             } => Self::sret_bytes_expr(cond)
@@ -748,19 +1170,54 @@ impl Codegen {
                 prelude,
                 ..
             } => {
-                // expr 槽 (16+8) 存活至所有 case 体结束
-                let base = Self::sret_bytes_expr(expr) + 24;
+                // expr 槽与范围比较低位槽：尺寸走**发射器那把尺**
+                // （`Codegen::sret_slot_bytes`，每个槽向上取整到 16B），不在这里抄一个
+                // 字面 24：两个 `alloc_sret_slot(16)` / `alloc_sret_slot(8)` 实际步进是
+                // 16 + 16 = 32，而本扫描以前写 24 ⇒ 永远少算 8B（以前被每帧那堆
+                // 无条件预留吃掉，没人看见）。
+                let base = Self::sret_bytes_expr(expr)
+                    + Self::sret_slot_bytes(16)
+                    + Self::sret_slot_bytes(8);
                 // `prelude` 也在同一帧里，它那次结构体返回同样要占槽。
-                prelude
+                let body = prelude
                     .iter()
                     .chain(cases.iter().flat_map(|c| c.body.items.iter()))
                     .map(Self::sret_bytes_block_item)
                     .max()
-                    .unwrap_or(0)
-                    .max(base)
+                    .unwrap_or(0);
+                // **求和而不是取 max**：switch 那两个槽（选择子 16B + 范围比较低位
+                // 8B，`emit/stmt.rs` 里紧邻的两条 `alloc_sret_slot`）在整个 case 体
+                // 期间一直活着，所以「体内峰值」是在它们之上再叠的。以前取 max 之所以
+                // 看不出来，是因为每帧还平贴着一堆无条件预留（`stack_reserve` 128、
+                // complex 带 48、位域 RMW 带 64），体内槽越界后落在那些地上也没人报警；
+                // 三条带改成按需之后，同一笔欠账直接以 `E1128` 现形（实测
+                // `switch_range_comparison_correctness` 夹具：计划 24B、实际 ≥ 32B）。
+                base + body
             },
             Stmt::GotoIndirect { expr, .. } => Self::sret_bytes_expr(expr),
-            _ => 0,
+            // `goto` 指到的语句也在本帧里：它里面的 switch / 聚合赋值同样要占槽。
+            // 以前这一族全部落到 `_ => 0`，于是「switch 套在标签后面」的函数（解析器
+            // 一类是典型：`pr106101.c` 的 `yyparse`）预算算成 0，发射期当场 `E1128`。
+            // 这里不写 `_ => 0`：新增 `Stmt` 形态时必须在这里显式表态。
+            Stmt::Label { stmt, .. } => Self::sret_bytes_stmt(stmt),
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Fallthrough { .. }
+            | Stmt::Goto { .. } => 0,
+            // C++ 零成本异常：受保护调用的体里可以有聚合赋值；落地垫只接两个寄存器。
+            Stmt::Invoke { call, .. } => Self::sret_bytes_stmt(call),
+            Stmt::EhLandingPad { object, selector, .. } => {
+                Self::sret_bytes_expr(object).max(Self::sret_bytes_expr(selector))
+            },
+            // asm 语句的操作数也可以含聚合赋值（`(struct S){...}` 等）。
+            Stmt::AsmGoto {
+                outputs, inputs, ..
+            } => outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(Self::sret_bytes_expr)
+                .max()
+                .unwrap_or(0),
         }
     }
 
@@ -864,9 +1321,15 @@ impl Codegen {
             | Expr::PreInc { e: inner, .. }
             | Expr::PreDec { e: inner, .. } => Self::sret_bytes_expr(inner),
             Expr::Index { arr, idx, .. } => {
-                Self::sret_bytes_expr(arr).max(Self::sret_bytes_expr(idx))
+                Self::vla_offset_scratch(&arr.ty())
+                    + Self::sret_bytes_expr(arr).max(Self::sret_bytes_expr(idx))
             },
-            Expr::Member { expr, .. } => Self::sret_bytes_expr(expr),
+            Expr::Member { expr, .. } => {
+                // 含 VLA 字段的聚合成员访问需要若干运行时 `sizeof` 槽（`emit/vla.rs`
+                // 对每个前置 VLA 字段一次 `alloc_sret_slot(8)`）；以前这一笔没人登记，
+                // 靠帧底的无条件预留吸掉（实测 `pr82210.c` 的 `foo`：预算 0B、实际 32B）。
+                Self::vla_offset_scratch(&expr.ty()) + Self::sret_bytes_expr(expr)
+            },
             Expr::Cond {
                 cond,
                 then_,
@@ -926,6 +1389,27 @@ impl Codegen {
             _ => Self::complex_ld_slot(&e.ty()),
         };
         own + leaf_slot
+    }
+
+    /// 含 VLA 字段的聚合类型做一次成员/下标访问要多少帧内偏移暂存。
+    ///
+    /// 口径：基类型里每个带 VLA 的字段一份，每份走分配器那把尺（`sret_slot_bytes`，
+    /// 16B 步进）。数组基址不是记录类型时也给一份（访问同样要算行偏移）。
+    /// 宁可多给：少给就是发射期 `E1128`，多给只是这一帧大 16 字节。
+    fn vla_offset_scratch(ty: &Type) -> i64 {
+        let n: i64 = match ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+                fields.iter().filter(|f| f.ty.has_vla()).count() as i64
+            },
+            other => {
+                if other.has_vla() {
+                    1
+                } else {
+                    0
+                }
+            },
+        };
+        n.max(0) * Self::sret_slot_bytes(8)
     }
 
     /// `_Complex long double` 表达式在消费端物化一槽的字节数。
@@ -999,6 +1483,13 @@ impl Codegen {
     }
 
     fn late_need_block(items: &[BlockItem], need: &mut LateNeed) {
+        // 位域 RMW 链深度按**块**算一次，而不是逐表达式算：`bf_rmw_chain_depth` 自己会
+        // 递归整棵子树，挂在 `late_need_expr` 上就变成对每个节点重扫一遍子树（O(n²)）。
+        // §5.13 量出来的结论止于此：-O2 的 27% 已经在分配器上，不该再送一层遍历。
+        let d = Self::bf_rmw_depth_items(items);
+        if d > need.bf_rmw_depth {
+            need.bf_rmw_depth = d;
+        }
         for item in items {
             match item {
                 BlockItem::Decl(d) => Self::late_need_decl(d, need),
@@ -1042,9 +1533,13 @@ impl Codegen {
     /// 它们是序言/声明点用 `gen_expr` 求值的，里面可以有复合字面量与聚合成员赋值。
     fn late_need_type(ty: &Type, need: &mut LateNeed) {
         match ty {
-            Type::Ptr(q) | Type::Complex(q) | Type::Imaginary(q) | Type::Atomic(q) => {
+            // 复数/虚数类型 ⇒ 本函数会走帧底那条物化带（消费点全部由 `Type::Complex` /
+            // `Type::Imaginary` 把门，判据单源于 `abi::layout::cx_band_reserve`）。
+            Type::Complex(q) | Type::Imaginary(q) => {
+                need.needs_cx_band = true;
                 Self::late_need_type(&q.base, need)
             },
+            Type::Ptr(q) | Type::Atomic(q) => Self::late_need_type(&q.base, need),
             Type::Vector(q, n) => {
                 // 向量元素数可以是 0（`vector_size(0)` 非法但解析器不拦），尺寸按
                 // `Type::size()` 的口径算，本函数不另建一套乘法。
@@ -1158,6 +1653,299 @@ impl Codegen {
         }
     }
 
+    /// `e` 是不是一个**位域**成员访问（`.` / `->` 落在带 `bit_width` 的字段上）。
+    ///
+    /// 字段解析与发射器用**同一个** `crate::ast::find_field`（支持嵌套匿名 struct/union）：
+    /// 自己只扫一层字段表会把 `struct { union { struct { u64 lo:8; }; u64 val; } };`
+    /// 这种扁平访问看成普通字段（内核 `arch/x86/events/amd/ibs.c` 与
+    /// `arch/x86/kernel/cpu/microcode/amd.c` 就藏在这里，实测直接 `bf_rmw_slot` 断言）。
+    ///
+    /// **解析不出来时一律保守答「是」**：基类型不是记录、字段名查不到（发射器还有
+    /// `resolve_complete_struct_ty` 那条按 tag 补全的路，本静态扫拿不到那张表）、
+    /// K&R 形参、`Type::Named(..)`——漏答是静默往带外写，多答只是多 32B。
+    fn member_names_bitfield(e: &Expr) -> bool {
+        use crate::ast::Expr as E;
+        let E::Member { expr: base, field, is_arrow, .. } = e else {
+            return false;
+        };
+        let base_ty = if *is_arrow {
+            match base.ty() {
+                Type::Ptr(q) => q.base,
+                // 形参类型还没解成指针、或走了 typedef 别名：无法证明不是位域。
+                _ => return true,
+            }
+        } else {
+            base.ty()
+        };
+        match &base_ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+                match crate::ast::find_field(fields, &field.name) {
+                    Some((f, _)) => f.bit_width.is_some(),
+                    // 发射器能解而本扫解不出（tag 未在本类型树里展开）⇒ 保守当作位域。
+                    None => true,
+                }
+            },
+            // 基址不是记录类型（未解析的具名类型、数组基址等）⇒ 无法证明不是位域。
+            _ => true,
+        }
+    }
+
+    /// 本表达式是不是一个「会被物化到帧底带上的 ≤16B 聚合 rvalue」。
+    ///
+    /// 为什么不按「所有 struct/union 类型的表达式」算：那会把 `s.a = 1` 这类纯 lvalue
+    /// 访问也算进来，而它们只走地址。发射器那几处 spill 都发生在「拿不到地址的
+    /// 记录类型右值」上：函数返回值的成员链、复合字面量/初始化列表、聚合赋值的
+    /// 源、语句表达式与转换的结果、`? :` 两个分支都是非 lvalue 时的结果、`va_arg` 取出的
+    /// 记录（实测 `(r ? p : q).z[baz] = 1;` 就是 `Cond` 那一形，漏它则 `cx_rvalue_off` 当场报）。
+    ///
+    /// 这也是一份**名单**而不是完备判据，所以下面那条断言是它的兑现：漏一种形态就是
+    /// 编译错误（torture 全量与内核全树跑一遍就能把缺的形状抓出来），而不是静默把值
+    /// 写到变参保存区/向量带上。
+    fn expr_materializes_small_aggregate(e: &Expr) -> bool {
+        use crate::ast::Expr as E;
+        if !matches!(
+            e,
+            E::Call { .. }
+                | E::CompoundLit { .. }
+                | E::InitList { .. }
+                | E::StmtExpr { .. }
+                | E::Cast { .. }
+                | E::Real { .. }
+                | E::Imag { .. }
+                | E::Assign { .. }
+                | E::Cond { .. }
+                | E::VaArg { .. }
+        ) {
+            return false;
+        }
+        let ty = e.ty();
+        if !matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+            return false;
+        }
+        let bytes = ty.size();
+        bytes > 0 && bytes <= 16
+    }
+
+    /// 以 `e` 为根的**位域读-改-写链**最大层数（0 = 本子树里没有位域写）。
+    ///
+    /// 与发射器同形状：`dispatch.rs` 的位域写在算 RHS 前占一层、`increment.rs::gen_bitfield_inc_dec`
+    /// 在本层槽分配后把深度往前推一层，所以链式写法同时占多层（实测
+    /// `s.a = (s.b = (s.c = …))` 就是九层）。这里按「自身是 RMW 站点则 1 + 子节点最大值，
+    /// 否则取子节点最大值」递归，对发射器是上估（多算不会错，少算会写带外）。
+    pub fn bf_rmw_chain_depth(e: &Expr) -> usize {
+        use crate::ast::Expr as E;
+        let sub: Vec<&Expr> = match e {
+            E::Binop { l, r, .. } | E::Comma { l, r, .. } | E::Index { arr: l, idx: r, .. } => {
+                vec![l.as_ref(), r.as_ref()]
+            },
+            E::Assign { l, r, .. } => vec![l.as_ref(), r.as_ref()],
+            E::Unary { e: x, .. }
+            | E::Cast { e: x, .. }
+            | E::AddrOf { e: x, .. }
+            | E::Deref { e: x, .. }
+            | E::Real { e: x, .. }
+            | E::Imag { e: x, .. }
+            | E::SizeofExpr { e: x, .. }
+            | E::AlignofExpr { e: x, .. }
+            | E::VaArg { ap: x, .. }
+            | E::Member { expr: x, .. }
+            | E::PostInc { e: x, .. }
+            | E::PostDec { e: x, .. }
+            | E::PreInc { e: x, .. }
+            | E::PreDec { e: x, .. } => vec![x.as_ref()],
+            E::Cond { cond, then_, else_, .. } => vec![cond.as_ref(), then_, else_],
+            E::Call { callee, args, .. } => {
+                let mut v: Vec<&Expr> = vec![callee.as_ref()];
+                v.extend(args.iter());
+                v
+            },
+            E::CompoundLit { inits, .. } | E::InitList { inits, .. } => {
+                use crate::ast::InitItem;
+                inits
+                    .iter()
+                    .filter_map(|it| match it {
+                        InitItem::Expr(x) => Some(x),
+                        InitItem::Designated { value, .. } => Some(value),
+                    })
+                    .collect()
+            },
+            E::StmtExpr { block, .. } => return Self::bf_rmw_depth_block(block),
+            E::AsmExpr { outputs, inputs, .. } => {
+                return outputs
+                    .iter()
+                    .chain(inputs.iter())
+                    .map(|x| Self::bf_rmw_chain_depth(x))
+                    .max()
+                    .unwrap_or(0);
+            },
+            // 叶子与其他形态不带位域写。
+            _ => vec![],
+        };
+        let child = sub
+            .iter()
+            .map(|x| Self::bf_rmw_chain_depth(x))
+            .max()
+            .unwrap_or(0);
+        // 本节点自己是不是一个位域 RMW 站点。写（含复合赋值）的目标是左值 `l`，
+        // 自增自减的目标是 `x`；只读位域不占槽。
+        //
+        // 复合字面量也是站点：`aggregate.rs::gen_init_list_at` 对位域成员
+        // 走 3 槽 RMW（地址/容器/新值），与 `Assign` 一样占一层带。漏了它
+        // `bf_rmw_reserve` 就是 0，而发射侧仍会要槽（§5.42 之后直接断言；
+        // 更早是写死 -24/-32/-40 落进变量区/保存区）。
+        //
+        // 裸 `InitList` 不在这里判：解析期它的 `ty` 只是占位 `Type::Int`
+        // （`parser.rs` 的「类型稍后由上下文确定」），真类型在声明上——
+        // 那份判据在 `bf_rmw_depth_item` 的 `Decl::Var` 臂。
+        let is_site = match e {
+            E::Assign { l, .. } => Self::member_names_bitfield(l),
+            E::PreInc { e: x, .. }
+            | E::PostInc { e: x, .. }
+            | E::PreDec { e: x, .. }
+            | E::PostDec { e: x, .. } => Self::member_names_bitfield(x),
+            E::CompoundLit { ty, .. } => Self::type_contains_bitfield(ty),
+            _ => false,
+        };
+        if is_site {
+            1 + child
+        } else {
+            child
+        }
+    }
+
+    /// 本类型（含嵌套聚合/数组元素）里是否藏着位域。
+    ///
+    /// 只用于花括号初始化列表的静态计费：`InitList`/`CompoundLit` 的
+    /// `gen_init_list_at` 会对每个位域成员发一段 3 槽 RMW，所以只要类型里
+    /// **任何一层**有位域，这个初始化列表就要占一层位域带。
+    ///
+    /// 解不出的具名类型（`Type::Named`）一律答「是」：看不到字段表就无法
+    /// 证明没有位域，漏答是写带外，多答只是多 32B。
+    fn type_contains_bitfield(ty: &Type) -> bool {
+        match ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => fields
+                .iter()
+                .any(|f| f.bit_width.is_some() || Self::type_contains_bitfield(&f.ty)),
+            Type::Array(elem, _) => Self::type_contains_bitfield(&elem.base),
+            Type::Named(_) => true,
+            _ => false,
+        }
+    }
+
+    /// 块里的位域 RMW 链深度（语句表达式的体、嵌套块等）。
+    fn bf_rmw_depth_block(b: &crate::ast::Block) -> usize {
+        Self::bf_rmw_depth_items(&b.items)
+    }
+
+    /// 一批 `BlockItem` 里的位域 RMW 链深度。
+    fn bf_rmw_depth_items(items: &[BlockItem]) -> usize {
+        items.iter().map(Self::bf_rmw_depth_item).max().unwrap_or(0)
+    }
+
+    /// 单条 `BlockItem` 的位域 RMW 链深度（switch 的 prelude / case 体与块共用）。
+    fn bf_rmw_depth_item(item: &BlockItem) -> usize {
+        match item {
+            crate::ast::BlockItem::Stmt(s) => Self::bf_rmw_depth_stmt(s),
+            crate::ast::BlockItem::Decl(crate::ast::Decl::Var(v)) => {
+                let d = v
+                    .init
+                    .as_ref()
+                    .map_or(0, |e| Self::bf_rmw_chain_depth(e));
+                // 声明初始化列表：`InitList` 自带的 `ty` 是占位 `Type::Int`，
+                // 站点判据只能问声明的类型。`gen_init_list` 对位域成员发 3 槽 RMW，
+                // 占一层。
+                if matches!(v.init, Some(crate::ast::Expr::InitList { .. }))
+                    && Self::type_contains_bitfield(&v.ty)
+                {
+                    d.max(1)
+                } else {
+                    d
+                }
+            },
+            // 块级 `asm(...)` 的操作数是普通表达式，也可以含位域写。
+            crate::ast::BlockItem::Decl(crate::ast::Decl::GlobalAsm {
+                outputs, inputs, ..
+            }) => outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(|e| Self::bf_rmw_chain_depth(e))
+                .max()
+                .unwrap_or(0),
+            // 类型/函数/标号/typedef 声明不带位域写（嵌套函数自己一帧）。
+            _ => 0,
+        }
+    }
+
+    /// 语句里的位域 RMW 链深度。**穷举写**：新增 `Stmt` 形态会编不过，而不是静默
+    /// 少扫一条子树（`collect_local_decls_stmt` 同一纪律）。
+    fn bf_rmw_depth_stmt(s: &crate::ast::Stmt) -> usize {
+        use crate::ast::Stmt as S;
+        let m = |x: Option<&crate::ast::Expr>| {
+            x.map_or(0, |e| Self::bf_rmw_chain_depth(e))
+        };
+        match s {
+            S::Expr { e, .. } => Self::bf_rmw_chain_depth(e),
+            S::Return { val, .. } => m(val.as_ref()),
+            S::Block { b, .. } => Self::bf_rmw_depth_block(b),
+            S::If {
+                cond, then_, else_, ..
+            } => Self::bf_rmw_chain_depth(cond)
+                .max(Self::bf_rmw_depth_stmt(then_))
+                .max(else_.as_ref().map_or(0, |e| Self::bf_rmw_depth_stmt(e))),
+            S::While { cond, body, .. } | S::Do { cond, body, .. } => {
+                Self::bf_rmw_chain_depth(cond).max(Self::bf_rmw_depth_stmt(body))
+            },
+            S::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => init
+                .iter()
+                .map(|i| Self::bf_rmw_depth_stmt(i))
+                .chain(std::iter::once(m(cond.as_ref())))
+                .chain(std::iter::once(m(step.as_ref())))
+                .chain(std::iter::once(Self::bf_rmw_depth_stmt(body)))
+                .max()
+                .unwrap_or(0),
+            S::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => std::iter::once(Self::bf_rmw_chain_depth(expr))
+                .chain(prelude.iter().map(|i| Self::bf_rmw_depth_item(i)))
+                .chain(cases.iter().flat_map(|c| {
+                    c.body.items.iter().map(|i| Self::bf_rmw_depth_item(i))
+                }))
+                .max()
+                .unwrap_or(0),
+            S::Label { stmt, .. } => Self::bf_rmw_depth_stmt(stmt),
+            // 控制流边与不带表达式的形态。
+            S::Goto { .. }
+            | S::Break { .. }
+            | S::Continue { .. }
+            | S::Fallthrough { .. } => 0,
+            S::GotoIndirect { expr, .. } => Self::bf_rmw_chain_depth(expr),
+            S::Invoke { call, .. } => Self::bf_rmw_depth_stmt(call),
+            S::EhLandingPad {
+                object, selector, ..
+            } => {
+                Self::bf_rmw_chain_depth(object).max(Self::bf_rmw_chain_depth(selector))
+            },
+            // asm 的操作数是普通表达式，里面可以有位域写（`(int){s.bf = 1}` 一类）。
+            S::AsmGoto {
+                outputs, inputs, ..
+            } => outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(|e| Self::bf_rmw_chain_depth(e))
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
     /// 表达式树里的晚分配站点：
     /// - `CompoundLit` → 一个名字含发射序的对象，按 `var_alloc_slots(ty)` 预扣（向量形态例外：
     ///   `gen_expr_compound_lit` 对 `Type::Vector` 走 `vector_temp_base`，那不在变量区）；
@@ -1168,6 +1956,16 @@ impl Codegen {
         use crate::ast::Expr as E;
         // 类型侧统一走一遍：结果类型自己就能携带 VLA 维度，逐变体重复一遍必漏。
         Self::late_need_type(&e.ty(), need);
+        // §5.12 帧经济：complex / 聚合 rvalue 物化带的尺寸由本扫决定，所以「有没有用到」
+        // 的判据必须与发射器同源，而发射器那一侧只读类型/左值形状，不依赖任何运行期
+        // 信息：≤16B 的记录类型作为**非 lvalue 右值**出现时才会被存到帧底带上
+        // （`lvalue.rs`/`mem/addr.rs` 的聚合 rvalue 暂存、`dispatch.rs` 聚合赋值的源、
+        // `stmt.rs` 返回位的复合字面量）；complex/imaginary 在 `late_need_type` 里按类型
+        // 登记。位域 RMW 带按**链深度**给（`bf_rmw_chain_depth`），与向量带一样不再恒给；
+        // 那一轴在 `late_need_block` 里按块算一次，不在这里逐节点递归。
+        if Self::expr_materializes_small_aggregate(e) {
+            need.needs_cx_band = true;
+        }
         match e {
             E::Ident { .. }
             | E::Int { .. }
@@ -1322,6 +2120,54 @@ impl Codegen {
         }
     }
 
+    /// 诊断（`DCC_FRAME_DUMP=<函数名子串>`）：打印一帧的组成，用来回答「这个函数
+    /// 的帧到底被哪条带吃掉了」。内核侧 `perf_event_task_tick` 12KB 帧打穿 IRQ 栈
+    /// 就是这么定位的。只写 stderr、不进产物；未设置环境变量时零副作用。
+    pub fn frame_dump(
+        &self,
+        name: &str,
+        plan: &crate::codegen::x86_64::abi::layout::FramePlan,
+    ) {
+        let Ok(pat) = std::env::var("DCC_FRAME_DUMP") else {
+            return;
+        };
+        if !pat.is_empty() && !name.contains(&pat) {
+            return;
+        }
+        let layout = LayoutMap::resolve(plan);
+        eprintln!(
+            "FRAMEPLAN {name} frame=0x{:x} var={} hdr={} late={} sret={} spill={} va={} sc={} cx={} vec={} bf={} tramp={} stack={} temps={}",
+            layout.frame_size,
+            plan.var_bytes,
+            layout.hdr,
+            plan.late_slots,
+            plan.sret_need,
+            plan.spill_slots,
+            plan.va_slots,
+            plan.static_chain_slot,
+            plan.cx_band,
+            plan.vec_reserve,
+            plan.bf_rmw_reserve,
+            plan.tramp_reserve,
+            plan.stack_reserve,
+            plan.temp_slots
+        );
+        // 诊断（`DCC_VAR_DUMP=1`，与上面的 pattern 共用）：把变量区里每个名字的偏移
+        // 打出来。用来回答「var_bytes 里到底住了什么」—— 反汇编统计 `[r13-0x..]`
+        // 能数出有多少槽真的被访问，这里则给出那些槽属于谁。
+        if std::env::var_os("DCC_VAR_DUMP").is_none() {
+            return;
+        }
+        let mut entries: Vec<(&String, &(i64, Type))> = self.var_map.iter().collect();
+        entries.sort_by_key(|(_, (off, _))| -*off);
+        for (n, (off, ty)) in entries {
+            eprintln!(
+                "VAR {name} <- {n} off={off} slots={}",
+                Self::var_alloc_slots(ty)
+            );
+        }
+    }
+
     /// 帧规划前把「规划期看不见的运行期临时对象」算成晚分配带的尺寸，并把账面交出去。
     /// 两个帧规划分支 (带参数的普通函数 / `main`) 共用本函数, 避免其中一处
     /// 漏扣后又是一次“变量区压进 sret 区”的定向失效。
@@ -1331,10 +2177,18 @@ impl Codegen {
     /// 再顺手把规划期看得见的自由 ident 登进变量区、把 `frame_planned` 置上作为发射期
     /// 晚分配的闸门。所有槽尺寸（`late_slots` / `spill_slots` / `temp_slots`）都在
     /// `LayoutMap::resolve` 的同一帧里定为输入，本函数只负责晚分配这一条带的输入。
-    pub fn plan_late_slot_budget(&mut self, body: Option<&Block>, params: &[crate::ast::Param]) {
+    pub fn plan_late_slot_budget(
+        &mut self,
+        body: Option<&Block>,
+        params: &[crate::ast::Param],
+        ret_ty: &Type,
+    ) {
         // 向量槽带需求逐函数复位（与 `late_slot_budget` 同口径）：无体声明直接 early
         // return，不能留下上个函数的尺寸。
         self.max_vec_bytes = 0;
+        self.needs_cx_band = false;
+        self.bf_rmw_max_depth = 0;
+        self.reg_homed_names.clear();
         let Some(b) = body else { return };
         // §11.23 步 2：预算 = 发射期那四族的静态需求。每一笔都能对应到一个具体站点，
         // 所以这里不是「宁可多给」而是「算准」（少算了 `E1133` 会响）。
@@ -1364,7 +2218,14 @@ impl Codegen {
         for p in params {
             Self::late_need_type(&p.ty, &mut need);
         }
+        // **返回类型也要喂**：`_Complex double int_to_cd(int n){ return n; }` 体内一个
+        // complex 都没出现（`return n;` 的表达式类型是 `int`），复数打包是发射器在返回
+        // 路径上做的，那里就读帧底那条带。只看体与形参会把它漏成 cx_band=0（实测
+        // `complex_component_conv_provider.c` 的 `int_to_cd`/`int_to_cf`）。
+        Self::late_need_type(ret_ty, &mut need);
         self.max_vec_bytes = need.max_vec_bytes;
+        self.needs_cx_band = need.needs_cx_band;
+        self.bf_rmw_max_depth = need.bf_rmw_depth;
         // §11.23 步 3：这份预算不再**预扣进变量区水位**，而是作为晚分配带的尺寸交给
         // 布局解算（`FramePlan::late_slots`）。带里的对象不再挤在局部变量底下，于是
         // `register_var` 里那两段只在生成期推帧坐标的代码（`min_used` 夹逼 +
@@ -1383,13 +2244,25 @@ impl Codegen {
                 &self.current_func_name,
                 &mut ext_decls,
             );
-            for v in ext_decls {
+            for v in &ext_decls {
                 let auto_ext_home = v.home.is_some_and(|l| {
                     l.reg()
                         .is_some_and(|r| crate::ssa::regalloc::is_auto_ext_reg(r.n))
                 });
                 if auto_ext_home {
                     slots += Self::var_alloc_slots(&v.ty);
+                }
+            }
+            // §5.12：`ScopedVarAlloc` 已经不给「有寄存器家」的名字留槽，但这个函数末尾
+            // 还有一道 `collect_free_idents` → `register_var` 的补登记循环；它只看
+            // `var_map` 里有没有，于是刚被跳过的那批名字会在这里被原样捡回来 ——
+            // `DCC_FRAME_SKIP_HOMED` 因此过去完全无效（实测 `decay_load`：peak=1，
+            // 帧里却仍是 8 槽）。这里把「有家」的名单传下去，补登记同样跳过它们。
+            if skip_homed_frame_slots() {
+                for v in &ext_decls {
+                    if matches!(v.home, Some(crate::location::Location::Reg(_))) {
+                        self.reg_homed_names.insert(v.name.name.clone());
+                    }
                 }
             }
         }
@@ -1415,6 +2288,11 @@ impl Codegen {
         }
         for (name, ty) in idents {
             if self.var_map.contains_key(&name) {
+                continue;
+            }
+            // 有寄存器家的名字不占帧槽（见上面 `reg_homed_names` 的注释）；真被问到
+            // 帧偏移时 `var_offset` 会报 E1134，不是静默错值。
+            if self.reg_homed_names.contains(&name) {
                 continue;
             }
             // 已知全局不占帧内槽（带家的文件作用域 register 变量例外：它本来就要
@@ -2098,6 +2976,7 @@ impl Codegen {
         var_map: &mut HashMap<String, (i64, Type)>,
         items: &[BlockItem],
         temp_slots: i32,
+        cs_slots: i32,
         kasan_rz_slots: i32,
         static_local_map: &crate::static_locals::StaticLocalMap,
         func_name: &str,
@@ -2108,7 +2987,11 @@ impl Codegen {
         let mut decls: Vec<&VarDecl> = Vec::new();
         Self::collect_frame_var_decls(items, static_local_map, func_name, &mut decls);
         let mut maxima: HashMap<String, (i64, Type)> = HashMap::new();
+        // 名字出现次数。>1 的名字（遮蔽声明）必须全函数共用一格，钉在顶层不参与回收：
+        // 同名的两块各有自己的作用域，但它们共用的那个偏移不能被第三个变量拿去。
+        let mut counts: HashMap<String, u32> = HashMap::new();
         for v in &decls {
+            *counts.entry(v.name.name.clone()).or_insert(0) += 1;
             let slots = Self::var_alloc_slots(&v.ty);
             match maxima.get(&v.name.name) {
                 Some(&(cur, _)) if cur >= slots => {},
@@ -2117,46 +3000,39 @@ impl Codegen {
                 },
             }
         }
+        let pinned: HashSet<String> = counts
+            .iter()
+            .filter(|(_, &c)| c > 1)
+            .map(|(n, _)| n.clone())
+            .collect();
+        let mut alloc = ScopedVarAlloc {
+            var_map,
+            maxima: &maxima,
+            pinned: &pinned,
+            static_local_map,
+            func_name,
+            temp_slots,
+            cs_slots,
+            kasan_rz_slots,
+            over_align,
+            total: *total_slots,
+            peak: *total_slots,
+            spill: 0,
+        };
+        // 钉住的同名变量先占位（顺序 = 首次出现顺序），此后任何作用域都共享它。
         for v in &decls {
-            Self::count_spill_slot(v, spill_slots);
-            let (slots, alloc_ty) = match maxima.get(&v.name.name) {
-                Some((s, t)) => (*s, t.clone()),
-                None => (Self::var_alloc_slots(&v.ty), v.ty.clone()),
-            };
-            // 同名变量在不同作用域出现多次时, or_insert 不插入但 total_slots
-            // 仍递增会导致偏移计算错误 —— 所以先查再推。
-            if !var_map.contains_key(&v.name.name) {
-                let mut used = total_slots.saturating_mul(8);
-                let hdr = LayoutMap::hdr_of(temp_slots as i64);
-                // 过对齐局部 (aligned(N>16)): 把游标上圆整, 使其基址
-                // -(used+hdr)-(slots-1)*8 成为该变量有效对齐的整数倍.
-                // 前提是序言已把 %r13 动态对齐到 over_align (>= 所有 va 的 2 的幂).
-                if over_align > 16 {
-                    let va = v.alignment.unwrap_or(0).max(v.ty.align()).max(8) as i64;
-                    if va > 16 {
-                        let target = hdr + (slots.saturating_sub(1) * 8);
-                        let rem = (used + target).rem_euclid(va);
-                        if rem != 0 {
-                            used += va - rem;
-                        }
-                    }
-                }
-                let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
-                var_map.insert(v.name.name.clone(), (off, alloc_ty));
-                // 反映对齐补齐带来的额外槽数, 使后续变量/参数落在本轮下方.
-                let advanced = used.saturating_sub(total_slots.saturating_mul(8));
-                *total_slots = total_slots
-                    .saturating_add(advanced / 8)
-                    .saturating_add(slots);
-                let rz_slots = kasan_rz_slots as i64;
-                *total_slots = total_slots.saturating_add(rz_slots);
-                for j in 0..kasan_rz_slots {
-                    let rz_name = format!("__kasan_rz_{}_{}", v.name.name, j);
-                    let rz_off = off - slots * 8 - j as i64 * 8;
-                    var_map.entry(rz_name).or_insert((rz_off, Type::Void));
-                }
+            if pinned.contains(&v.name.name) {
+                alloc.alloc_one(v);
             }
         }
+        // 作用域感知分配：块退出即回收水位（§5.12 / 报告 §5.26）。
+        // 函数体顶层不回收 —— 形参接下来要落到峰值之下。
+        alloc.block(items, false);
+        if std::env::var_os("DCC_SLOT_HOME").is_some() {
+            eprintln!("SLOT-PEAK {} peak={} spill={}", func_name, alloc.peak, alloc.spill);
+        }
+        *total_slots = alloc.peak;
+        *spill_slots = alloc.spill;
     }
 
     /// P13 阶段6：本函数里「帧槽读写不得被块内等价事实穿过」的局部变量名 → 槽数。
@@ -2500,6 +3376,55 @@ impl Codegen {
         ]));
     }
 
+    /// 函数退出点上的 `__attribute__((cleanup))` —— 内核 `guard()` 的解锁就住在这。
+    ///
+    /// 存在理由：`end_cleanup_scope` 以前只在 `Stmt::Block` 的出口被调用，而
+    /// `include/linux/cleanup.h` 的 `guard(raw_spinlock_irqsave)(&ioapic_lock);` 展开成
+    /// 一个**函数体层**的带 `__cleanup__` 声明符 —— 那个作用域没有 `Stmt::Block` 出口，
+    /// 于是解锁从未被发射。实测（报告 §5.16）：PVH 启动走到 `Processor #0 (Bootup-CPU)`
+    /// 后静默卡死，`ioapic_lock` 的锁字读回 `0x101`（locked=1、pending=1），
+    /// 调用栈是 `setup_arch → mpparse_parse_smp_config → smp_read_mpc → mp_register_ioapic
+    /// → io_apic_get_redir_entries → _raw_spin_lock_irqsave → queued_spin_lock_slowpath`；
+    /// 该对象的 `io_apic_get_redir_entries` 里只有一条 `_raw_spin_lock_irqsave` 调用，
+    /// 没有任何解锁字节。同一个 TU 里的块内 `guard()` 正常（块出口本来就发）。
+    ///
+    /// 为什么只覆盖部分交付类别：清理函数是一次普通 `call`，而返回值此刻已经躺在
+    /// ABI 交付位置上。`Integer` 用 `push/pop %rax,%rdx` 能保住，`Memory`（sret）的值
+    /// 本体在内存里、只需保地址，所以这两类可以发；`Sse`/`X87`/复数交付的 xmm 与
+    /// st(0) 都是 caller-saved，没有对应的廉价保存，那些函数保持旧行为（宁可不执行
+    /// cleanup，也不能悄悄把返回值毁掉）。
+    fn emit_func_scope_cleanups(&mut self) {
+        if self.cleanup_vars.is_empty() {
+            return;
+        }
+        let ret = self.current_func_ret_ty.clone();
+        let sret = Self::needs_memory_return(&ret);
+        let int_delivery = Self::abi_classes(&ret).iter().all(|c| {
+            matches!(
+                c,
+                crate::codegen::x86_64::AbiClass::Integer
+                    | crate::codegen::x86_64::AbiClass::NoClass
+            )
+        });
+        if !matches!(ret, Type::Void) && !(sret || int_delivery) {
+            return;
+        }
+        // `void` 无值可保；其余先把整数交付寄存器压栈，清理调用完了再原样弹出。
+        let save_value = !matches!(ret, Type::Void);
+        if save_value {
+            self.push(0); // rax
+            self.push(2); // rdx（Int128 / 两个 eightbyte 的高半）
+        }
+        // 按 LIFO 发完本函数所有未退出的 cleanup 作用域（包括嵌在块里、由 `return`
+        // 提前退出的那些）。用不消费的那一个入口：一个函数有多个 `return` 站点，
+        // 每个都要自己发一份（理由见 `Codegen::emit_cleanup_range`）。
+        self.emit_cleanup_range(0);
+        if save_value {
+            self.pop(2);
+            self.pop(0);
+        }
+    }
+
     pub fn emit_func_epilogue(&mut self) {
         // 取走「体内比帧线低多少」这本账：尾声自己发的恢复指令不该再往里记。
         let ledger = self.rsp_below_frame_line.take();
@@ -2507,6 +3432,9 @@ impl Codegen {
         // 写回内存，否则那个值随号一同消失，而帧里留的是旧值（调用方或嵌套路径
         // 再从内存读它就是错值）。函数尾的那一次 flush 只管「顺落下来结束」的路径。
         self.region_flush();
+        // 作用域在**函数体**那一层的 `__attribute__((cleanup))` 也从这里退出。必须排在
+        // `region_flush()` 之后：清理函数按地址读那个变量，区内推迟的存出得先落回内存。
+        self.emit_func_scope_cleanups();
         // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
         if self.func_canary && self.frame_layout.canary_fits() {
             // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器（槽位 = `abi::layout::CANARY_OFF`）
@@ -2531,38 +3459,35 @@ impl Codegen {
                                                                 // 在旧路上直接命中 E1136 而整 TU 失败。
             self.call_label_noreturn("__stack_chk_fail");
         }
-        // 恢复被调用者保存寄存器: rbx, r12, r14, r15
-        // 同序言: 无条件发射, 未使用的寄存器由 patch_callee_saves 改为 nop
-        // mov rbx, [r13 - 16]  (REX.WB: r13 needs REX.B)
-        Self::emit_callee_save_site(
-            self,
-            0x01,
-            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 3, 13, -16)
-                .with_gas("mov -16(%r13), %rbx".to_string()),
-        );
-        // mov r12, [r13 - 24]  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
-        Self::emit_callee_save_site(
-            self,
-            0x02,
-            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 12, 13, -24)
-                .with_gas("mov -24(%r13), %r12".to_string()),
-        );
-        // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
-        Self::emit_callee_save_site(
-            self,
-            0x04,
-            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 14, 13, -32)
-                .with_gas("mov -32(%r13), %r14".to_string()),
-        );
-        // mov r15, [r13 - 40]  (REX.WRB: r15 在 reg 字段需要 REX.R, r13 在 r/m 需要 REX.B)
-        // 这里没有 SIB，REX.X 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 标成
-        // `rex.WRXB mov -0x28(%r13),%r15`（与序言侧同一个复制源）。
-        Self::emit_callee_save_site(
-            self,
-            0x08,
-            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 13, -40)
-                .with_gas("mov -40(%r13), %r15".to_string()),
-        );
+        // 恢复被调用者保存寄存器（报告 §5.42）：只发**计划里**的号，槽号按下发顺序
+        // 紧凑编号（与序言同一套 cs_j），偏移 `-(16 + 8*j)`。旧口径无条件发 4 条
+        // （32B 槽 + 8B 洞），未用的再由 `patch_callee_saves` 改成 nop —— 帧头却已经
+        // 付了 4 个槽的钱。现在帧头尺寸就是计划位图的 popcount，这里必须逐号对齐。
+        let mut cs_j: i64 = 0;
+        for (bit, reg, name) in [
+            (0x01u8, 3u8, "rbx"),
+            (0x02, 12, "r12"),
+            (0x04, 14, "r14"),
+            (0x08, 15, "r15"),
+        ] {
+            if self.callee_plan & bit == 0 {
+                continue;
+            }
+            let off = -(16 + cs_j * 8) as i32;
+            Self::emit_callee_save_site(
+                self,
+                bit,
+                Insn::mov_rm_mem(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    reg,
+                    13,
+                    off,
+                )
+                .with_gas(format!("mov {off}(%r13), %{name}")),
+            );
+            cs_j += 1;
+        }
         // 跳表基址常驻 `%rbp` 时把号还给调用者（阶段 6 批 4）。位置必须在四条
         // callee-saved 恢复之后、`mov %r13,%rsp` 之前：前者仍是本帧坐标寻址唯一还能用
         // 的时刻，而多个 return 站点内联展开尾声时每一条都要带上这一步。
@@ -2775,7 +3700,8 @@ mod tests {
             &mut var_map,
             items,
             2,
-            0,
+            0, // cs_slots: 本用例只数槽位/字节数，与帧头坐标无关
+            0, // kasan_rz_slots
             &StaticLocalMap::default(),
             fname,
             &mut total,

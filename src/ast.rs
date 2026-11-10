@@ -933,6 +933,23 @@ fn designator_outer_next_index(d: &Designator) -> Option<usize> {
 /// 长度为 0 意味着内置扩展一个都不注册，dcc 产物里 `sqlite_dbpage` 一类虚表不存在。
 pub fn deduce_incomplete_array_dim(ty: Type, init: Option<&Expr>) -> Type {
     let Some(init) = init else { return ty };
+    // C11 6.7.9p14：字符数组可以由字符串字面量初始化，而且**字面量可以带一层花括号**
+    // （`static char s[] = { "ab" };`）。花括号版在 AST 里是 `InitList[String]`，如果
+    // 按「一项一个元素」数，数组会被定成 1 字节：初始化器实际写 `len+1` 字节，把后面
+    // 的静态变量踩掉，`sizeof(s)` 也退化成 1。内核 `fs/coredump.c` 的
+    // `static char core_modes[] = { "file\npipe" "\nsocket" };` 正是这个形状，
+    // `sizeof(core_modes) - 1` 变成 0，sysctl 注册时报 `core_modes No maxlen`。
+    // 宽字符串（`wchar_t` = int）同一规则，按元素宽度折算个数。
+    if let (Type::Array(elem, ArraySize::Const(0)), Expr::InitList { inits, .. }) = (&ty, init)
+    {
+        if let [InitItem::Expr(Expr::String { data, .. })] = inits.as_slice() {
+            if is_char_array_element(&elem.base) {
+                let elem_sz = elem.size().max(1);
+                let num_elems = data.len().div_ceil(elem_sz);
+                return Type::Array(elem.clone(), ArraySize::Const(num_elems));
+            }
+        }
+    }
     match (&ty, init) {
         (Type::Array(elem, ArraySize::Const(0)), Expr::InitList { inits, .. }) => {
             // 元素类型是聚合体时按 brace elision 数元素：扁平标量每
@@ -952,6 +969,25 @@ pub fn deduce_incomplete_array_dim(ty: Type, init: Option<&Expr>) -> Type {
         },
         _ => ty,
     }
+}
+
+/// 字符串字面量可以初始化「字符类型」的数组：`char` 家族与宽字符（`wchar_t` 在
+/// Linux x86-64 上是 `int`，C11 6.7.9p15 也允许 `char16_t`/`char32_t`）。
+/// 指针数组（`char *a[] = { "x" }`）不走这条规则，仍按「一项一个元素」数。
+fn is_char_array_element(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Char
+            | Type::SChar
+            | Type::UChar
+            | Type::Char8
+            | Type::Char16
+            | Type::Char32
+            | Type::Short
+            | Type::UShort
+            | Type::Int
+            | Type::UInt
+    )
 }
 
 /// sanitizer（ASan / KASAN）插桩会把 lvalue 包成 `Comma{ check, 真 lvalue }`：先跑

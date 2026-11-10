@@ -3,6 +3,11 @@
 # 顺便过滤掉传给 gcc 的 clang 专属 -f 标志 (否则 gcc 会失败)
 set -euo pipefail
 DCC_BIN="${DCC_BIN:-/root/dcc/target/release/dcc}"
+# kbuild 会在别的 cwd 里调本包装器（kconfig 的 `scripts/cc-version.sh $(CC)`），
+# 带 `/` 的相对 DCC_BIN 在那里不存在，症状是「unknown C compiler」而非法错。
+case "$DCC_BIN" in
+    */*) DCC_BIN=$(readlink -f "$DCC_BIN") ;;
+esac
 
 # 过滤 clang-only 标志 (gcc 和 dcc 都不认识)
 filter_clang_flags() {

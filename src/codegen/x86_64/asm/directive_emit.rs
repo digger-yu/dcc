@@ -223,12 +223,31 @@ impl Codegen {
 
     pub(crate) fn emit_asm_desc(&mut self, op: &AsmOperand, ext: u8) {
         match op {
-            AsmOperand::Reg(r, _) => {
+            AsmOperand::Reg(r, bits) => {
+                // 描述符表指令的寄存器形式：ModRM 的 mod **必须是 11**。
+                // 旧代码只写 `(ext<<3)|(r&7)`（mod=00），于是 `ltr %ax` 被编成
+                // `ltr (%rax)` —— 操作数变成内存地址，读线性地址 0x40 而 #PF（§5.19）。
+                // `0F 00 /x` 没有 32 位寄存器形式，寄存器操作数永远是 r/m16，
+                // 所以 ModRM 直接 `0xC0 | reg`。
+                //
+                // 0x66 前缀按 GAS 实测分两类（`as` + objdump 对照）：
+                //   `str %ax` → `66 0f 00 c8`，`sldt %ax` → `66 0f 00 c0`
+                //   `ltr %ax` → `0f 00 d8`，`lldt/verr/verw %ax` → 无 0x66
+                // 即“写回寄存器”那两条在 GAS 眼里默认是 32 位，要 0x66 才是 16 位。
+                // 多一个 0x66 会让 CPU 把它当操作数大小覆盖而不是忽略，不多不少最稳。
+                let is_store = ext <= 1;
+                if is_store && *bits == 16 {
+                    self.emit_insn(&Insn::raw(&[0x66]));
+                }
+                // REX 只在操作数真的在 %r8-%r15 时才发：无意义的空 0x40 会让
+                // objdump 把 mnemonics 写成 `rex ltr %eax`，与 GAS 产物对不上。
+                if *r >= 8 {
+                    self.emit_insn(&Insn::raw(&[Self::rex(false, 0, 0, *r)]));
+                }
                 self.emit_insn(&Insn::raw(&[
-                    Self::rex(false, 0, 0, *r),
                     0x0F,
                     0x00,
-                    ((ext & 7) << 3) | (r & 7),
+                    0xC0 | ((ext & 7) << 3) | (r & 7),
                 ]));
             },
             AsmOperand::Mem {
@@ -237,11 +256,13 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                self.emit_insn(&Insn::raw(&[
-                    Self::rex(false, 0, index.unwrap_or(0), *base),
-                    0x0F,
-                    0x00,
-                ]));
+                // 同上：空 REX 不发，只在 base/index 真的在 %r8-%r15 时发。
+                if *base >= 8 || index.map_or(false, |i| i >= 8) {
+                    self.emit_insn(&Insn::raw(&[
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
+                    ]));
+                }
+                self.emit_insn(&Insn::raw(&[0x0F, 0x00]));
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             AsmOperand::SymDisp(sym, _) => {

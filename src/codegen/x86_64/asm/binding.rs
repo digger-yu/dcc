@@ -42,6 +42,12 @@ pub struct AsmOpBinding {
     /// 期间持着地址。asm 编完（含写回）后必须 `free_callee_saved` 归还，否则同一
     /// 函数里每多一条带内存操作数的 asm，就永久少一个可用的 callee-saved 号。
     pub(crate) mem_addr_reg: Option<u8>,
+    /// 该地址 scratch 是**借来**的：发号池四个号全被活值占着时，借一个正持有值的
+    /// 号并在借出前 `push`、asm 之后 `pop`（见 `alloc_asm_mem_scratch`）。
+    ///
+    /// 归还路径必须区分：借来的号不能被 `free_callee_saved`（它本来就没被本句
+    /// asm 分配），而要先 `pop` 把活值还回去。
+    pub(crate) mem_addr_borrowed: bool,
 }
 
 /// `parse_asm_data_expr` 的求值结果:

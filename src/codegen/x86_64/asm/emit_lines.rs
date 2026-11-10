@@ -265,50 +265,80 @@ impl Codegen {
             "fdivp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 6),
             "fdivrp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 7),
             // x87 加载/存储 (单操作数: 内存或 st(i))
-            "fld" | "flds" | "fldl" | "fldt" if ops.len() == 1 => {
-                self.emit_asm_x87_mem(&ops[0], 0xD9, 0, false)
+            // 后缀就是操作数宽度，宽度不同 ESC 也不同（GAS 实测）：
+            //   flds=D9 /0  fldl=DD /0  fldt=DB /5   fld %st(i)=D9 C0+i
+            //   fsts=D9 /2  fstl=DD /2  fstt=DB /2   fst %st(i)=DD D0+i
+            //   fstps=D9 /3 fstpl=DD /3 fstpt=DB /7  fstp %st(i)=DD D8+i
+            // 旧实现把带后缀的写法全归到 **32 位**那一条（`"fld"|"flds"|"fldl"|"fldt"`
+            // 共用 D9 /0），`fldl g` 只读 4 字节、`fstpt` 只写 4 字节，而后者会把
+            // long double 的高 6 字节丢在槽里 —— 内核 FDIV 自检（bugs.c）正是这组。
+            "fld" | "flds" if ops.len() == 1 => {
+                self.emit_asm_x87_op(&ops[0], (0xD9, 0), (0xD9, 0), false)
             },
-            "fst" | "fsts" | "fstl" | "fstt" if ops.len() == 1 => {
-                self.emit_asm_x87_mem(&ops[0], 0xD9, 2, false)
+            "fldl" if ops.len() == 1 => self.emit_asm_x87_op(&ops[0], (0xDD, 0), (0xD9, 0), false),
+            "fldt" if ops.len() == 1 => self.emit_asm_x87_op(&ops[0], (0xDB, 5), (0xD9, 0), false),
+            "fst" | "fsts" if ops.len() == 1 => {
+                self.emit_asm_x87_op(&ops[0], (0xD9, 2), (0xDD, 2), false)
             },
-            "fstp" | "fstps" | "fstpl" | "fstpt" if ops.len() == 1 => {
-                self.emit_asm_x87_mem(&ops[0], 0xD9, 3, false)
+            "fstl" if ops.len() == 1 => self.emit_asm_x87_op(&ops[0], (0xDD, 2), (0xDD, 2), false),
+            // `fstt` 保留（DB /2）：GAS 拒绝这个拼写、内核也不使用，但它与 m80 的
+            // `fstpt` 只差弹出位，删掉会让已经写过的源少一条可用写法。
+            "fstt" if ops.len() == 1 => self.emit_asm_x87_op(&ops[0], (0xDB, 2), (0xDD, 2), false),
+            "fstp" | "fstps" if ops.len() == 1 => {
+                self.emit_asm_x87_op(&ops[0], (0xD9, 3), (0xDD, 3), false)
             },
+            "fstpl" if ops.len() == 1 => self.emit_asm_x87_op(&ops[0], (0xDD, 3), (0xDD, 3), false),
+            "fstpt" if ops.len() == 1 => self.emit_asm_x87_op(&ops[0], (0xDB, 7), (0xDD, 3), false),
             "fldcw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 5, false),
             "fnstcw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 7, true),
-            "fnstsw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 7, false), // stsw 的编码: DF E0 (ax) 或 DD E0(mem)
-            // 整数加载/存储
-            "fild" | "fildl" | "filds" if ops.len() == 1 => {
-                self.emit_asm_x87_mem(&ops[0], 0xDB, 0, false)
+            // fnstsw 的两条形式 ESC 不同：`fnstsw %ax` = DF E0（唯一一条无 ModRM 的），
+            // `fnstsw mem` = DD /7。以前内存形式也用 DF /7 ⇒ 存了个不存在的状态字。
+            "fnstsw" if ops.len() == 1 => match &ops[0] {
+                AsmOperand::Reg(_, _) => self.emit_insn_expect(&Insn::raw(&[0xDF, 0xE0])),
+                _ => self.emit_asm_x87_mem(&ops[0], 0xDD, 7, false),
             },
-            "fist" | "fistl" | "fists" if ops.len() == 1 => {
-                self.emit_asm_x87_mem(&ops[0], 0xDB, 2, false)
-            },
-            "fistp" | "fistpl" | "fistps" | "fistpq" if ops.len() == 1 => {
-                self.emit_asm_x87_mem(&ops[0], 0xDB, 3, false)
+            // 整数加载/存储：filds=DF /0 (m16)、fildl=DB /0、fildq=DF /5 (m64)；
+            // fists=DF /2、fistl=DB /2；fistps=DF /3、fistpl=DB /3、fistpq=DF /7。
+            "fild" | "fildl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 0, false),
+            "filds" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 0, false),
+            "fildq" | "fildll" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 5, false),
+            "fist" | "fistl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 2, false),
+            "fists" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 2, false),
+            "fistp" | "fistpl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 3, false),
+            "fistps" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 3, false),
+            "fistpq" | "fistpll" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xDF, 7, false)
             },
             // BCD 加载/存储
             "fbld" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 4, false),
             "fbstp" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 6, false),
-            // x87 算术 (单操作数: st(i) 或内存)
-            "fadd" | "fadds" | "faddl" if ops.len() == 1 => {
+            // x87 算术 (单操作数: st(i) 或内存)；`s` 后缀 D8 /n，`l` 后缀 DC /n：
+            //   fadds=D8 /0 faddl=DC /0  fmuls=D8 /1 fmull=DC /1
+            //   fsubs=D8 /4 fsubl=DC /4  fdivs=D8 /6 fdivl=DC /6
+            "fadd" | "fadds" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 0, false)
             },
-            "fmul" | "fmuls" | "fmull" if ops.len() == 1 => {
+            "faddl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDC, 0, false),
+            "fmul" | "fmuls" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 1, false)
             },
-            "fsub" | "fsubs" | "fsubl" if ops.len() == 1 => {
+            "fmull" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDC, 1, false),
+            "fsub" | "fsubs" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 4, false)
             },
-            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 1 => {
+            "fsubl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDC, 4, false),
+            "fsubr" | "fsubrs" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 5, false)
             },
-            "fdiv" | "fdivs" | "fdivl" if ops.len() == 1 => {
+            "fsubrl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDC, 5, false),
+            "fdiv" | "fdivs" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 6, false)
             },
-            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 1 => {
+            "fdivl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDC, 6, false),
+            "fdivr" | "fdivrs" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 7, false)
             },
+            "fdivrl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDC, 7, false),
             // x87 双精度内存算术
             "fadd" | "fadds" | "faddl" if ops.len() == 2 => {
                 self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 0, 0xD8, 0)
@@ -1770,7 +1800,7 @@ impl Codegen {
                             *imm as u8,
                         ]));
                         let pos = self.pos() - 5;
-                        self.pending_data_rels.push((pos, sym.clone()));
+                        self.push_rip_data_rel(pos, sym.clone(), 1);
                     }
                 } else {
                     self.asm_reject("vcvtps2ph needs imm, reg, reg/mem");
@@ -1820,7 +1850,7 @@ impl Codegen {
                                     *imm as u8,
                                 ]));
                                 let pos = self.pos() - 5;
-                                self.pending_data_rels.push((pos, sym.clone()));
+                                self.push_rip_data_rel(pos, sym.clone(), 1);
                             },
                             _ => {
                                 self.asm_reject("pshufd src must be xmm or mem");
@@ -1870,7 +1900,7 @@ impl Codegen {
                                     *imm as u8,
                                 ]));
                                 let pos = self.pos() - 5;
-                                self.pending_data_rels.push((pos, sym.clone()));
+                                self.push_rip_data_rel(pos, sym.clone(), 1);
                             },
                             _ => {
                                 self.asm_reject("pshufhw src must be xmm or mem");
@@ -1920,7 +1950,7 @@ impl Codegen {
                                     *imm as u8,
                                 ]));
                                 let pos = self.pos() - 5;
-                                self.pending_data_rels.push((pos, sym.clone()));
+                                self.push_rip_data_rel(pos, sym.clone(), 1);
                             },
                             _ => {
                                 self.asm_reject("pshuflw src must be xmm or mem");
@@ -2166,7 +2196,7 @@ impl Codegen {
                                     *imm as u8,
                                 ]));
                                 let pos = self.pos() - 5;
-                                self.pending_data_rels.push((pos, sym.clone()));
+                                self.push_rip_data_rel(pos, sym.clone(), 1);
                             },
                             _ => {
                                 self.asm_reject("insertps src must be xmm or mem");
@@ -3283,7 +3313,7 @@ impl Codegen {
                                     *imm as u8,
                                 ]));
                                 let pos = self.pos() - 5;
-                                self.pending_data_rels.push((pos, sym.clone()));
+                                self.push_rip_data_rel(pos, sym.clone(), 1);
                             },
                             _ => {
                                 self.asm_reject("pshufw src must be mmx or mem");

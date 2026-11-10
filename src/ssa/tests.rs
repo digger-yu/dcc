@@ -1674,7 +1674,7 @@ fn rebuilt_int_constant_restores_literal_type_instead_of_the_ladder_guess() {
     }
 }
 
-/// 站点④：比较指令的**操作数类型**必须按指令 `dest` 名记账，而不是按常量值记账。
+/// 站点④：指令的**操作数类型**必须按指令 `dest` 名记账，而不是按常量值记账。
 ///
 /// 为什么值键表（[`Function::const_int_tys`]）结构上修不了这一类：`1` 既是 `int` 也是
 /// `unsigned int`，同一 TU 里两种写法同值 ⇒ 判为歧义 ⇒ 回落量级阶梯 ⇒ `int`。而 SCCP
@@ -1682,22 +1682,22 @@ fn rebuilt_int_constant_restores_literal_type_instead_of_the_ladder_guess() {
 /// 无符号性就在那一步被销毁（实测 `int x=-1; unsigned int y=1; return x>y;` 在 -O2 得 0,
 /// 应 1；`DCC_SSA_OFF=sccp` 时 IR 仍是 `Var(x.1: Int) > Var(y.1: UInt)`，结果正确）。
 #[test]
-fn cmp_operand_ty_is_keyed_by_inst_dest_not_by_value() {
+fn bin_operand_ty_is_keyed_by_inst_dest_not_by_value() {
     use crate::ssa::ir::InstKind;
     let sp = Span::point("t.c", 1, 1);
 
     // —— 记账 API：键是 dest 名，两条比较互不干扰（按值记就撞在同一个 `1` 上）——
     let mut f = Function::new("t".into(), Type::Int, sp.clone());
-    f.note_cmp_operand_tys("_bin_1".into(), &Type::Int, &Type::UInt);
+    f.note_bin_operand_tys("_bin_1".into(), &Type::Int, &Type::UInt);
     assert_eq!(
-        f.cmp_operand_ty("_bin_1"),
+        f.bin_operand_ty("_bin_1"),
         Some((Type::Int, Type::UInt)),
         "首次记录必须原样可读回"
     );
-    assert_eq!(f.cmp_operand_ty("_bin_2"), None, "没记过的 dest 不得凭空给出类型");
-    f.note_cmp_operand_tys("_bin_2".into(), &Type::Long, &Type::ULong);
+    assert_eq!(f.bin_operand_ty("_bin_2"), None, "没记过的 dest 不得凭空给出类型");
+    f.note_bin_operand_tys("_bin_2".into(), &Type::Long, &Type::ULong);
     assert_eq!(
-        f.cmp_operand_ty("_bin_1"),
+        f.bin_operand_ty("_bin_1"),
         Some((Type::Int, Type::UInt)),
         "另一条同值比较不得覆盖本条 (两条的操作数值都是 1, 按值记账必丢一边)"
     );
@@ -1705,7 +1705,7 @@ fn cmp_operand_ty_is_keyed_by_inst_dest_not_by_value() {
     // —— 传递：`fork()` 必须带走这张表，否则跑 pass 后就查不到了 ——
     let g = f.fork();
     assert_eq!(
-        g.cmp_operand_ty("_bin_1"),
+        g.bin_operand_ty("_bin_1"),
         Some((Type::Int, Type::UInt)),
         "fork 后记录必须仍在 (重建读的是 pass 之后那份 Function)"
     );
@@ -1719,7 +1719,7 @@ fn cmp_operand_ty_is_keyed_by_inst_dest_not_by_value() {
             if let InstKind::Bin { op: BinOp::Gt, .. } = &inst.kind {
                 let d = inst.dest.as_ref().expect("比较必有 dest");
                 assert_eq!(
-                    func.cmp_operand_ty(&d.name()),
+                    func.bin_operand_ty(&d.name()),
                     Some((Type::Int, Type::UInt)),
                     "{} 的两个操作数在 AST 里是 int 与 unsigned int, 必须在 build 期记账",
                     d.name()
@@ -1747,5 +1747,124 @@ fn cmp_operand_ty_is_keyed_by_inst_dest_not_by_value() {
             "-O{level}: 传播后的 `1` 必须按比较操作数的原始类型还原为 unsigned int, \
              否则公共类型退化成 int ⇒ 无符号比较拿到有符号条件码。所有 `v: 1` 窗口: {ones:?}"
         );
+    }
+}
+
+/// 站点④b：同一张按指令槽位的记账必须盖住**算术**指令操作数的**宽度**，而不只是比较的符号。
+///
+/// 现场是 PVH 启动：内核 `lib/vsprintf.c` 的 `put_dec_full8` 里
+///
+/// ```c
+/// q = (r * (u64)0x28f5c29) >> 32;      /* q 是 unsigned，r 是 unsigned */
+/// ```
+///
+/// 那份 `(u64)` 在 `lower_expr` 被折叠成裸 `Operand::Int(42949673)`，宽度信息就断了；
+/// 重建只好评量级阶梯把乘法认成 32 位，发射序因此成了
+/// `imul %r8,%rax; mov %eax,%eax; shr $0x20,%rax` —— 先截低 32 位再右移 32 恒得 0，
+/// 下一句 `decpair[r - 100*q]` 拿 4 千万做下标越界，启动在 `put_dec_full8+0x8a`
+/// 以 #DF 收场（报告 §5.17）。比较那一支今天已记账，乘法这一支以前不记。
+#[test]
+fn bin_operand_ty_records_arithmetic_width_too() {
+    use crate::ssa::ir::InstKind;
+
+    // 与内核同源的那一行：`(unsigned) * (u64)字面量`。
+    let src = "unsigned put_dec_q(unsigned r) {\n    unsigned q;\n    q = (r * (unsigned long long)42949673ULL) >> 32;\n    return q;\n}\n";
+    let base = try_build(src, "put_dec_q").expect("该形态应能进 SSA");
+
+    let mut muls = 0usize;
+    for b in &base.block_order {
+        for inst in &base.blocks[b].insts {
+            if let InstKind::Bin { op: BinOp::Mul, .. } = &inst.kind {
+                let d = inst.dest.as_ref().expect("乘法必有 dest");
+                assert_eq!(
+                    base.bin_operand_ty(&d.name()),
+                    Some((Type::UInt, Type::ULongLong)),
+                    "{} 的两个操作数在 AST 里是 unsigned 与 unsigned long long：\
+                     宽度必须在 build 期就按指令槽位记下，否则重建后乘法被压回 32 位",
+                    d.name()
+                );
+                muls += 1;
+            }
+        }
+    }
+    assert!(muls > 0, "该形态应下降出一条 Mul 指令");
+
+    // 指针算术不记：`p + 1` 里的 `1` 不得在重建时被刷成指针型。
+    let psrc = "int *p_shift(int *p, unsigned n) { return p + 1 + n; }\n";
+    let pbase = try_build(psrc, "p_shift").expect("指针算术形态应能进 SSA");
+    for b in &pbase.block_order {
+        for inst in &pbase.blocks[b].insts {
+            if let InstKind::Bin { op: BinOp::Add, l, r } = &inst.kind {
+                let operand_ty = |o: &crate::ssa::ir::Operand| -> Option<Type> {
+                    match o {
+                        crate::ssa::ir::Operand::Var(v) => Some(v.ty.clone()),
+                        crate::ssa::ir::Operand::SymAddr(_, t) => Some(t.clone()),
+                        _ => None,
+                    }
+                };
+                let is_ptr = |o: &crate::ssa::ir::Operand| {
+                    matches!(operand_ty(o), Some(Type::Ptr(_)))
+                };
+                if !(is_ptr(l) || is_ptr(r)) {
+                    continue;
+                }
+                let d = inst.dest.as_ref().expect("加法必有 dest");
+                assert_eq!(
+                    pbase.bin_operand_ty(&d.name()),
+                    None,
+                    "指针算术的指令不得记账（重建时会把裸常量 `1` 刷成指针型）"
+                );
+            }
+        }
+    }
+}
+
+/// 站点④c：按**调用指令槽位**记的实参类型，要盖住「宽度由实参类型决定」的内建。
+///
+/// 现场是 PVH 启动：内核 `mm/sparse.c` 的 `mem_section_usage_size()` 里
+///
+/// ```c
+/// roundup_pow_of_two(4)  →  1UL << fls64(3)  →  1UL << (64 - __builtin_clzll(3ULL))
+/// ```
+///
+/// `3ULL` 降到 IR 就是裸 `Operand::Int(3)`，重建只能按量级阶梯认成 `int`，前导零
+/// 于是按 32 位口径算（`31 - bsr` 而非 `63 - bsr`）⇒ `1UL << 34`：usemap 向 memblock
+/// 申请 1 TB 失败，`sparse_init_subsection_map` 在 NULL 的 `ms->usage` 上取 `->map`，
+/// 启动在 `__bitmap_set+0x183` 以 #GP 收场（报告 §5.18）。发射端已改成按内建名答，
+/// 这张表是第二道防线（`__builtin_clzg` 这类真正按实参定宽的内建只能靠它）。
+#[test]
+fn call_arg_ty_records_builtin_argument_width() {
+    use crate::ssa::ir::InstKind;
+
+    let src = "int clz_probe(void) {\n    return 64 - __builtin_clzll(3ULL);\n}\n";
+    let base = try_build(src, "clz_probe").expect("该形态应能进 SSA");
+    let mut calls = 0usize;
+    for b in &base.block_order {
+        for inst in &base.blocks[b].insts {
+            if matches!(&inst.kind, InstKind::Call { .. }) {
+                let d = inst.dest.as_ref().expect("有返回值的调用必有 dest");
+                assert_eq!(
+                    base.call_arg_ty(&d.name()),
+                    Some(&[Type::ULongLong][..]),
+                    "{} 的实参在 AST 里是 unsigned long long：宽度必须在 build 期就按指令\
+                     槽位记下，否则重建后前导零按 32 位口径算",
+                    d.name()
+                );
+                calls += 1;
+            }
+        }
+    }
+    assert!(calls > 0, "该形态应下降出一条 Call 指令");
+
+    // 实参是变量时不记：重建拿到的就是真类型，多存一份只会变成噪音。
+    let vsrc = "int clz_var(unsigned x) { return __builtin_clz(x); }\n";
+    let vbase = try_build(vsrc, "clz_var").expect("变量实参形态应能进 SSA");
+    for b in &vbase.block_order {
+        for inst in &vbase.blocks[b].insts {
+            if matches!(&inst.kind, InstKind::Call { .. }) {
+                let d = inst.dest.as_ref().expect("有返回值的调用必有 dest");
+                assert_eq!(vbase.call_arg_ty(&d.name()), None, "变量实参不得记账");
+            }
+        }
     }
 }

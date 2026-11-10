@@ -42,3 +42,20 @@ pub(crate) mod naked;
 pub(crate) mod opmap;
 pub(crate) mod template_resolve;
 pub(crate) mod to_typed; // AsmOperand→X86_64Opcode 转换层 (方案 3)
+
+impl crate::codegen::x86_64::Codegen {
+    /// 登记一条 RIP-relative 数据符号引用，并声明 disp32 之后还有几个字节。
+    ///
+    /// `tail` 只度量**同一条指令内** disp32 之后的字节（`addl $imm, sym(%rip)` =
+    /// imm 长度；`vpextr … imm8` = 1），跨指令的后续字节不算。PC32 的加数是
+    /// `off - 4 - tail`：A 要凑到指令尾，而旧实现一律 `off - 4`，凡是立即数在
+    /// disp32 后面的形状都写偏 tail 个字节（实测 `addl $9, g(%rip)` 写到 `g+1`，
+    /// 读回来是 `0x900` 而不是 9；内核 `_static_cpu_has` 的 `testb` 也踩过同一坑，
+    /// 那里已就地修成 `-4 - imm_size`，见报告 §5.28）。
+    pub(crate) fn push_rip_data_rel(&mut self, disp32_pos: u64, sym: String, tail: u8) {
+        self.pending_data_rels.push((disp32_pos, sym));
+        if tail != 0 {
+            self.pending_data_rel_tails.insert(disp32_pos, tail);
+        }
+    }
+}

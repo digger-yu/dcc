@@ -671,16 +671,15 @@ impl Codegen {
                 }
                 // 统一路径: 被调用者保存寄存器优先, 帧临时槽后备.
                 // 使用 gen_expr_decay: 数组标识符在运算中衰减为指针
-                // binop 临时槽: 放在 callee-saved 区域下方
+                // binop 临时槽（§5.42 新几何）:
                 // 布局: r13+0 saved r13 / r13+8 ret addr
-                //       / r13-16..r13-48 callee-saved save area (rbx/r12/r14/r15)
-                //       / r13-48..-(48+temp*8) binop temp_slots (槽 d 在 -(48+d*8))
-                //       / r13-(48+temp*8).. 变量 (基址 hdr 含 temp_slots)
-                // 注意: binop 槽公式只用 48 (callee-saved 区大小),
-                // temp_slots 只体现在变量基址 hdr 中, 不可重复计入.
-                let slot_off = crate::codegen::x86_64::abi::layout::LayoutMap::temp_slot_off(
-                    self.expr_depth as i64,
-                );
+                //       / r13-8 canary
+                //       / r13-16..-（16+8*cs） callee-saved 保存区（仅计划内的号，紧凑编号）
+                //       / 以下 temp_slots 槽（槽 d 在 -(16+8*cs+8*d)）
+                //       / 再往下是变量区（基址 hdr = 16 + 8*cs + temp*8）
+                // 槽坐标必须走 `frame_layout.temp_slot` —— 它是 cs_slots 的单一消费者；
+                // 自己拼 48 常量会在 cs<4 时与变量区重叠。
+                let slot_off = self.frame_layout.temp_slot(self.expr_depth as i64);
                 // 尝试使用被调用者保存寄存器代替帧槽 (减少内存访问).
                 // callee-saved 跨 call 保活 (ABI 保证 + 本编译器序言保存
                 // callee_saved_used 集合), 因此含 call 的表达式同样安全;
@@ -736,7 +735,7 @@ impl Codegen {
                         mem_disp as gas_mem_disp, REG64 as GAS_REG64,
                     };
                     let gas = format!(
-                        "mov {}, %{}",
+                        "mov {}, {}",
                         GAS_REG64[(dst & 15) as usize],
                         gas_mem_disp(13, slot_off as i64)
                     );
@@ -1119,12 +1118,12 @@ impl Codegen {
                 // 全部物化契约 (Call/sret/va_arg/CompoundLit/整体拷贝) 仍由
                 // `gen_aggregate_assign_to` 单一实现承担, 这里不重写任何判据。
                 //
-                // 复合字面量右值即使目标聚合 <=8B 也必须进本路:
-                // `gen_expr(CompoundLit)` 对小结构同样按约定把**临时结构地址**
-                // 交付进 rax (而非打包值), 落到下方 Index/成员/解引用的标量
-                // int-store 会把这个地址当 8 字节写进目标 (pr79351:
-                // `states[j] = (struct state){0}` 后 states[].k 变地址字节)。
-                // 该兜底与 Ident 左值路径 (下方 `|| CompoundLit`) 同源同判据。
+                // 只要 [`Self::assign_needs_whole_copy`] 成立就必须进本路, 与对象大小无关:
+                // 「交付轴」上一旦右值在 rax 里是**缓冲地址**（复合字面量 / 语句表达式 /
+                // 链式聚合赋值 / 物化过的聚合三元）, 落到下方 Index/成员/解引用的标量
+                // int-store 就会把这个地址当 8 字节写进目标 (pr79351:
+                // `states[j] = (struct state){0}` 后 states[].k 变地址字节; §5.15:
+                // `g = ({ struct s t; …; t; })` 同理)。
                 if Self::assign_needs_addr_slot(lv, &assign_l_ty, r)
                     && self.gen_lvalue_addr(lv, Self::EVAL_BASE)
                 {
@@ -1157,21 +1156,14 @@ impl Codegen {
                     // 「左值是单个标识符」的赋值上把段跟着值记下来。
                     // 本行不改任何字节输出，只更新一张表。
                     self.track_addr_seg_assign(&name.name, r);
-                    let sz = l_ty.size();
-                    // VM struct/union (含 VLA 字段的局部类型) 即使编译期
-                    // size() 回退值 <= 8 也必须走整体拷贝: 其语义大小是
-                    // 运行时值, 标量 8 字节路径会把聚合 rvalue (地址约定)
-                    // 当内容存入 (20070919-1: b = p[2] 后 b.w 变地址字节)
-                    let is_aggregate = matches!(
-                        l_ty,
-                        Type::Struct(_, _, _, _)
-                            | Type::Union(_, _, _, _)
-                            | Type::Array(_, ArraySize::Const(_))
-                            | Type::Atomic(_)
-                            | Type::Vector(_, _)
-                    ) && (sz > 8
-                        || matches!(r.as_ref(), Expr::CompoundLit { .. })
-                        || l_ty.has_vla());
+                    // 整块拷贝路由（单一真源 `assign_needs_whole_copy`）：类型轴
+                    // （装不进一个寄存器 / 运行时尺寸）或**交付轴**（右值是语句
+                    // 表达式 / 复合字面量 / 已整块拷贝的链式赋值 / 物化过的聚合
+                    // 三元 —— rax 里是缓冲地址）任一成立。旧写法在这里把
+                    // 「小尺寸 + CompoundLit」硬写一遍，于是 `g = ({…; t;})`
+                    // （2 B 结构）落进下方标量 store，把物化槽地址当数据写进目标
+                    // （报告 §5.15）。
+                    let is_aggregate = Self::assign_needs_whole_copy(&l_ty, r);
                     if is_aggregate {
                         // struct/array 整体赋值: 逐块拷贝
                         self.gen_aggregate_assign(&name.name, l_ty, r);
@@ -1499,6 +1491,9 @@ impl Codegen {
                                     0,
                                     self.lvalue_seg_prefix(lv),
                                 );
+                                // store 只写内存，赋值表达式的值仍在 rax（已按元素
+                                // 类型归约）：调用方点名 dst 时交付过去。
+                                self.deliver_scalar_assign_value(dst, elem_ty);
                                 return;
                             }
                         }
@@ -1574,6 +1569,7 @@ impl Codegen {
                                     self.lvalue_seg_prefix(lv),
                                 );
                             }
+                            self.deliver_scalar_assign_value(dst, elem_ty);
                         }
                     } else {
                         // 通用路径: 基址来自任意 lvalue/指针表达式 (如 s.i[k] = v)
@@ -1640,6 +1636,7 @@ impl Codegen {
                                     self.lvalue_seg_prefix(lv),
                                 );
                             }
+                            self.deliver_scalar_assign_value(dst, elem_ty);
                         }
                     }
                 } else if let Expr::Deref { e: ptr_e, .. } = lv {
@@ -1772,13 +1769,9 @@ impl Codegen {
                                 self.emit_store_scalar_int_at(assign_l_ty.size(), 1, 0, seg_prefix);
                             }
                         }
-                        // pop(1) 把 rcx 覆盖成目标地址, store 后结果值仍在 rax.
-                        // 调用方若要求 dst=rcx (如 shift amount), 这里必须
-                        // 重新把 rax 搬到 rcx, 否则 shift 操作会用错误的
-                        // 移位计数 (之前是目标地址的低字节).
-                        if dst == 1 {
-                            self.mov(1, 0); // mov rcx, rax
-                        }
+                        // store 只写内存，赋值表达式的值仍在 rax：交付到调用方
+                        // 请求的 dst（旧写法只处理 dst==rcx 的移位计数形状）。
+                        self.deliver_scalar_assign_value(dst, &assign_l_ty);
                     }
                 } else if let Expr::Member {
                     expr,
@@ -1869,8 +1862,8 @@ impl Codegen {
                         // slot 0 = 容器地址, slot 1 = 容器值. 统一为 3 槽/层,
                         // 与自增路径 (increment.rs) 几何一致, 消灭 H1b 同格.
                         let depth = self.bf_rmw_depth as i64;
-                        let addr_off = self.frame_layout.bf_rmw_slot(depth, 0);
-                        let val_off = self.frame_layout.bf_rmw_slot(depth, 1);
+                        let addr_off = self.bf_rmw_slot(depth, 0);
+                        let val_off = self.bf_rmw_slot(depth, 1);
                         // rax = 容器地址
                         // 保存地址到帧临时槽1: [r13 + addr_off]
                         // mov [r13+addr_off], rax (r13=13)
@@ -2477,6 +2470,9 @@ impl Codegen {
                                     );
                                 }
                             }
+                            // store 只写内存；赋值表达式的值（已按字段类型归约）
+                            // 仍在 rax，交付到调用方请求的 dst。
+                            self.deliver_scalar_assign_value(dst, &assign_l_ty);
                         }
                     }
                 } else if let Expr::Real { e: ce, .. } | Expr::Imag { e: ce, .. } = lv {
@@ -2658,6 +2654,9 @@ impl Codegen {
                             } else {
                                 self.emit_store_scalar_int_at(assign_sz, 1, 0, None);
                             }
+                            // 与其余内存左值臂同一条纪律：store 之后值仍在 rax，
+                            // 调用方点名 dst 时交付过去。
+                            self.deliver_scalar_assign_value(dst, &assign_l_ty);
                         } else {
                             // gen_lvalue_addr 失败: 无法取地址, 仅求值 RHS
                             self.gen_expr(r, Self::EVAL_BASE);
@@ -3580,31 +3579,9 @@ impl Codegen {
                                     .static_local_map
                                     .needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
-                                if let Some(init) = &v.init {
-                                    if let Expr::InitList { inits, .. } = init {
-                                        if let Type::Array(elem_ty, _) = &v.ty {
-                                            let elem_size = elem_ty.size();
-                                            let mut off: i32 = 0;
-                                            for item in inits.iter() {
-                                                if let InitItem::Expr(e) = item {
-                                                    self.gen_expr(e, Self::EVAL_BASE);
-                                                    self.emit_global_store_offset(
-                                                        0,
-                                                        &v.name.name,
-                                                        off,
-                                                    );
-                                                    off += elem_size as i32;
-                                                }
-                                            }
-                                        } else {
-                                            self.gen_expr(init, Self::EVAL_BASE);
-                                            self.emit_global_store(0, &v.name.name);
-                                        }
-                                    } else {
-                                        self.gen_expr(init, Self::EVAL_BASE);
-                                        self.emit_global_store(0, &v.name.name);
-                                    }
-                                }
+                                // 与 `gen_block_item` / `compile_func` 顶层同一个入口;
+                                // 以前这里是第三份拷贝, 且只给数组打了逐元素补丁。
+                                self.gen_static_local_init(v);
                                 continue;
                             }
                             // 声明处的家必须走与 `gen_block_item` 同一个入口。这里是那条逻辑的
@@ -3618,7 +3595,9 @@ impl Codegen {
                                 self.cleanup_vars
                                     .push((v.name.name.clone(), fn_name.clone()));
                             }
-                            self.register_var(&v.name.name, &v.ty);
+                            if !self.decl_skips_frame_slot(v) {
+                                self.register_var(&v.name.name, &v.ty);
+                            }
                             // 定义+声明一体的 struct/union 类型绑定 +
                             // VLA/VM struct 变量动态分配 (语句表达式内)
                             if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
@@ -3645,15 +3624,12 @@ impl Codegen {
                                         self.gen_expr(init, Self::EVAL_BASE);
                                         self.mov_to_stack(0, &v.name.name);
                                     }
-                                } else if matches!(init, Expr::CompoundLit { .. })
-                                    && matches!(
-                                        &v.ty,
-                                        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
-                                    )
-                                {
-                                    // CompoundLit 值通道是**缓冲地址**（同 `gen_block_item`
-                                    // 与 `functions.rs` 顶层声明）：小尺寸 struct 也必须
-                                    // 整块拷贝，否则槽里是指针字节。
+                                } else if Self::assign_needs_whole_copy(&v.ty, init) {
+                                    // 聚合初始化的两条轴由 `assign_needs_whole_copy`
+                                    // 单点判（与 `gen_block_item` / `functions.rs` 顶层声明
+                                    // 同一真源）：CompoundLit / 内联展开后的 StmtExpr /
+                                    // sret 调用在 rax 里交付的是**缓冲地址**，与大小
+                                    // 无关（§5.24 的 `guard(mutex)` 8 字节 `class_mutex_t`）。
                                     let dst_ty = v.ty.clone();
                                     let dst_name = v.name.name.clone();
                                     self.gen_aggregate_assign(&dst_name, &dst_ty, init);

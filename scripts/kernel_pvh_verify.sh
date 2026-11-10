@@ -40,6 +40,14 @@ ok()  { pass=$((pass + 1)); echo "PASS: $*"; }
 bad() { fail=$((fail + 1)); echo "FAIL: $*"; }
 
 [[ -x "$DCC_BIN" ]] || { echo "FAIL: dcc binary not found: $DCC_BIN"; exit 1; }
+# DCC_BIN 可以写成相对路径（本文§3 的 recipe 就是 `DCC_BIN=target/release/dcc`），
+# 但 kbuild 会在**别的 cwd** 里调包装器（kconfig 的 `$(shell scripts/cc-version.sh
+# $(CC))`），相对路径在那里解析不到，症状是「Sorry, this C compiler is not
+# supported.」而非法错。带 `/` 的写法一次性定成绝对路径；裸命令名（走 PATH）不绕。
+case "$DCC_BIN" in
+    */*) DCC_BIN=$(readlink -f "$DCC_BIN") ;;
+esac
+[[ -x "$DCC_BIN" ]] || { echo "FAIL: dcc binary not found: $DCC_BIN"; exit 1; }
 [[ -d "$KERNEL_TREE" ]] || { echo "FAIL: kernel tree not found: $KERNEL_TREE"; exit 1; }
 
 # ---------------------------------------------------------------- helper ----

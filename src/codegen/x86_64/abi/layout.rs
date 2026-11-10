@@ -39,6 +39,22 @@
 /// 宽度取 48（16 对齐，覆盖 off+8..off+40 并留下 guard）。从
 /// `Codegen::CX_FRAME_BAND` 搬到这里（那个同名的死常量已删）：带宽度只能有一个出处。
 pub const CX_FRAME_BAND: i64 = 48;
+/// 复数 / 聚合 rvalue 物化带的**按需**尺寸（§5.12）。
+///
+/// 与向量带同一纪律：`need` 来自一次穷举扫描（`emit/func_setup.rs` 的 `LateNeed`），
+/// 判据是「本函数有没有 complex/imaginary 类型，有没有 ≤16B 聚合 rvalue 站点」。
+/// 两者都没有 ⇒ 这条带无处可用，也就不必为它开 48B —— 以前每个内核函数都白开
+/// 48B，在 16KB 内核栈上直接抵掉一层多调用帧的余量。
+///
+/// 万一出现「没扫到却真用了带」的路径，[`LayoutMap::cx_rvalue_off`] 会在发射期
+/// 直接报错（与 [`LayoutMap::vec_temp`] 同一条 fail-closed 纪律）。
+pub fn cx_band_reserve(need: bool) -> i64 {
+    if need {
+        CX_FRAME_BAND
+    } else {
+        0
+    }
+}
 /// 向量临时槽区：512 字节（32 个 16B 槽）。嵌套向量 binop 每层要更深的操作数槽，
 /// 128 字节只够 3 层，深链式表达式会溢出到变量区（pr23135）。
 pub const VEC_RESERVE: i64 = 512;
@@ -83,15 +99,60 @@ pub fn vec_band_reserve(max_vec_bytes: usize) -> i64 {
 pub const TRAMP_RESERVE: i64 = 256;
 /// 位域 RMW 临时槽带。每层嵌套占 3 个 8B 槽（24B），对齐 16 ⇒ 每层 32B。
 /// 预留从 32B 提到 64B，覆盖 F3 九层嵌套夹具的 disp32 回绕路径。
+///
+/// 历史上这条带与向量临时带共用基线（`bf_rmw_band_top = vec_temp_off + vec_reserve`，
+/// 而两边一个往上长一个往下减），两者落在同一段字节上，只靠「各自都远大于实际
+/// 用量」兑住（文件头「不对称 2」）。§5.12 已把每条带摆进自己的区间（见
+/// [`LayoutMap::bf_rmw_band_top`] 与 [`LayoutMap::tramp_top`] 的推导注释），从那以后本带
+/// 可以与其他带一样按需给，尺寸单源于 [`bf_rmw_band_reserve`]。
 pub const BF_RMW_RESERVE: i64 = 64;
+/// 位域 RMW 带的**按需**尺寸（§5.12）：`嵌套层数 × [`BF_RMW_SLOT_BYTES`]`。
+///
+/// 为什么按**链深度**而不是布尔：本带每层占 32B（`bf_rmw_slot(depth, …)` 减
+/// `depth*BF_RMW_SLOT_BYTES`），而发射器在算 RHS / 内层操作数之前会把 `bf_rmw_depth`
+/// 往前推一层（`dispatch.rs` 的位域写、`increment.rs::gen_bitfield_inc_dec`），所以
+/// 链式写法会**同时**占多层。旧的恒 64B 只够 2 层，而 `tests/fixtures/c/bitfield_rmw_deep_nest.c`
+/// 的 `s.a = (s.b = (s.c = … = 3))` 是 9 层 —— 即它一直往带外写 224B，今天不报错
+/// 只是因为外面碰巧是恒预留的富余（与本文件「不对称 2」同一个机制）。
+///
+/// `depth = 0`（本函数没有写位域 / 位域自增的站点）得 0；真用了带而带为 0 ⇒
+/// [`LayoutMap::bf_rmw_slot`] 当场报错：旧写法会退回 `-8/-16/-24`，而那三个格与金丝雀、
+/// callee-saved 保存区同格（`dispatch.rs` 本带注释记的就是这个坑），静默退回去等于把
+/// 「少扫一种形态」变成「毁掉调用者的寄存器」。链深度的判据见
+/// `emit/func_setup.rs::Codegen::bf_rmw_chain_depth`。
+pub fn bf_rmw_band_reserve(depth: usize) -> i64 {
+    (depth as i64).saturating_mul(BF_RMW_SLOT_BYTES)
+}
 /// 每层嵌套占用的字节数（3 个 8B 槽，按 16 对齐补到 32B）。
 /// 两套几何（写 2 槽 @16 vs 自增 3 槽 @24）统一为 3 槽/层 @32。
 pub const BF_RMW_SLOT_BYTES: i64 = 32;
 /// 每层内的三个槽：slot 0 = 容器地址、slot 1 = 容器旧值 / 提取后旧值、
 /// slot 2 = 新值（仅自增路径使用；写路径的第 3 槽留空）。
 pub const BF_RMW_PER_DEPTH: i64 = 3;
-/// 帧头里固定不动的部分：saved r13(8) + ret addr(8) + callee-saved 保存区(32)。
+/// 帧头最上面那一格（`%r13 - 8`）：金丝雀/跳表基址共用槽。
+///
+/// 帧头从这一格往下依次是：callee-saved 保存槽（每个 8B，**按需**）→ 表达式
+/// 溅出槽（`temp_slots` 个）→ 变量区（第一槽偏移 `-hdr`）。旧口径恒给 4 个
+/// callee-saved 槽（`FIXED_HDR = 48`），内核 trace 上 119 帧平均只真用 1.11 个，
+/// 白付接近 3KB（报告 §5.42）。
+pub const FRAME_TOP_BYTES: i64 = 8;
+/// 每个 callee-saved 保存槽的字节数。第 j 个**已规划**的槽在 `-(16 + 8j)`。
+pub const CS_SAVE_SLOT_BYTES: i64 = 8;
+/// callee-saved 池的槽数上限（rbx/r12/r14/r15，与 `abi::regbank::POOL` 同序）。
+pub const CS_POOL_SLOTS: i64 = 4;
+/// **旧口径**的帧头（canary 8 + 4 个 callee-saved 槽 32 + 变量区第一槽 8）。
+///
+/// 与 `hdr_of(t, 4)` 逐字节相等，只用于 [`LayoutMap::unresolved`] 的占位读数
+/// （帧未解算时 `frame_size == 0`，没有任何消费者依赖这个数的精确值）。
+/// 活路径一律走 [`LayoutMap::hdr_of`]。
 pub const FIXED_HDR: i64 = 48;
+/// 帧底最下面那 8 字节（`-frame_size .. -frame_size+8`）的**显式间隙**。
+///
+/// 为什么要求它：帧底那摞带全部以 `-frame_size` 为基线定位，而 `vec_temp_off` 里写的
+/// 是 `+ … + 8`——那 8 字节以前只存在于坐标里，**不在 `frame_size` 的求和里**。于是
+/// 「带底不得探到帧底以下」这条不变式永远差 8 字节，只要把某条恒带缩小就现形。
+/// 把它成一个命名项并计入求和，两个方向（带底、带顶与变量区的界）才能同时成立。
+pub const BOTTOM_PAD: i64 = 8;
 /// 帧顶那一格（`%r13 - 8`）。它有两个主人，同一格、**永不同时使用**：
 ///  - 栈金丝雀（`-fstack-protector*`）；
 ///  - 跳表基址 `%rbp` 的存槽（阶段 6 批 4）。互斥由判据端保证：`stack_protector`
@@ -124,6 +185,11 @@ pub struct FramePlan {
     pub static_chain_slot: i64,
     /// 位域 RMW 带；无参/`main` 分支今天传 0（见文件头「不对称 1」）
     pub bf_rmw_reserve: i64,
+    /// 复数 / 聚合 rvalue 物化带（尺寸单源于 [`cx_band_reserve`]）。
+    ///
+    /// 以前 `resolve` 里直接写常量 `CX_FRAME_BAND`，于是这条带**不进扫描**也
+    /// 不参与决策：每个函数无论有没有 complex 都付 48B。收成输入后它与其他带同口径。
+    pub cx_band: i64,
     /// 向量临时带（尺寸单源于 [`vec_band_reserve`]）
     pub vec_reserve: i64,
     /// trampoline 带
@@ -133,6 +199,12 @@ pub struct FramePlan {
     /// spill band 的槽数（Phase 5.1.b）：尺寸从已交付的 `Location::Spill` 家导出，
     /// 与其他带一样**参与**帧大小求和（输出在 `spill_band_bytes`）。
     pub spill_slots: i64,
+    /// 帧头里 callee-saved 保存槽的**个数**（0..=4，按需；§5.42）。
+    ///
+    /// 位图来自 `Codegen::compute_callee_plan`（homes ∪ asm 固定约束 ∪ r12 兜底），
+    /// 发射期的发号器只在这个集合里取号（`RegBank::set_plan_mask`），所以「规划了
+    /// 几个槽」= 「序言会保存几个号」，两者不允许漂移（`patch_callee_saves` 断言）。
+    pub cs_slots: i64,
 }
 
 /// 解算的输出：一帧里所有带的边界与大小，一次算完，此后无人再「现场推算」。
@@ -141,13 +213,18 @@ pub struct FramePlan {
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutMap {
     pub temp_slots: i64,
-    /// 帧头：`FIXED_HDR + temp_slots*8`
+    /// 帧头里 callee-saved 保存槽的个数（见 [`FramePlan::cs_slots`]）
+    pub cs_slots: i64,
+    /// 帧头：`16 (canary 格 + 变量区第一槽) + 8*cs_slots + 8*temp_slots`
+    /// （见 [`LayoutMap::hdr_of`]）
     pub hdr: i64,
     pub var_bytes: i64,
     pub sret_need: i64,
     pub va_slots: i64,
     pub static_chain_slot: i64,
     pub bf_rmw_reserve: i64,
+    /// 复数 / 聚合 rvalue 物化带（`0` = 本函数不需要；见 [`cx_band_reserve`]）
+    pub cx_band: i64,
     pub vec_reserve: i64,
     pub tramp_reserve: i64,
     pub stack_reserve: i64,
@@ -167,16 +244,18 @@ pub struct LayoutMap {
     pub variadic_reg_save_off: i64,
     /// 嵌套函数静态链槽
     pub static_chain_off: i64,
-    /// 帧底复数/聚合 rvalue 内存对的实部槽（`-frame_size + 8`）
+    /// 帧底复数/聚合 rvalue 内存对的实部槽（`-frame_size + 8`）。
+    ///
+    /// 花费者一律走 [`LayoutMap::cx_rvalue_off`]：带为 0 时本读数落在别人身上。
     pub rvalue_off: i64,
     /// sret 指针（`rdi`）在帧底的专用槽：位于变参保存区之上、向量区之下
     /// （与静态链同位置，二者互斥）
     pub sret_ptr_off: i64,
     /// trampoline 区的顶（`-frame_size + tramp_reserve`）
     pub tramp_top: i64,
-    /// 位域 RMW 带的顶（紧邻 trampoline 带之上，即 tramp_top + tramp_reserve）。
-    /// 每个槽 = `bf_rmw_band_top() - depth*32 - slot_idx*8`（slot_idx ∈ {0,1,2}）。
-    /// 这是发射器唯一能读的位域 RMW 坐标；写/自增路径不得再从 -8/-16/-24 硬算。
+    /// 位域 RMW 带的顶。**本带排在向量带之上、与自己宽度等长的区间里**：槽位
+    /// `bf_rmw_band_top - depth*32 - slot*8` 往下减，所以带顶必须高出整条向量带一个
+    /// `bf_rmw_reserve`，否则两条带同段（那是 §5.12 修掉的「不对称 2」）。
     pub bf_rmw_band_top: i64,
     /// spill band 的顶（排在 sret/物化区之下、向量区之上；见 `spill_off`）
     pub spill_band_top: i64,
@@ -205,12 +284,14 @@ impl LayoutMap {
     pub const fn unresolved() -> Self {
         Self {
             temp_slots: 0,
+            cs_slots: CS_POOL_SLOTS,
             hdr: FIXED_HDR,
             var_bytes: 0,
             sret_need: 0,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: 0,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 0,
@@ -231,11 +312,17 @@ impl LayoutMap {
         }
     }
 
-    /// 帧头的唯一算式（`FIXED_HDR + temp_slots*8`）。
+    /// 帧头的唯一算式：`16 (canary 格 + 变量区第一槽) + 8*cs_slots + 8*temp_slots`。
     /// `emit/func_setup.rs` 的静态助手与 `Codegen::frame_hdr()` 都必须走这里，
     /// 否则「变量区从哪儿开始」就又有了第二个真源。
-    pub const fn hdr_of(temp_slots: i64) -> i64 {
-        FIXED_HDR + temp_slots * 8
+    ///
+    /// 布局（自 `%r13` 向下）：canary @ -8 → callee-saved 槽 j @ -(16+8j) →
+    /// temp 槽 d @ -(16+8*cs+8d) → 变量区第一槽 @ -hdr（`-hdr` 就是它的偏移）。
+    /// **`+16` 里那个 8 不是洞**：变量槽的偏移就是 `-hdr`，它占 `[-hdr, -hdr+8)`，
+    /// 也就是帧头区实际字节数 = `hdr - 8`；旧口径的 `48+8t` 与本式在 cs=4 时
+    /// 逐字节相等（48 = 16+32），cs 少一个就整整省 8B。
+    pub const fn hdr_of(temp_slots: i64, cs_slots: i64) -> i64 {
+        16 + cs_slots * CS_SAVE_SLOT_BYTES + temp_slots * 8
     }
 
     /// 一次解算。求和顺序与搬迁前 `emit/functions.rs` 的 `raw` 完全一致
@@ -243,7 +330,7 @@ impl LayoutMap {
     /// 与旧代码逐字同口径（旧式全程 `saturating_add`，本函数不得改成会 overflow-check
     /// 的裸 `+`：那是 dev profile 下的不等价）。
     pub fn resolve(p: &FramePlan) -> Self {
-        let hdr = Self::hdr_of(p.temp_slots);
+        let hdr = Self::hdr_of(p.temp_slots, p.cs_slots);
         let spill_band_bytes = p.spill_slots.saturating_mul(SPILL_SLOT_BYTES);
         // 晚分配带的尺寸就是规划期那份预算（`Codegen::late_slot_budget`），
         // 一口 8 字节一个对象槽，与 `var_alloc_slots` 同口径。
@@ -255,8 +342,9 @@ impl LayoutMap {
             .saturating_add(p.sret_need)
             .saturating_add(spill_band_bytes)
             .saturating_add(p.static_chain_slot)
-            .saturating_add(CX_FRAME_BAND)
+            .saturating_add(p.cx_band)
             .saturating_add(p.va_slots)
+            .saturating_add(BOTTOM_PAD)
             .saturating_add(p.vec_reserve)
             .saturating_add(p.bf_rmw_reserve)
             .saturating_add(p.tramp_reserve)
@@ -267,15 +355,30 @@ impl LayoutMap {
                                                          // 区别在于晚分配现在只能在自己带里动，不得再压低本锚点。
         let late_band_top = -(hdr.saturating_add(p.var_bytes));
         let sret_region_base = late_band_top.saturating_sub(late_band_bytes);
-        let vec_temp_off = -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot + 8;
+        let vec_temp_off = -frame_size + p.cx_band + p.va_slots + p.static_chain_slot + 8;
+        // §5.12「不对称 2」的修复：帧底那摞带按地址递增各占自己的区间。
+        // 从帧底往上依次是：cx(rvalue，包含前导 8B 间隙) → va → 静态链/sret 指针 →
+        // BOTTOM_PAD → vec → bf → trampoline。每条带的消费要么从**自己的顶**往下减
+        // （`bf_rmw_slot` 减 `depth*32`、`gen_trampoline` 减 `trampoline_total_size`），
+        // 要么从**自己的底**往上加（`vec_temp`），所以相邻两带之间不需要富余量。
+        // 旧算式把 bf 的顶定在 `vec_temp_off + vec_reserve`，于是 bf 往下减时吃止正落在
+        // 向量带里 —— 今天不出事只因为两边都远大于实际用量；一旦把任何一条改成按需
+        // （本轮把 cx 改成 0）剩下的缓冲就不够了，trampoline 会探到帧底以下（实测
+        // `nested_func_symbol_facts.c` 的 `deep`：帧 128B，trampoline 写到 `-152(%r13)`）。
+        // 带顶之和恰好等于 `raw` 里那几项，所以「带底不过帧底」与「带顶不压到变量区」
+        // 两条界现在由求和式本身保证（后者还靠 [`BOTTOM_PAD`] 与 16 对齐的富余）。
+        let bf_rmw_band_top = vec_temp_off + p.vec_reserve + p.bf_rmw_reserve;
+        let tramp_top = bf_rmw_band_top + p.tramp_reserve;
         Self {
             temp_slots: p.temp_slots,
+            cs_slots: p.cs_slots,
             hdr,
             var_bytes: p.var_bytes,
             sret_need: p.sret_need,
             va_slots: p.va_slots,
             static_chain_slot: p.static_chain_slot,
             bf_rmw_reserve: p.bf_rmw_reserve,
+            cx_band: p.cx_band,
             vec_reserve: p.vec_reserve,
             tramp_reserve: p.tramp_reserve,
             stack_reserve: p.stack_reserve,
@@ -284,17 +387,18 @@ impl LayoutMap {
             frame_size,
             sret_region_base,
             vec_temp_off,
-            variadic_reg_save_off: -frame_size + CX_FRAME_BAND,
-            static_chain_off: -frame_size + CX_FRAME_BAND + p.va_slots,
+            variadic_reg_save_off: -frame_size + p.cx_band,
+            static_chain_off: -frame_size + p.cx_band + p.va_slots,
             rvalue_off: -frame_size + 8,
-            sret_ptr_off: -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot,
-            // P2 (H3 修复): trampoline 带从帧底 (与 CX/vec 区重叠) 移到 vec 区与 bf_rmw 带之上，
-            // 让它独占 `[tramp_top - tramp_reserve, tramp_top)` 这段 256B。新位置的推导：
-            // vec 带自 `vec_temp_off` 向下生长 `vec_reserve` 字节；bf_rmw 紧贴其下；
-            // trampoline 再贴 bf_rmw 之下。帧大小的求和项不变 (frame_size 字节总数不变)，
-            // 但三条带不再相交 —— 之前它们都落在 `-frame_size + 0..256` 那一段。
-            tramp_top: vec_temp_off + p.vec_reserve + p.bf_rmw_reserve,
-            bf_rmw_band_top: vec_temp_off + p.vec_reserve,
+            sret_ptr_off: -frame_size + p.cx_band + p.va_slots + p.static_chain_slot,
+            // trampoline 带独占 `[tramp_top - tramp_reserve, tramp_top)`：P2 把它从帧底
+            // （与 CX/vec 区重叠）抬到 bf 带之上，§5.12 再把 `tramp_reserve` 自身算进
+            // 带顶，于是它不再吃 cx/va/sc/vec/bf 那一段（旧算式只**摆**在上面、却没给它
+            // 留高度，能容下的判据变成 `cx+va+sc+8+vec+bf ≥ trampoline 实测用量`，与
+            // `tramp_reserve` 无关 —— 实测 4 个嵌套函数的 `main` 就差那 8 字节，见
+            // `emit/nested.rs::gen_trampoline` 里那条 E1128）。
+            tramp_top,
+            bf_rmw_band_top,
             spill_band_top: sret_region_base - p.sret_need,
             late_band_top,
             // 诊断读数：帧大小减去帧头、减去晚分配带、再减去帧底那摞带。
@@ -313,7 +417,8 @@ impl LayoutMap {
                 .saturating_sub(p.vec_reserve)
                 .saturating_sub(p.va_slots)
                 .saturating_sub(p.static_chain_slot)
-                .saturating_sub(CX_FRAME_BAND)
+                .saturating_sub(BOTTOM_PAD)
+                .saturating_sub(p.cx_band)
                 .saturating_sub(spill_band_bytes)
                 .saturating_sub(late_band_bytes),
         }
@@ -375,6 +480,22 @@ impl LayoutMap {
         low_off >= self.spill_band_top
     }
 
+    /// 帧底复数 / ≤16B 聚合 rvalue 物化槽（实部）。
+    ///
+    /// 带为 0 = 本函数没有任何 complex/imaginary 类型、也没有 ≤16B 聚合 rvalue 站点
+    /// （判据见 [`cx_band_reserve`] 的输入扫描）。真走到这里说明扫描漏了一种来源，
+    /// 而此时算出的偏移正压在变参保存区/向量带上：宁可当场报错，也不要静默写坏
+    /// 相邻区域（与 [`LayoutMap::vec_temp`] 同一条 fail-closed 纪律）。
+    /// `unresolved()` 占位表的 `frame_size` 为 0，不参与本判据。
+    pub fn cx_rvalue_off(&self) -> i64 {
+        assert!(
+            self.cx_band > 0 || self.frame_size == 0,
+            "complex/聚合 rvalue 物化槽被使用，但本函数没有那条带（cx_band=0, frame_size={}）",
+            self.frame_size
+        );
+        self.rvalue_off
+    }
+
     /// 向量临时槽 `slot`（尺寸 `vec_size`）的偏移。与 `Codegen::vector_temp_base`
     /// 同一条算式，收在这里是为了「帧的坐标只有一个出处」。
     pub fn vec_temp(&self, slot: i64, vec_size: usize) -> i64 {
@@ -403,18 +524,40 @@ impl LayoutMap {
 
     /// Bitfield RMW slot offset: depth selects the layer, slot_idx the slot in that layer.
     /// Each layer = 3 x 8B slots (24B, aligned to 32B). Unified for write / inc-dec paths.
+    ///
+    /// 带为 0 且帧已解算 ⇒ 本函数没有写位域 / 位域自增的站点（判据见
+    /// [`bf_rmw_band_reserve`]），走到这里就是「扫描漏了一种形态」。**不再退回
+    /// `-8/-16/-24`**：那三个格与金丝雀、callee-saved 保存区同格（`dispatch.rs` 本带
+    /// 注释记的就是这个坑），静默退回去等于把少扫一种形态变成毁掉调用者的寄存器。
+    /// 带不够深同理：最深处那一槽的最低字节必须在带内，否则就是链深度算少了，
+    /// 宁可报错也不要静默往带外写（实测 F3 那类 9 层链在旧的恒 64B 带下就是这么跑的）。
     pub fn bf_rmw_slot(&self, depth: i64, slot_idx: i64) -> i32 {
-        if self.bf_rmw_reserve > 0 {
-            (self.bf_rmw_band_top - depth * BF_RMW_SLOT_BYTES - slot_idx * 8) as i32
-        } else {
-            (-8 - depth * 16 - slot_idx * 8) as i32
-        }
+        let off = self.bf_rmw_band_top - depth * BF_RMW_SLOT_BYTES - slot_idx * 8;
+        assert!(
+            self.bf_rmw_reserve > 0 || self.frame_size == 0,
+            "位域 RMW 槽被使用，但本函数没有位域 RMW 带（bf_rmw_reserve=0, frame_size={}, \
+             depth={depth}）—— 扫描漏了一种写位域/位域自增的形态，判据见 \
+             `emit/func_setup.rs::Codegen::bf_rmw_chain_depth`",
+            self.frame_size
+        );
+        assert!(
+            self.bf_rmw_reserve <= 0
+                || off <= self.bf_rmw_band_top
+                && off >= self.bf_rmw_band_top - self.bf_rmw_reserve,
+            "位域 RMW 槽探出本带：depth={depth} slot={slot_idx} 落在 {off}，而带区间是 \
+             [{}, {}]（reserve={}B）—— 链深度算少了",
+            self.bf_rmw_band_top - self.bf_rmw_reserve,
+            self.bf_rmw_band_top,
+            self.bf_rmw_reserve,
+        );
+        off as i32
     }
 
     /// 表达式第 `depth` 层溅出槽的偏移（帧头 temp 带内）。
     /// 搬迁前有 `emit/expr/dispatch.rs` 与 `emit/expr/binary.rs` 两处直接写
-    /// `-(48 + depth*8)`（裸 48，且是 **i32** 乘法），与 `FIXED_HDR`/`hdr_of` 同一个
-    /// 魔数有三个出处。
+    /// `-(48 + depth*8)`（裸 48，且是 **i32** 乘法）。§5.42 起帧头不再恒 48：
+    /// 裸 48 拆成 `16 + 8*cs_slots`，所以本函数必须收 cs_slots；发射期消费点
+    /// 一律走 [`LayoutMap::temp_slot`]。cs=4 时与旧产物逐字节相同。
     ///
     /// **返回类型必须是 `i32`，这不是可选的实现细节**：两个消费点都做
     /// `self.emit(&slot_off.to_le_bytes())`（disp32 分支），`i64` 的 `to_le_bytes()`
@@ -422,8 +565,13 @@ impl LayoutMap {
     /// （objdump 表现为 `(bad)`，执行到那里 SIGILL）。独立复核拓到了这一条，
     /// 而三档产物哈希抓不到它（语料里没有 `expr_depth >= 10` 的帧槽回退）。
     /// 下面那条宽度契约用例就是守这条线的。
-    pub const fn temp_slot_off(depth: i64) -> i32 {
-        -(FIXED_HDR + depth * 8) as i32
+    pub const fn temp_slot_off(depth: i64, cs_slots: i64) -> i32 {
+        -(16 + cs_slots * CS_SAVE_SLOT_BYTES + depth * 8) as i32
+    }
+
+    /// 本帧的 temp 槽偏移（`self.cs_slots` 是解算定下的布局事实，发射期只读它）。
+    pub const fn temp_slot(&self, depth: i64) -> i32 {
+        Self::temp_slot_off(depth, self.cs_slots)
     }
 
     /// 帧底基址（`-frame_size`）。KASAN 毒化整个帧、VLA 动态栈基恢复都以它为轴。
@@ -466,6 +614,7 @@ mod tests {
         // temp_slots=3, var_bytes=80, sret_need=64, 变参: va_slots=176, 嵌套: sc=8
         let p = FramePlan {
             temp_slots: 3,
+            cs_slots: 4,
             var_bytes: 80,
             // 晚分配带传 0：本用例测的就是「带不存在时全部坐标逐字节等于搬迁前」
             late_slots: 0,
@@ -473,14 +622,21 @@ mod tests {
             va_slots: 48 + 128,
             static_chain_slot: 8,
             bf_rmw_reserve: BF_RMW_RESERVE,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 176,
             spill_slots: 0,
         };
         let l = LayoutMap::resolve(&p);
+        // §5.42：帧头 = 16(canary 格 + 变量区第一槽) + 8*cs + 8*temp；cs=4 时
+        // 与旧口径的 48+8t 逐字节相等（48 = 16+32），所以本用例仍然逐字节等于搬迁前。
+        // cs 个数是计划位图的 popcount，本用例给满 4 个。
         let hdr = 48 + 3 * 8; // 72
-        let raw = 80 + hdr + 64 + 0 + 8 + CX_FRAME_BAND + 176 + 512 + BF_RMW_RESERVE + 256 + 176;
+        let raw = 80 + hdr + 64 + 0 + 8 + CX_FRAME_BAND + 176 + BOTTOM_PAD + 512
+            + BF_RMW_RESERVE
+            + 256
+            + 176;
         let frame_size = (raw + 15) & !15;
         assert_eq!(l.hdr, hdr);
         assert_eq!(l.frame_size, frame_size);
@@ -496,6 +652,89 @@ mod tests {
         assert_eq!(l.spill_band_bytes, 0, "Phase 2 不得凭空长出 spill 带");
         // 额度：帧大小 - 帧头 - 帧底那摞带 = 变量区 + sret 区 + 取整富余
         assert_eq!(l.arena_room, 80 + 64 + (frame_size - raw));
+    }
+
+    /// 位域 RMW 带按**链深度**给，不再恒 64B（§5.12）：0 层 ⇒ 0B，1 层 ⇒ 32B，
+    /// 9 层（`bitfield_rmw_deep_nest.c` 那条 `s.a = (s.b = (s.c = …))` 链）⇒ 288B。
+    /// 旧的恒 64B 只容 2 层，即那个夹具一直在往带外写 224B。
+    #[test]
+    fn bf_rmw_band_is_scaled_by_chain_depth() {
+        assert_eq!(bf_rmw_band_reserve(0), 0, "没有写位域的函数不得预留 BF RMW 带");
+        assert_eq!(bf_rmw_band_reserve(1), BF_RMW_SLOT_BYTES);
+        assert_eq!(bf_rmw_band_reserve(9), 9 * BF_RMW_SLOT_BYTES);
+        // 带必须给每条链留出全部三层槽（slot 0/1/2），最深槽的最低字节仍在带内。
+        let mut l = LayoutMap::unresolved();
+        l.frame_size = 4096;
+        l.bf_rmw_reserve = bf_rmw_band_reserve(9);
+        l.bf_rmw_band_top = -128;
+        for depth in 0..9 {
+            for slot in 0..3 {
+                let off = l.bf_rmw_slot(depth, slot) as i64;
+                assert!(
+                    off > l.bf_rmw_band_top - l.bf_rmw_reserve
+                        && off <= l.bf_rmw_band_top,
+                    "depth={depth} slot={slot} 落在带外：{off} vs 带 [{}, {}]",
+                    l.bf_rmw_band_top - l.bf_rmw_reserve,
+                    l.bf_rmw_band_top
+                );
+            }
+        }
+    }
+
+    /// 链深度算少了 ⇒ 必须当场报错，而不是静默往带外写（那是旧行为的实质缺陷）。
+    #[test]
+    #[should_panic(expected = "探出本带")]
+    fn bf_rmw_slot_rejects_a_chain_deeper_than_the_band() {
+        let mut l = LayoutMap::unresolved();
+        l.frame_size = 4096;
+        l.bf_rmw_reserve = bf_rmw_band_reserve(2);
+        l.bf_rmw_band_top = -128;
+        let _ = l.bf_rmw_slot(5, 0);
+    }
+
+    /// 没有带却用了带：报死，不退回 `-8/-16/-24`（那三个格与金丝雀、callee-saved 同格）。
+    #[test]
+    #[should_panic(expected = "没有位域 RMW 带")]
+    fn bf_rmw_slot_rejects_a_missing_band() {
+        let mut l = LayoutMap::unresolved();
+        l.frame_size = 4096;
+        l.bf_rmw_reserve = 0;
+        let _ = l.bf_rmw_slot(0, 0);
+    }
+
+    /// 帧底那摞带各占自己的区间：vec 与 bf 不再同段，trampoline 也不吃别人的高度。
+    /// 这是 §5.12「不对称 2」的正面形式，也是一切按需带能成立的前提。
+    #[test]
+    fn bottom_bands_own_disjoint_ranges() {
+        let p = FramePlan {
+            temp_slots: 2,
+            cs_slots: 4,
+            var_bytes: 16,
+            late_slots: 0,
+            sret_need: 0,
+            va_slots: 48 + 128,
+            static_chain_slot: 8,
+            bf_rmw_reserve: bf_rmw_band_reserve(3),
+            cx_band: CX_FRAME_BAND,
+            vec_reserve: VEC_RESERVE,
+            tramp_reserve: 2 * 32,
+            stack_reserve: 0,
+            spill_slots: 0,
+        };
+        let l = LayoutMap::resolve(&p);
+        // 自帧底：cx 带 → va → sc → BOTTOM_PAD → vec → bf → tramp，逐段不重叠。
+        assert_eq!(l.variadic_reg_save_off, l.rvalue_off - BOTTOM_PAD + CX_FRAME_BAND);
+        assert_eq!(l.static_chain_off, l.variadic_reg_save_off + p.va_slots);
+        assert_eq!(l.sret_ptr_off, l.static_chain_off + p.static_chain_slot);
+        assert_eq!(l.vec_temp_off, l.sret_ptr_off + BOTTOM_PAD);
+        assert_eq!(l.bf_rmw_band_top, l.vec_temp_off + p.vec_reserve + p.bf_rmw_reserve);
+        assert_eq!(l.tramp_top, l.bf_rmw_band_top + p.tramp_reserve);
+        // vec 带 `[vec_temp_off, vec_temp_off+vec)` 与 bf 带 `[bf_top-bf, bf_top)` 不相交。
+        assert!(l.vec_temp_off + p.vec_reserve <= l.bf_rmw_band_top - p.bf_rmw_reserve);
+        // trampoline 带的底不低过帧底。
+        assert!(l.tramp_top - p.tramp_reserve >= l.frame_base());
+        // 带顶不压到自上而下的区（帧头 + 变量区）。
+        assert!(l.tramp_top <= -(l.hdr + p.var_bytes));
     }
 
     /// 向量临时带的尺寸判据：单槽步长与带宽同源，且**格数恒为 `VEC_BAND_SLOTS`**。
@@ -543,12 +782,14 @@ mod tests {
     fn zero_spill_leaves_the_frame_untouched() {
         let base = FramePlan {
             temp_slots: 2,
+            cs_slots: 4,
             var_bytes: 16,
             late_slots: 0,
             sret_need: 0,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
@@ -557,7 +798,9 @@ mod tests {
         let l0 = LayoutMap::resolve(&base);
         assert_eq!(l0.frame_size % 16, 0);
         assert_eq!(l0.spill_band_bytes, 0);
-        assert_eq!(l0.arena_room, 16);
+        // 变量区 16B 再加 8B 的 16 对齐富余；§5.12 补进求和的 [`BOTTOM_PAD`] 8B 已从
+        // 本读数里扣掉（952 求和 → 960 对齐）。§5.42 的帧头在 cs=4 时与旧口径同值。
+        assert_eq!(l0.arena_room, 24);
         // 同一个 plan 解两次必得同一份表（解算必须是纯函数）
         assert_eq!(LayoutMap::resolve(&base).frame_size, l0.frame_size);
         assert_eq!(LayoutMap::resolve(&base).vec_temp_off, l0.vec_temp_off);
@@ -569,12 +812,14 @@ mod tests {
     fn spill_band_is_its_own_reservation() {
         let mut p = FramePlan {
             temp_slots: 2,
+            cs_slots: 4,
             var_bytes: 16,
             late_slots: 0,
             sret_need: 32,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
@@ -603,12 +848,14 @@ mod tests {
     fn an_empty_band_leaves_the_budget_judgment_untouched() {
         let base = FramePlan {
             temp_slots: 2,
+            cs_slots: 4,
             var_bytes: 16,
             late_slots: 0,
             sret_need: 32,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
@@ -643,12 +890,14 @@ mod tests {
     fn late_allocation_must_not_cross_a_nonempty_band() {
         let base = FramePlan {
             temp_slots: 2,
+            cs_slots: 4,
             var_bytes: 16,
             late_slots: 0,
             sret_need: 32,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
@@ -683,31 +932,38 @@ mod tests {
     #[test]
     fn hard_bound_rejects_only_true_frame_overrun() {
         let p = FramePlan {
-            temp_slots: 2, // hdr = 48 + 16 = 64
+            temp_slots: 2, // hdr = 16 + 32 + 16 = 64（§5.42）
+            cs_slots: 4,
             var_bytes: 32,
             late_slots: 0,
             sret_need: 16,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
             spill_slots: 0,
         };
         let l = LayoutMap::resolve(&p);
-        // raw = 32+64+16+48+512+256+48 = 976（16 整除）
-        assert_eq!(l.frame_size, 976, "先钉住搬迁前的公式");
-        assert_eq!(l.arena_room, 48, "诊断读数 = 规划期变量区 + sret 区");
-        assert_eq!(l.frame_base(), -976, "帧底");
+        // raw = 32+64+16+48+512+256+48 + BOTTOM_PAD(8) = 984，16 对齐后 992。
+        // §5.42 的帧头在 cs=4 时与旧口径（48+8t）同值，本用例逐字节等于搬迁前。
+        assert_eq!(l.frame_size, 992, "先钉住当前公式");
+        assert_eq!(l.arena_room, 56, "诊断读数 = 规划期变量区 + sret 区 + 16 对齐富余");
+        assert_eq!(l.frame_base(), -992, "帧底");
 
         // 变量区与 sret 区各自吃帧底富余（今天合法）：不得报错
-        assert!(l.fits_above_bottom(-700));
-        assert!(l.fits_above_bottom(-976), "恰好落在帧底算合法");
+        assert!(l.fits_above_bottom(l.frame_base() + 276));
+        assert!(l.fits_above_bottom(l.frame_base()), "恰好落在帧底算合法");
         // 真越界：低一个字节都不行
-        assert!(!l.fits_above_bottom(-977));
-        // **不得把两个区的字节相加**：那会把夹逼过的 `used` 里的 sret 深度再数一次
-        assert!(l.fits_above_bottom(-(l.arena_room + 800)) == l.fits_above_bottom(-848));
+        assert!(!l.fits_above_bottom(l.frame_base() - 1));
+        // **不得把两个区的字节相加**：那会把夹逼过的 `used` 里的 sret 深度再数一次。
+        // 两边同一个偏移以两种算法写出（读数推与直接算），相等就是 `arena_room` 没重复计费。
+        assert!(
+            l.fits_above_bottom(-(l.arena_room + 800)) == l.fits_above_bottom(-856),
+            "arena_room 必须是 56：-(56+800) 与 -856 是同一个位置"
+        );
     }
 
     /// 占位表必须等于「旧公式喂零镜像」的结果，否则「解算前就读帧底坐标」
@@ -719,7 +975,7 @@ mod tests {
         assert_eq!(u.frame_size, 0);
         assert_eq!(u.rvalue_off, -u.frame_size + 8, "旧式 `-self.frame_size + 8` 在帧未定时给 8");
         assert_eq!(u.tramp_top, -u.frame_size + TRAMP_RESERVE);
-        assert_eq!(u.hdr, LayoutMap::hdr_of(0), "旧 frame_hdr() 在 temp_slots=0 时给 48");
+        assert_eq!(u.hdr, FIXED_HDR, "占位表保留旧口径 48（活路径一律走 hdr_of）");
         assert_eq!(u.vec_temp_off, 0, "与 Codegen::vec_temp_off 的初值一致");
         assert_eq!(u.sret_region_base, 0, "与 compile_func 入口的复位一致");
     }
@@ -731,13 +987,18 @@ mod tests {
     /// 所以把契约写成断言而不是注释。
     #[test]
     fn temp_slot_off_keeps_the_disp32_emit_width() {
-        // 边界：|off| < 128 走 disp8，否则走 disp32（消费点的分岔）
-        assert_eq!(LayoutMap::temp_slot_off(9), -120); // 仍在 disp8 范围内
-        assert_eq!(LayoutMap::temp_slot_off(10), -128); // 刚越界，走 disp32
-        assert_eq!(LayoutMap::temp_slot_off(14), -160);
+        // 边界：|off| < 128 走 disp8，否则走 disp32（消费点的分岔）。
+        // cs_slots=4 时与旧产物逐字节相同（旧式裸 48 = 16+32 同值），消洞只动变量区顶。
+        assert_eq!(LayoutMap::temp_slot_off(9, 4), -120); // 仍在 disp8 范围内
+        assert_eq!(LayoutMap::temp_slot_off(10, 4), -128); // 刚越界，走 disp32
+        assert_eq!(LayoutMap::temp_slot_off(14, 4), -160);
+        // §5.42：cs 少一个，temp 槽整条带上移 8B（变量区随之上移，不重叠）
+        assert_eq!(LayoutMap::temp_slot_off(0, 0), -16);
+        assert_eq!(LayoutMap::temp_slot_off(0, 1), -24);
+        assert_eq!(LayoutMap::temp_slot_off(0, 4), -48);
         // 发射宽度必须是 4 字节（i32），否则 disp32 位置会多吃 4 字节
         assert_eq!(
-            LayoutMap::temp_slot_off(10).to_le_bytes().len(),
+            LayoutMap::temp_slot_off(10, 4).to_le_bytes().len(),
             4,
             "消费点用 `&slot_off.to_le_bytes()` 直发 disp32，宽度只能是 4 字节"
         );
@@ -746,22 +1007,26 @@ mod tests {
     /// 帧头算式只有一个出处。
     #[test]
     fn hdr_is_a_single_formula() {
-        assert_eq!(LayoutMap::hdr_of(0), 48);
-        assert_eq!(LayoutMap::hdr_of(2), 64);
+        // §5.42：canary 格 + 变量区第一槽 + 计划内的 cs 槽 + temp 槽。
+        assert_eq!(LayoutMap::hdr_of(0, 0), 16, "无 cs 无 temp：canary 格 + 变量区第一槽");
+        assert_eq!(LayoutMap::hdr_of(0, 4), 48, "cs=4 时与旧口径 48 同值");
+        assert_eq!(LayoutMap::hdr_of(2, 4), 64);
         let p = FramePlan {
             temp_slots: 7,
+            cs_slots: 4,
             var_bytes: 0,
             late_slots: 0,
             sret_need: 0,
             va_slots: 0,
             static_chain_slot: 0,
             bf_rmw_reserve: 0,
+            cx_band: CX_FRAME_BAND,
             vec_reserve: VEC_RESERVE,
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 48,
             spill_slots: 0,
         };
-        assert_eq!(LayoutMap::resolve(&p).hdr, LayoutMap::hdr_of(7));
+        assert_eq!(LayoutMap::resolve(&p).hdr, LayoutMap::hdr_of(7, 4));
     }
 
     /// 发射期对象不再挤在变量区里了，它自己的那条带就是它的额度：带的顶贴着
@@ -779,12 +1044,14 @@ mod tests {
         let mk = |late_slots: i64| {
             LayoutMap::resolve(&FramePlan {
                 temp_slots: 2,
+                cs_slots: 4,
                 var_bytes: 64,
                 late_slots,
                 sret_need: 32,
                 va_slots: 0,
                 static_chain_slot: 0,
                 bf_rmw_reserve: 0,
+                cx_band: CX_FRAME_BAND,
                 vec_reserve: VEC_RESERVE,
                 tramp_reserve: TRAMP_RESERVE,
                 stack_reserve: 48,
@@ -793,7 +1060,7 @@ mod tests {
         };
         let no_band = mk(0);
         let band = mk(2);
-        let hdr = LayoutMap::hdr_of(2);
+        let hdr = LayoutMap::hdr_of(2, 4);
         // 1. 坐标关系：顶 = -(hdr + var_bytes)，底 = 顶 - 带字节 = sret 区的顶
         assert_eq!(no_band.late_band_bytes, 0, "没给预算就没有带");
         assert_eq!(band.late_band_top, -(hdr + 64));

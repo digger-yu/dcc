@@ -1,0 +1,3 @@
+error[E0321]: inline asm output operands 0 and 1 are both bound to storage '-64(%r13)' (operands: x and x) — two outputs must not share one destination; use a matching constraint if they are meant to be the same operand (in function test_asm_output_conflict)
+  --> <file>:11:1
+  hint: 两个输出要写同一个操作数请用匹配约束（如 "=r"(x) 与 "1"），要写不同的对象请换变量；若你确信这段 asm 是合法的，那就是 dcc 把操作数绑错了 —— 请附上本条报错与最小复现件

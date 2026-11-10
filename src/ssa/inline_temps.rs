@@ -238,6 +238,72 @@ fn addr_temp_folds_at_sole_memop(
     }
 }
 
+/// 该地址临时值是否会**流进**某条内联汇编的**内存类输入**操作数。
+///
+/// 为什么这是 `is_addr_producer` 禁令的安全豁免: 内存操作数的发射侧
+/// (`asm_memory_operand_str`) 需要的就是一个左值地址, 绝不会把它按指针**值**参与
+/// 算术或再取址 —— 与 `addr_temp_folds_at_sole_memop` 的「紧邻访存」同一条逻辑,
+/// 只是父级换成了 InlineAsm。
+///
+/// 不放开时地址会落进一个栈槽: 内核 `call *%[opptr]`（`"m"(pv_ops.op)`）被编成
+/// `lea pv_ops+off(%rip),%rax; mov %rax,-N(%r13); mov -N(%r13),%rbx; call *(%rbx)`
+/// (`40 ff 13`), 而 x86 alternatives 的 `alt_replace_call()` 只认 `ff 15 disp32`
+/// (instrlen==6), boot 在 `arch/x86/kernel/alternative.c:558` 直接 BUG()（§5.32）。
+fn asm_mem_operand_addr(func: &Function, ssa_name: &str) -> bool {
+    addr_feeds_asm_mem(func, ssa_name, 0)
+}
+
+/// `asm_mem_operand_addr` 的递归体。
+///
+/// 链式形态是实测出来的：`"m"(pv_ops.cpu.a)` 在 SSA 里是两层地址临时值 ——
+/// `_t1 = &pv_ops.cpu`（`MemberAddr{obj: pv_ops}`）被 `_t2 = &_t1->a`
+/// （`MemberAddr{obj: _t1}`）使用，只有 `_t2` 直接出现在 asm 操作数里。
+/// 只沿 `MemberAddr{obj}` 链内联：obj 是子对象基址，重建后是 `&(base).f`，
+/// 不带任何步长算术。**`IndexAddr.arr` 绝不能沿** —— 那条路径会把地址临时值
+/// 内联成嵌套取址，历史上实拍过段错误（见 `is_addr_producer` 的注释）。
+fn addr_feeds_asm_mem(func: &Function, name: &str, depth: usize) -> bool {
+    if depth > 6 {
+        return false;
+    }
+    for bb in func.blocks.values() {
+        for inst in &bb.insts {
+            match &inst.kind {
+                InstKind::InlineAsm {
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    ..
+                } => {
+                    for (idx, o) in inputs.iter().take(input_names.len()).enumerate() {
+                        if !matches!(o, Operand::Var(v) if v.name() == name) {
+                            continue;
+                        }
+                        let raw = input_constraints.get(idx).map(String::as_str).unwrap_or("r");
+                        if crate::codegen::shared::asm_constraints::constraint_prefers_memory(
+                            raw,
+                            raw.contains('+'),
+                        ) {
+                            return true;
+                        }
+                    }
+                },
+                InstKind::MemberAddr { obj, .. } => {
+                    if let (true, Some(d)) = (
+                        matches!(obj, Operand::Var(v) if v.name() == name),
+                        inst.dest.as_ref(),
+                    ) {
+                        if addr_feeds_asm_mem(func, &d.name(), depth + 1) {
+                            return true;
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    false
+}
+
 /// SSA→AST 重建的内联计划。
 pub(super) struct InlinePlan {
     /// SSA 名 -> 内联表达式 (`Some(None)` = 不可内联, 保留为独立赋值语句)
@@ -356,9 +422,11 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
             // 「载入指针值再按其类型偏移」分支，语义无歧义。代价只是多一个栈槽，不改变值。
             // 唯一豁免见 `addr_temp_folds_at_sole_memop`（P13 阶段2 尾项）：紧邻的
             // `*(&sym)=v` / `x=*(&sym)` 还原成对 `sym` 的直接访问，地址临时值连同它的
-            // 栈槽与那条落槽写一起消失。
+            // 栈槽与那条落槽写一起消失；内联汇编的内存操作数是第二个豁免
+            // （`asm_mem_operand_addr`，§5.32）。
             let addr_operand_pinned = is_addr_producer(&inst.kind)
-                && !addr_temp_folds_at_sole_memop(func, &ssa_name, bb_name, idx, &inst.kind);
+                && !addr_temp_folds_at_sole_memop(func, &ssa_name, bb_name, idx, &inst.kind)
+                && !asm_mem_operand_addr(func, &ssa_name);
             let mut chain: Option<ExpandedTemp> = None;
             let inlineable = is_temp
                 && use_count <= 1

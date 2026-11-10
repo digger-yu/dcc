@@ -216,7 +216,10 @@ impl Codegen {
                 } else {
                     rodata_start + g.offset
                 };
-                let rip = self.entry + disp32_pos + 4;
+                // RIP 基准是指令尾：disp32 后面若还跟着立即数（`addl $imm, sym(%rip)`），
+                // 必须把尾字节数补上，否则有效地址整体多偏一个立即数长度（§5.28）。
+                let tail = *self.pending_data_rel_tails.get(&disp32_pos).unwrap_or(&0) as u64;
+                let rip = self.entry + disp32_pos + 4 + tail;
                 let rel = (var_vaddr as i64) - (rip as i64);
                 let p = disp32_pos as usize;
                 self.code[p..p + 4].copy_from_slice(&(rel as i32).to_le_bytes());
@@ -589,11 +592,12 @@ impl Codegen {
             let Some((sym_idx, off)) = self.reloc_sym_index(&var_name, "global var PC32") else {
                 continue;
             };
+            let tail = self.pending_data_rel_tails.remove(&disp32_pos).unwrap_or(0) as i64;
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
                 rel_type: R_X86_64_PC32,
-                addend: off - 4,
+                addend: off - 4 - tail,
             });
         }
 

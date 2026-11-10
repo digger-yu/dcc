@@ -210,9 +210,37 @@ impl Codegen {
             }
         }
     }
+    /// `浮点 → _Bool` 的唯一真源：C11 6.3.1.2p1 的 `(value != 0)`，NaN 算真。
+    ///
+    /// **不能**先截断成整数再归一化：0.5 截断后是 0，`(_Bool)0.5` 会变成假
+    /// （gcc 为真；夹具 `boolwide.c` 第 7 项实测）。判据直接用浮点比较，
+    /// `gen_float_cmp(Ne)` 已把无序（PF）并入结果，正好就是 `!= 0` 对 NaN 的语义。
+    ///
+    /// 前置条件：值已在 xmm0（`Float` 走 SS，`Double`/`LongDouble` 走 SD 通道）。
+    pub(crate) fn emit_xmm0_to_bool(&mut self, dst: u8, float_ty: &Type) {
+        use crate::codegen::shared::asm_operand::Width;
+        // xmm1 = +0.0（与 `emit_truth_flags` / `gen_float_binop` 造常量零同一手法）
+        self.emit_insn(&Insn::simd_arith_reg(
+            crate::codegen::x86_64::opcode::SimdArithOp::Xorps,
+            crate::codegen::x86_64::opcode::SimdWidth::PS,
+            1,
+            1,
+        ));
+        // %al = (xmm0 != 0) || unordered
+        self.gen_float_cmp(BinOp::Ne, float_ty);
+        // %al → dst（零扩展到 64 位）
+        self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, 0));
+    }
     pub(crate) fn emit_truncate_to_unsigned(&mut self, dst: u8, target_ty: &Type) {
+        // `_Bool` 不是「无符号 1 字节整数」：C11 6.3.1.2p1 要求归一化为 `(value != 0)`，
+        // 按宽度取低字节会把 0x200（以及任何 256 的倍数）变成 0（§5.30）。
+        // 与 `gen_int_narrow_cast` / `reduce_assign_value_to_lvalue` 共用同一个真源。
+        if matches!(target_ty, Type::Bool) {
+            self.emit_normalize_bool(dst);
+            return;
+        }
         let (mask, is_32bit) = match target_ty {
-            Type::Bool | Type::UChar => (0xFFu32, false),
+            Type::UChar => (0xFFu32, false),
             Type::UShort => (0xFFFFu32, false),
             Type::UInt => (0, true),
             _ => return,

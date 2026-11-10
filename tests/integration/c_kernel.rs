@@ -176,22 +176,33 @@ fn strict_kernel_scripts_reject_missing_artifacts() {
 
 /// KASAN 栈红区: -fsanitize=address 时函数入口应发射
 /// __asan_poison_memory_region 和 __asan_unpoison_memory_region 调用
+///
+/// 判据读**产物**（`-c` 出来的 `.o` 反汇编），不读 `-S` 文本转储：raw 字节序列在 `-S`
+/// 里只能以 `/* raw */` + 按字节解码的噪声呈现（本后端的 `-S` 是有损转储，不能
+/// 再汇编：实测同一序列 GAS 会把 `movups` 写成 `movaps`）。帧尺寸一变，那条
+/// `mov $imm32,%esi` 的字节划分就变，`-S` 里谁被拼成可读的 `call` 也跟着变 ——
+/// 而 .o 里的调用从来没缺过。
 #[test]
 fn kasan_stack_redzone_poison_unpoison() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-kasan-stack-{}.c", std::process::id()));
-    let asm_path = dir.join(format!("dcc-kasan-stack-{}.s", std::process::id()));
+    let obj_path = dir.join(format!("dcc-kasan-stack-{}.o", std::process::id()));
     let source = "int f(void) { int x = 42; return x; }\n";
     fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=address", "-S", "-o"])
-        .arg(&asm_path)
+        .args(["-fsanitize=address", "-c", "-o"])
+        .arg(&obj_path)
         .arg(&source_path)
         .output()
         .expect("run dcc");
-    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let dump = Command::new("objdump")
+        .args(["-dr", "--no-show-raw-insn"])
+        .arg(&obj_path)
+        .output()
+        .expect("run objdump");
+    let asm = String::from_utf8_lossy(&dump.stdout).to_string();
     let _ = fs::remove_file(&source_path);
-    let _ = fs::remove_file(&asm_path);
+    let _ = fs::remove_file(&obj_path);
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(asm.contains("__asan_poison_memory_region"), "missing poison call: {asm}");
     assert!(asm.contains("__asan_unpoison_memory_region"), "missing unpoison call: {asm}");
@@ -333,6 +344,71 @@ int main(void) {
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "fn ptr deref runtime check failed");
+}
+
+/// 静态初始化只认 `= {…}` 而不认 `= (T){…}` 这一族缺口的回归。
+///
+/// 现场是 PVH 启动：`mm/mm_init.c` 的 `static DEFINE_SPINLOCK(early_pfn_lock)`
+/// 展开成 `static spinlock_t x = (spinlock_t) __SPIN_LOCK_INITIALIZER(x)`，
+/// 而 4 字节锁字里被写进了一个**栈地址** —— `queued_spin_lock_slowpath` 对
+/// 它做 `cmpxchg` 就是 `PANIC: early exception 0x0d`（报告 §5.14）。
+/// 两个缺陷同族，都在「花括号列表的书写形状」这一条轴上：
+///  * 预注册期不认复合字面量 → 静默退化成零初始化（文件作用域版本实测
+///    `struct s g = (struct s){ .a = 7 };` 得到 0 而不是 7）；
+///  * 运行时初始化期把聚合 rvalue 的交付物（物化缓冲**地址**）当数据存进
+///    目标（函数局部 static 版本，就是 boot 的那一条）。
+#[test]
+#[cfg(unix)]
+fn static_compound_literal_init_stores_value_not_address() {
+    let src = r#"
+struct q { int a; };
+struct s { struct q raw; };
+struct t { char name[8]; int v; long p; };
+
+/* 文件作用域：复合字面量初始化必须与 `= {…}` 同形 */
+struct s gf = (struct s){ .raw = { .a = 7 } };
+struct s gh = { { 9 } };
+
+static int n = 1;
+
+int main(void) {
+    /* 内核 DEFINE_SPINLOCK 的形状：嵌套聚合 + 4 字节本体 */
+    static struct s x = (struct s){ .raw = { .a = 1 } };
+    static struct t y = (struct t){ "abc", 7, 9 };
+
+    if (gf.raw.a != 7) return 1;
+    if (gh.raw.a != 9) return 2;
+    if (x.raw.a != 1) return 3;
+    if (y.name[0] != 'a' || y.name[1] != 'b' || y.name[2] != 'c' || y.name[3] != 0) return 4;
+    if (y.v != 7) return 5;
+    if (y.p != 9) return 6;
+
+    /* 聚合成员整体赋值走的仍是同一份字节 */
+    struct s dst = { { 0 } };
+    dst = x;
+    if (dst.raw.a != 1) return 7;
+
+    /* 真正需要运行时初始化的聚合：嵌套函数属主里的 &&label 跳转表 */
+    void inner(void) {
+        static const void *l[] = {&&slot_a, &&slot_b};
+        goto *l[n];
+      slot_a: n = 20; return;
+      slot_b: n = 30; return;
+    }
+    inner();
+    if (n != 30) return 8;
+    n = 0;
+    inner();
+    if (n != 20) return 9;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("static-compound-lit-init", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "static compound-lit init compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "static compound-lit init runtime check failed (rc={rc})");
 }
 
 /// `-mno-sse` 下调用结果必须物化到被要求的寄存器。
@@ -3752,6 +3828,50 @@ fn fallthrough_gnu_attr_double_underscore_is_recognized() {
         reported[0] >= bug_line,
         "唯一那条 W0501 指向第 {} 行，不在没标记的 f_real_bug（自第 {bug_line} 行起）里 —— \
          说明某个已标记形态被误报了:\n{err}",
+        reported[0]
+    );
+}
+
+/// 同一批 `__attribute__((__fallthrough__))` 形态坐在**宏定义体**里时也必须被认出。
+///
+/// 内核 `include/linux/signal.h` 的 `_SIG_SET_OP` 就是这一形：整个 switch 在宏体里，
+/// `fallthrough;` 经 `compiler_attributes.h` 展开成属性。宏展开后的 `__FILE__`/行号
+/// 不是字面源码位置，只比对 raw token 的实现在这里会漏认（实测 localmodconfig 全树
+/// W0501 的主体就是它：每个含 `<linux/signal.h>` 的 TU 刷 5 条）。判据与上条一致：
+/// 整份夹具只该报 `f_real_bug` 那 1 条。
+#[test]
+#[cfg(unix)]
+fn fallthrough_inside_macro_body_is_recognized() {
+    let src = include_str!("../fixtures/c/fallthrough_inside_macro_body.c");
+    let (out, obj) =
+        run_object_test_flags("ftmacro", src, &["-O2", "-Wall", "-Wimplicit-fallthrough"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(&obj);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        err.matches("W0501").count(),
+        1,
+        "宏体里的 fallthrough 属性形态没被全认出（W0501 应当只剩 f_real_bug 那 1 条）:\n{err}"
+    );
+    let bug_line = src
+        .lines()
+        .position(|l| l.starts_with("int f_real_bug("))
+        .expect("夹具里应有 f_real_bug")
+        + 1;
+    let reported: Vec<usize> = err
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("--> "))
+        .filter_map(|l| l.rsplitn(3, ':').nth(1)?.parse().ok())
+        .collect();
+    assert_eq!(reported.len(), 1, "W0501 的位置行应当只有一条，实际: {reported:?}\n{err}");
+    assert!(
+        reported[0] >= bug_line,
+        "唯一那条 W0501 指向第 {} 行，不在没标记的 f_real_bug（自第 {bug_line} 行起）里 —— \
+         宏体里某个已标记形态被误报了:\n{err}",
         reported[0]
     );
 }

@@ -154,6 +154,17 @@ pub struct RegBank {
     /// callee-saved 池内的号由 `claim`（置 allocated+used_by_self）永久登记，**不进**
     /// 本集合；本集合只管池外的 caller-saved 号（rax/rcx/rdx/rsi/rdi/r8-r11）。
     tmp_pinned: HashSet<u8>,
+    /// 本函数**允许**发出的池号位图（报告 §5.42 的 callee-saved 按需化）。
+    ///
+    /// 帧头里的保存槽数就是 `count_ones()`（`abi::layout::FramePlan::cs_slots`），
+    /// 所以图外号一旦被发出去，序言就没有对应的保存指令 —— 那是静默毁调用者。
+    /// 因此发号器（`alloc_temp*`/`is_free`）一律按本图过滤，`claim` 撞图外号时
+    /// 记 [`RegBank::plan_violation`] 由发射收尾 fail-closed（E1137）。
+    ///
+    /// 默认全开（`0x0F`）：没有设置它的调用方（单测、naked 路径）行为与旧版一致。
+    plan_mask: u8,
+    /// `claim` 在本次函数里撞到过「图外池号」的位集合。非零 = 计划漏了一个家。
+    plan_violation: u8,
 }
 
 impl Default for RegBank {
@@ -171,6 +182,8 @@ impl RegBank {
             pinned: HashSet::new(),
             banned: 0,
             tmp_pinned: HashSet::new(),
+            plan_mask: 0x0F,
+            plan_violation: 0,
         }
     }
 
@@ -182,9 +195,16 @@ impl RegBank {
         (0..self.pool.len()).find(|&i| self.pool[i] == reg)
     }
 
-    /// 号对应的位掩码；池外为 `None`。
+    /// 号在池里的位掩码；池外为 `None`。
     pub fn bit_of(&self, reg: u8) -> Option<u8> {
         self.index_of(reg).map(|i| 1u8 << i)
+    }
+
+    /// 同上，但**不依赖实例状态**：池的定义是编译期常量（`POOL`），而「某个号
+    /// 是否在池里/占哪一位」在帧规划期（还没有任何实例可问的地方）也要能回答 ——
+    /// `Codegen::compute_callee_plan` 就是那个消费方。
+    pub fn pool_bit_of(reg: u8) -> Option<u8> {
+        POOL.iter().position(|&r| r == reg).map(|i| 1u8 << i)
     }
 
     pub fn pool(&self) -> &[u8; 4] {
@@ -203,6 +223,11 @@ impl RegBank {
         self.pinned.insert(reg);
         match self.bit_of(reg) {
             Some(bit) => {
+                if self.plan_mask & bit == 0 {
+                    // 图外号：帧头没有它的保存槽。不静默毁调用者 —— 记下来由
+                    // 发射收尾报 E1137（见字段注释）。
+                    self.plan_violation |= bit;
+                }
                 self.allocated |= bit;
                 self.used_by_self |= bit;
                 true
@@ -226,7 +251,11 @@ impl RegBank {
     /// impossible constraint）。这里只占用 `allocated`，asm 编完可 `release` 归还。
     pub fn alloc_temp_named(&mut self, reg: u8) -> bool {
         match self.bit_of(reg) {
-            Some(bit) if self.allocated & bit == 0 && self.banned & bit == 0 => {
+            Some(bit)
+                if self.allocated & bit == 0
+                    && self.banned & bit == 0
+                    && self.plan_mask & bit != 0 =>
+            {
                 self.allocated |= bit;
                 self.used_by_self |= bit;
                 true
@@ -250,13 +279,17 @@ impl RegBank {
             if Some(self.pool[i]) == except {
                 continue;
             }
+            if self.plan_mask & bit == 0 {
+                // 图外号发出去就没有保存（帧头只为 plan 里的号开槽）。
+                continue;
+            }
             if self.allocated & bit == 0 && self.banned & bit == 0 {
                 self.allocated |= bit;
                 self.used_by_self |= bit;
                 return Some(self.pool[i]);
             }
         }
-        None // 池已耗尽：调用方退回帧槽
+        None // 池已耗尽（或不在 plan 内）：调用方退回帧槽/借用号
     }
 
     /// 宣告「这个号此后不得当临时值发出」（见 `banned` 字段的注释）。
@@ -334,12 +367,17 @@ impl RegBank {
     /// 逐函数复位：清空占用与钉住集合，池定义不动。
     /// 调用方复位后必须立刻按当前绑定表逐个 `claim`（`reset_reg_tracker` 就是这条），
     /// 否则 file-scope 绑定「先填表、后清零」的顺序会让序言少一条保存。
+    ///
+    /// **不清 `plan_mask`**：它是函数入口按 AST 定稿的布局事实（`compute_callee_plan`），
+    /// 而 `reset_reg_tracker` 在序言里跑；把它一并清了就退化成「全部可发」，
+    /// 序言已按小 plan 发射过 —— 直接毁调用者。`plan_violation` 是逐函数读数，清。
     pub fn reset(&mut self) {
         self.allocated = 0;
         self.used_by_self = 0;
         self.banned = 0;
         self.pinned.clear();
         self.tmp_pinned.clear();
+        self.plan_violation = 0;
     }
 
     /// **只**重建钉住集合，不动两个位图。
@@ -380,7 +418,38 @@ impl RegBank {
         self.pinned.contains(&reg)
     }
 
+    /// 本函数的 callee-saved 规划位图（见字段 `plan_mask`）。
+    pub fn plan_mask(&self) -> u8 {
+        self.plan_mask
+    }
+
+    /// 函数入口定稿本函数能发哪些池号（帧头的保存槽数跟着它走）。
+    ///
+    /// 帧解算**之前**调用；`reset` 不会清它。传入图外的位不会生效（只有池内四位）。
+    pub fn set_plan_mask(&mut self, mask: u8) {
+        self.plan_mask = mask & 0x0F;
+    }
+
+    /// 该号在不在本函数的 callee-saved 规划里。池外号不受本判据限制（一律 `true`）。
+    pub fn is_in_plan(&self, reg: u8) -> bool {
+        match self.bit_of(reg) {
+            Some(bit) => self.plan_mask & bit != 0,
+            None => true,
+        }
+    }
+
+    /// 本次函数里 `claim` 撞到过图外池号的位集合（非零 ⇒ 计划漏了一个家）。
+    pub fn plan_violation(&self) -> u8 {
+        self.plan_violation
+    }
+
     pub fn is_free(&self, reg: u8) -> bool {
+        // 池内图外号不算空闲：发出去也没有保存槽（§5.42）。
+        if let Some(bit) = self.bit_of(reg) {
+            if self.plan_mask & bit == 0 {
+                return false;
+            }
+        }
         !self.is_allocated(reg) && !self.is_pinned(reg) && !self.is_banned(reg)
     }
 
@@ -389,11 +458,11 @@ impl RegBank {
         matches!(self.bit_of(reg), Some(bit) if self.banned & bit != 0)
     }
 
-    /// 池里当前可发的号（下标升序，排除已占用与被禁止的）。
+    /// 池里当前可发的号（下标升序，排除已占用、被禁止的与**计划外**的）。
     pub fn free_temps(&self) -> Vec<u8> {
-        self.pool
-            .iter()
-            .copied()
+        (0..self.pool.len())
+            .filter(|&i| self.plan_mask & (1u8 << i) != 0)
+            .map(|i| self.pool[i])
             .filter(|&r| !self.is_allocated(r) && !self.is_banned(r))
             .collect()
     }

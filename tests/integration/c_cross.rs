@@ -1859,6 +1859,32 @@ fn c_static_agg_by_value_gcc_cross_check() {
     assert_eq!(rc, 0, "static_agg_by_value: 每条断言对应一个 return 值");
 }
 
+/// 报告 §5.15: **小聚合（≤8 B）按地址交付**的右值被当成寄存器数据存槽。
+///
+/// 值模型的两条轴（类型轴 `value_is_whole_copy` / 交付轴 `rvalue_is_buffer_addr`）
+/// 旧写法只有前者说了算，于是 2 B 结构的 `g = ({ struct s t; …; t; })` 把物化槽
+/// 地址当 8 字节写进 `g`；`return ({…; t;})` 则把地址当返回值交回调用方。
+/// 夹具逐位枚举了六类目标（全局/局部/成员/下标/解引用/链式）、实参、两种尺寸的
+/// 返回值，并留下两条“修复前就对”的对照（复合字面量、2 B 结构按值传参）。
+#[test]
+#[cfg(unix)]
+fn c_small_agg_rvalue_delivery_gcc_cross_check() {
+    let src = include_str!("../fixtures/c/small_agg_rvalue_delivery.c");
+    let rc = run_gcc_cross_check("c-small-agg-rvalue-delivery", src);
+    assert_eq!(
+        rc, 0,
+        "small_agg_rvalue_delivery: 低位是出错的那条轴（1/2 语句表达式→全局/局部，\
+         3/4/5 →成员/下标/解引用，6 链式，7 实参，8/9 返回，10/11 对照）"
+    );
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("c-small-agg-rvalue-delivery", src, &[flag]),
+            0,
+            "{flag}: 小聚合 rvalue 交付形态必须四档一致"
+        );
+    }
+}
+
 /// 缺陷 5: 聚合形参跨寄存器/栈边界拆分放置错 (5 个 int 之后的聚合被整体推到栈上,
 /// 或前半进 rdi 后半留在栈, callee 按同一错误布局读回 → f={1,0} g=0)。
 #[test]

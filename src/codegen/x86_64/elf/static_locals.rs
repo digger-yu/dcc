@@ -83,13 +83,14 @@ impl Codegen {
         let use_data = if label_owner_ok {
             true // 由下面的初始化发射成败决定（失败则回退 BSS + 运行时初始化）
         } else if initialized && !has_label_ref {
-            match info.init.as_ref().unwrap() {
-                Expr::String { .. } => true,
-                Expr::InitList { .. } => true, // 尝试, 可能失败
-                _ => {
-                    let is_float = info.ty.is_real_float();
-                    global_init_bytes(info.init.as_ref().unwrap(), sz, is_float, &info.ty).is_some()
-                },
+            let init = info.init.as_ref().unwrap();
+            if Self::static_brace_list(init).is_some() {
+                true // 尝试, 可能失败
+            } else if matches!(init, Expr::String { .. }) {
+                true
+            } else {
+                let is_float = info.ty.is_real_float();
+                global_init_bytes(init, sz, is_float, &info.ty).is_some()
             }
         } else {
             false // 无初始化式, 或含 &&label 但不能静态化 → 不进静态初始化
@@ -159,18 +160,45 @@ impl Codegen {
                         }
                         true
                     },
-                    Expr::InitList { inits, .. } => {
-                        let base = self.data_section.len() as u64;
-                        if let Some(init_data) =
-                            self.gen_global_init_list(&info.ty, inits, Some((base, None)), false)
-                        {
-                            self.data_section.extend_from_slice(&init_data);
-                            for _ in init_data.len()..sz {
+                    // 花括号列表的三种写法 (`= {…}` / `= (T){…}` / 包裹它的聚合
+                    // 类型转换) 与文件作用域全局共用同一份字节生成; 写法判据
+                    // 单点在 [`Codegen::static_brace_list`], 本处与
+                    // `eval_global_init` 都只问它, 不各自重写形态匹配。
+                    e if Self::static_brace_list(e).is_some() => {
+                        // 指针目标 + 聚合型字面量是退化取地址（C11 6.3.2.1p3，
+                        // 判据见 `ptr_decay_literal`）：物化匿名对象 + 发重定位，
+                        // 不能把内容当嵌套列表铺进指针槽。
+                        if Self::ptr_decay_literal(&info.ty, e) {
+                            let base = self.data_section.len() as u64;
+                            let bytes = self.eval_const_expr(
+                                e,
+                                Some((base, None)),
+                                sz,
+                                &info.ty,
+                                false,
+                            );
+                            self.data_section.extend_from_slice(&bytes);
+                            for _ in bytes.len()..sz {
                                 self.data_section.push(0);
                             }
                             true
                         } else {
-                            false
+                            let inits = Self::static_brace_list(e).expect("guard 已证明");
+                            let base = self.data_section.len() as u64;
+                            if let Some(init_data) = self.gen_global_init_list(
+                                &info.ty,
+                                inits,
+                                Some((base, None)),
+                                false,
+                            ) {
+                                self.data_section.extend_from_slice(&init_data);
+                                for _ in init_data.len()..sz {
+                                    self.data_section.push(0);
+                                }
+                                true
+                            } else {
+                                false
+                            }
                         }
                     },
                     _ => {

@@ -1,76 +1,59 @@
 # DCC — Linux 7.1.0 (localmodconfig, x86-64): build & verification results
 
-**Verdict (re-checked 2026-11-06, dcc `bebf30c7` + the follow-up frame-budget fix, QEMU 8.2.2).**
-dcc builds the full `localmodconfig` x86-64 kernel **from a clean tree and a clean
-include cache**: 2 901 translation units, **0 gcc/cc/clang trap hits and 0
-`GCC-DELEGATE` lines**, a 171 212 384-byte `vmlinux` that **objtool accepts with 0
-errors**, a `__jump_table` that decodes with **0 bad entries out of 5 053**, and realmode
-assembly **byte-identical to gcc in all 6 comparisons**.
-
-**The boot gate does not pass.** QEMU/PVH dies at 0.15 s with
-`PANIC: early exception 0x0d … queued_spin_lock_slowpath+0xe17`, i.e. **before**
-`Run /init as init process`. §5.11 isolates the cause to a real codegen defect — under
-`-O2` dcc binds a named `"+m"` output to the frame slot of the *invisible* `"=@ccz"`
-output in the same `asm`, so `arch_atomic_try_cmpxchg()` compares and writes the wrong
-address and returns a garbage condition code — and §5.12 records a second kernel-class
-defect (a fixed 300–400 B reserved frame per function, 10–40× gcc).
-
-An earlier revision of this report claimed the boot gate passed. It was wrong, and the
-reason is worth stating plainly: the `vmlinux` that reached `/init` had
-`Linux version … (gcc 13.3.0 …)` in its `.rodata` — it was a **gcc-built** kernel. The
-first dcc-only kernel is this one, and it does not boot yet.
-
-This file records final results only: what was built, how it was verified, what this run
-found, the reproduce script, and the open gaps.
-
----
+**Status (2026-11-09).** The full clean-tree build, the objtool/ELF checks and the realmode
+comparison are green. The suite numbers quoted in §4.5 are the last full runs (compiler of
+§5.16–§5.18); the fixes after them are covered by their own cases, and one full re-run on the
+final compiler is still owed (§7).
+**The boot is not yet proven on a tree built entirely by the current compiler**: the empty-tree
+rebuild carrying §5.14–§5.41 is running in `/root/pvh-lmc3` (kbuild21), and
+`scripts/kernel_pvh_verify.sh --boot` on its `vmlinux` is the verdict that §4.3 will carry.
+Each completed round has moved the first stop further; the recent stop points are tabulated
+there.
 
 ## 1. Sources and environment
 
 | Item | Value |
 |---|---|
-| dcc | this repository `bebf30c7`, `cargo build --release` → `target/release/dcc` (`dcc 0.1.0`) |
+| dcc | this repository `79935fe9` plus this cycle's uncommitted fixes; `cargo build --release` → `target/release/dcc` (built 2026-11-09 11:12) |
 | Kernel | Linux 7.1.0, pristine source tree `/root/linux-pvh-src` (no git metadata, no local patches) |
 | Config | `localmodconfig` seeded from `defconfig`, then `PVH=y`, `SUSPEND=n`, `HIBERNATION=n`, `ACPI_SLEEP=n`, `IA32_EMULATION=n`, `COMPAT=n` |
-| Build dir | out-of-tree `O=/root/pvh-lmc`, **created empty**; include cache (`~/.dcc`) deleted first, so every unit was preprocessed cold |
+| Build dir | out-of-tree `O=/root/pvh-lmc*`, started empty each round; include cache (`~/.dcc`) deleted first, so every unit is preprocessed cold |
 | Host | Linux x86-64, 4 cores; `gcc 13.3.0` is used only as a comparison baseline, never as a build compiler |
 | Emulator | QEMU 8.2.2 (`-kernel` PVH entry, `-m 1024M`, serial console) |
 
-`.config` has 1 577 `=y` and 1 `=m` symbols; the build tree holds 2 998 object files. The
-same `CC` runs at configure and build time, so `CONFIG_CC_VERSION_TEXT` stays
-`dcc 0.1.0`. kbuild therefore also records `CONFIG_CC_IS_CLANG=y` (dcc predefines
-`__clang__`); that is consistent rather than contradictory, because the clang-shaped
-`-f…`/`-m…` flags kbuild then derives are exactly the ones on every dcc compile line, and
-dcc documents which of them it implements (`docs/support_features.md`).
+`.config` has 1 577 `=y` and 1 `=m` symbols; the build tree holds 2 998 object files. The same
+`CC` runs at configure and build time, so `CONFIG_CC_VERSION_TEXT` stays `dcc 0.1.0`. kbuild
+therefore also records `CONFIG_CC_IS_CLANG=y` (dcc predefines `__clang__`); that is consistent
+rather than contradictory, because the clang-shaped `-f…`/`-m…` flags kbuild then derives are
+exactly the ones on every dcc compile line, and dcc documents which of them it implements
+(`docs/support_features.md`).
 
-## 2. What “all-dcc” means here
+## 2. What "all-dcc" means here
 
 The build is driven through `scripts/dcc-kernel-cc.sh` / `scripts/dcc-host-wrapper.sh`
-(`CC=` / `HOSTCC=`), which hand every C/asm compile to `target/release/dcc`. Two
-independent checks make the claim falsifiable:
+(`CC=` / `HOSTCC=`), which hand every C/asm compile to `target/release/dcc`. Two independent
+checks make the claim falsifiable:
 
-* `scripts/kernel_pvh_verify.sh --build` prepends a trap directory to `PATH` containing
-  `gcc`, `cc`, `g++`, `c++`, `clang`, `ld.bfd`; each trap appends its command line to a
-  log and exits 99. **0 trap hits** for this build.
-* the same script counts `GCC-DELEGATE` lines in the build log (the wrapper used to fall
-  back to gcc for a few infrastructure files). **0 delegate lines.**
+* `scripts/kernel_pvh_verify.sh --build` prepends a trap directory to `PATH` containing `gcc`,
+  `cc`, `g++`, `c++`, `clang`, `ld.bfd`; each trap appends its command line to a log and exits
+  99. **0 trap hits** for this build.
+* the same script counts `GCC-DELEGATE` lines in the build log (the wrapper used to fall back to
+  gcc for a few infrastructure files). **0 delegate lines.**
 
-Host `ld` still does the final link — dcc emits relocatable objects and drives the system
-linker directly; it is not a linker. That is the same split as a gcc build
-(`gcc` → `as` → `ld`), with dcc replacing `cc` and `as` for the compilation steps.
+Host `ld` still does the final link — dcc emits relocatable objects and drives the system linker
+directly; it is not a linker. That is the same split as a gcc build (`gcc` → `as` → `ld`), with
+dcc replacing `cc` and `as` for the compilation steps.
 
-## 3. Build procedure
+## 3. Build
 
 ```bash
-# configuration (O= out-of-tree; same CC at configure and build time)
 KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc \
   bash scripts/kernel_pvh_verify.sh --config
-# build (CC/HOSTCC = dcc wrappers, -j2)
 KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc DCC_BIN=target/release/dcc JOBS=2 \
   bash scripts/kernel_pvh_verify.sh --build
 ```
 
-Measured for this report, on the cold-cache clean build:
+Measured on the cold-cache clean build:
 
 | Metric | Value |
 |---|---|
@@ -81,98 +64,127 @@ Measured for this report, on the cold-cache clean build:
 | gcc traps / delegate lines | 0 / 0 |
 | objtool errors | 0 |
 
-`make vmlinux` does not build `arch/x86/boot/bzImage`; the PVH route uses `vmlinux`
-directly, so no bzImage is produced by this recipe.
+`make vmlinux` does not build `arch/x86/boot/bzImage`; the PVH route uses `vmlinux` directly.
+The empty-tree rebuilds after each fix round (`-j3`) took 1:21–2:34 and produced
+171 245 152–171 376 200 B images.
+
+After each compiler fix the cycle was an incremental one — rebuild the affected subsystems,
+relink, boot — never a clean rebuild. The round that carries §5.48–§5.50 recompiled 2 937
+objects (`-j4`, 2 h 50 min) and produced a 164 796 160 B `vmlinux` with 0 objtool errors;
+the two rounds after it touched 85 and 319 objects.
 
 ## 4. Verification results
 
 ### 4.1 objtool
 
 objtool runs as part of the kbuild link path for every object in this configuration.
-Result: **0 errors**. The only diagnostics are `return with modified stack frame`
-warnings (**12 225** occurrences across the whole tree); they are warnings, not errors,
-and objtool and the link both exit 0. They are not evidence of correctness either way,
-but they are the reason `vmlinux` links at all: objtool's ORC pass does accept dcc's
-prologues/epilogues.
+Result: **0 errors**. The only diagnostics are `return with modified stack frame` warnings
+(**12 225** across the whole tree); they are warnings, not errors, and objtool and the link both
+exit 0. They are not evidence of correctness either way, but they are the reason `vmlinux` links
+at all: objtool's ORC pass accepts dcc's prologues/epilogues.
 
 ### 4.2 ELF-level checks
 
-* `__jump_table`: **5 053 entries**; each entry's `code` target must point at the first
-  byte of a `jmp` (`0xeb`/`0xe9`). **`bad_nop=0`, `bad_other=0`, `out_of_text=0`** — no
-  entry points into a `.text` NOP hole left behind by a moved function.
-* `.altinstructions`: **2 349 entries** (`0x8076` bytes, 14 B each); the nested
-  `ALTERNATIVE_2` sites in `arch/x86/kernel/pvclock.o` carry the GAS-compatible
-  `instrlen/repllen` pairs `(5,5)` and `(5,3)`, and `.altinstr_replacement` contains the
-  real `lfence; rdtsc; rdtscp` bytes rather than NOPs.
+* `__jump_table`: **5 053 entries**; each entry's `code` target must point at the first byte of a
+  `jmp` (`0xeb`/`0xe9`). **`bad_nop=0`, `bad_other=0`, `out_of_text=0`** — no entry points into
+  a `.text` NOP hole left behind by a moved function.
+* `.altinstructions`: **2 349 entries** (`0x8076` bytes, 14 B each); the nested `ALTERNATIVE_2`
+  sites in `arch/x86/kernel/pvclock.o` carry the GAS-compatible `instrlen/repllen` pairs `(5,5)`
+  and `(5,3)`, and `.altinstr_replacement` contains the real `lfence; rdtsc; rdtscp` bytes rather
+  than NOPs.
 * executable `.pushsection` blocks (`.altinstr_aux`, `.altinstr_replacement`, `.fixup`,
-  `.ex_table`) carry their own `R_X86_64_PC32` relocations in `.rela.<section>`:
-  cross-section jumps are emitted against the **target section symbol** with
-  `addend = offset - 4`, matching what GAS produces for the same inline asm.
+  `.ex_table`) carry their own `R_X86_64_PC32` relocations in `.rela.<section>`: cross-section
+  jumps are emitted against the **target section symbol** with `addend = offset - 4`, matching
+  what GAS produces for the same inline asm.
 
-### 4.3 Boot (QEMU PVH) — **FAIL**
+### 4.3 Boot (QEMU PVH)
 
-```bash
-KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc \
-  bash scripts/kernel_pvh_verify.sh --boot
-```
+The judge is the serial console reaching `DCC kernel: init reached successfully`;
+`Run /init as init process` only proves the hand-off to user space. Recent rounds:
 
-```
-[    0.148092] ACPI: Error parsing LAPIC address override entry
-[    0.148350] ACPI: Invalid BIOS MADT, disabling ACPI
-[    0.148633] Intel MultiProcessor Specification v1.4
-[    0.152984] No NUMA configuration found
-PANIC: early exception 0x0d IP 10:ffffffff87320227 error 0 cr2 0xf9de3ff183e9a89b
-[    0.160025] RIP: 0010:queued_spin_lock_slowpath+0xe17/0x1340
-[    0.161840] Code: … 49 8b 45 a0 <48> 89 01 …        # mov %rax,(%rcx)
-```
+| image | compiler carries | first stop | diagnosed as |
+|---|---|---|---|
+| kbuild18, empty tree | §5.14–§5.36 | SMP up, `kdevtmpfs` running (2.757 s), then `#PF` walking an empty `hlist_nulls` bucket | §5.37 |
+| incremental, image carries §5.37 | +§5.37 | past the `hlist_nulls` walk, then `#PF` at `dev_net(NULL)` | §5.38 |
+| incremental, image carries §5.38 | +§5.38 | reached the `serial8250` initcalls, `TASK stack guard page was hit` at 2.048 s (16 KB init stack) | §5.39 |
+| kbuild19, empty tree | §5.14–§5.39 | did not link: `arch/x86/kernel/fpu/bugs.c` died with `E0311` (four x87 memory operands had no encoder) | §5.40 |
+| kbuild20, empty tree | §5.14–§5.40 | **hang** right after `mem auto-init: stack:all(zero), heap alloc:off, heap free:off` (14:35, QEMU killed by the 45 s timeout). gdb on the stub: `__free_pages_prepare(page=0xffffea0000000000, order=0, …)` entered again and again from `__free_pages_core+0x246` — PFN 0 re-freed forever inside `memblock_free_all()` | §5.41 |
+| kbuild21, empty tree | §5.14–§5.41 | `BUG: TASK stack guard page was hit at ffffc9000000ffe8` at 4.002 s, `RIP: decay_load+0xc` (`sub rsp,0xa0` then the first `push`), RSP `ffffc9000000fff8` — the 16 KB task stack was **8 bytes short** at that instant; the chain below is the scheduler's `decay_load → ___update_load_sum → __update_load_avg_se → set_next_entity → pick_next_task_fair → __schedule` | §5.42 (frames) |
+| kbuild22, empty tree | §5.14–§5.42 | `loop_init → loop_add → device_add_disk`: `#PF` at `add_disk_fwnode+0x6c`, address `0x10`. gdb on the stub: `__alloc_disk_node` stored the queue at `disk=0xffff888000b96400 +0x50`, but `add_disk_fwnode` was entered with `disk=0xffff888000b96560` (+0x160) and `queue=(nil)` — `__blk_mq_alloc_disk` returned `disk+0x160` | §5.44 |
+| kbuild23, empty tree | §5.14–§5.44 | past the loop block-device registration, then `#PF` at `ata_lookup_timeout_table+0x62`, address `0xa1ec`, `Comm: scsi_eh_1` (first libata EH command); a later `general protection fault … non-canonical address 0xfffc43ff90eab168` in `seq_create_client1+0x78f` follows the first Oops — a **separate** defect, `clienttab[client->number = c] = client` scaling the lvalue address, see §5.47 — and init dies with `Attempted to kill init! exitcode=0x0000000b`. The `ata_eh_cmd_timeout_table[].commands` slots held `{0xec,0xa1}` as an integer (0xa1ec) with no relocation | §5.46, §5.47 |
+| kbuild24, empty tree | §5.14–§5.47 | three Oops on the boot path: `__ata_scsi_queuecmd+0xb3d` (4-byte write to `0x5c`), `alloc_thread_stack_node+0x8f` (`CR2=0x2d`), `scsi_eh_scmd_add+0x445` (`CR2=0xe0`) | §5.48, §5.49 |
+| full rebuild carrying §5.48–§5.49 | +§5.48, §5.49 | `__ata_scsi_queuecmd` still faults, now on `rq->tag` read at offset 0 (`*(int*)rq`) | §5.50 |
+| incremental (85 TUs: `block`, `ata`, `scsi`, `cdrom`) carrying §5.50 | +§5.50 | **`Run /init as init process` at 10.16 s** — first image past the whole boot path; `/init` then fails to exec with `-7` | open |
+| incremental (`fs`, `init`) carrying all of the above | same | `Run /init as init process` at 10.42 s, `/init` exec returns `-7` again | open |
 
-The harness's own line is `FAIL: PVH 启动未到用户空间`; neither
-`Run /init as init process` nor `DCC kernel: init reached successfully` appears.
-
-Two things were ruled out before the cause was found (§5.11):
-
-* **not a stack overflow.** A hardware breakpoint on the faulting instruction reports
-  `rsp = init_thread_union+4728` — 4.6 KB of the 16 KB thread stack in use.
-* **not an objtool/link problem.** Everything in §4.1/§4.2 is clean; the kernel loads,
-  decompresses and reaches `start_kernel`.
+Image identity is checked from the image itself: the `Linux version 7.1.0 (root@di) (dcc 0.1.0,
+GNU ld … 2.42)` string in `.rodata` is what proves a `vmlinux` is dcc-built (a `gcc …` string
+there means it is not).
 
 ### 4.4 Realmode assembly (`--partial`)
 
-The six `.S` files that end up in `rmpiggy.o` are assembled by dcc with `-m16` and
-compared against `gcc -m16 -c` after `objcopy --strip-debug`: code, relocations and
-symbols are **byte-identical** (6/6). The `-m16` **C** inputs still fail with a hard
-`E0319` diagnostic plus a `DCC-GAP reason=m16/m32-no-c-backend` marker instead of
-silently emitting 64-bit code, and the gcc trap stays empty (14 passed, 0 failed).
-This stage has to run after `--build`: the six files include build-generated headers
-(`generated/autoconf.h`, `generated/asm-offsets.h`).
+The six `.S` files that end up in `rmpiggy.o` are assembled by dcc with `-m16` and compared
+against `gcc -m16 -c` after `objcopy --strip-debug`: code, relocations and symbols are
+**byte-identical** (6/6). The `-m16` **C** inputs still fail with a hard `E0319` diagnostic plus a
+`DCC-GAP reason=m16/m32-no-c-backend` marker instead of silently emitting 64-bit code, and the gcc
+trap stays empty (14 passed, 0 failed). This stage has to run after `--build`: the six files
+include build-generated headers (`generated/autoconf.h`, `generated/asm-offsets.h`).
 
-### 4.5 dcc's own test suite
+### 4.5 dcc's own test cases
 
-`cargo test --release --no-fail-fast -- --test-threads=2`: **4 042 passed, 8 ignored,
-1 failed**. The single failure is `cpp_abi_eh_group` (six C++ zero-cost-EH fixtures crash
-with a signal); it is pre-existing and unrelated — the same six fixtures failed the same
-way in `logs/cargo_test_fix6.log` dated 2026-11-04, before any change in this cycle, and
-C++ EH is not on the kernel path. `scripts/torture_test.sh all` (the pre-commit gate)
-reports **3 707 passed, 0 failed, 6 skipped**.
+Last full `cargo test --release --no-fail-fast -- --test-threads=2` (2026-11-07, compiler of
+§5.18), log `logs/cargo_test_ssa_width.log`: **4 054 passed, 8 ignored, 1 failed** — lib
+2 607/0 (two ignored), integration 1 332/0 (six ignored), `errors` 26/0, `disasm_snapshot` 1/0,
+`g10_snapshot_baseline` 1/0. The single failure is the pre-existing `cpp_abi_eh_group`
+(six C++ zero-cost-EH fixtures die with a signal; identical before this cycle and not on the
+kernel path). Every defect in §5 carries a regression case, most of them a C fixture checked
+against gcc at `-O0/-O1/-O2/-O3`.
 
-## 5. Defects found in this cycle
+Product fingerprints were re-frozen when frame layout legitimately moved: 34 disassembly
+snapshots under `tests/disasm_snapshots_x86_64/` and the five `tests/fixtures/g10_*.sha256`
+baselines. With numbers and padding normalised away, all 34 instruction streams hash identical
+to their previous content, so only frame sizes moved (§5.12).
+
+`scripts/torture_test.sh all` (the pre-commit test-case script): **3 707 passed, 0 failed,
+6 skipped** (`logs/torture_bracefix.log`, 2026-11-07 09:04 — i.e. the compiler before
+§5.17/§5.18).
+
+On the compiler carrying §5.48–§5.50 the lib suite is green again (**2 610 passed, 0 failed**)
+and the three new cases (`statement_expression_has_its_own_scope`,
+`inline_param_uses_declared_param_type`, `inline_result_uses_declared_return_type`) pass at all
+four `-O` levels. Those three are inline-source cases rather than `tests/fixtures/` files: each
+one is a 20-line shape of the kernel expansion that failed, and the third needs a `noinline`
+control function to contrast against.
+
+The compiler carrying §5.51 adds `bitfield_init_list_uses_rmw_band`
+(`tests/fixtures/c/bitfield_init_list_slots.c`), and the 12-name `bitfield` filter of the
+integration suite passes as a group.
+
+User-space suites on the fixed compiler (`scripts/bench_lua_sqlite.sh`): Lua builds and runs
+identically to gcc at **all four** `-O` levels (same functional output, same `fib(32)` result),
+and `shell.c + sqlite3.c` at `-O2` builds, links and answers the `:memory:` probe correctly
+(7 763 584 B binary, 7 min 17 s, 6 973 MiB peak RSS). The `-O2` SQLite peak is a pre-existing
+memory cliff of this host (6 774 MiB / 7:33 here against HEAD's 6 785 MiB / 7:43 on the same
+single TU); the layout work neither added memory nor time.
+
+## 5. Defects fixed in this cycle
 
 ### 5.1–5.10 fixed, each with a regression case
 
 | # | Symptom | Root cause | Fix |
 |---|---|---|---|
 | 1 | `#pragma pack` state lost when a header came from the include cache | cache key did not cover/restore pack state | cache V9 + state replay; cold/hot two-pass `sizeof` case |
-| 2 | `__jump_table` entries pointed into `.text` NOP holes | labels in functions moved to custom sections were still resolved against `.text` | label sectioning via `pushsection_code_ranges` / `custom_func_move_ranges` (`asm_label_in_moved_section_function_resolves_to_target_section`) |
-| 3 | `objtool: weirdly overlapping alternative! 8 != 6` (`pvclock.o`) | nested `ALTERNATIVE_2`: the `.skip` measurement pass produced a stale coordinate (2 instead of 5) | `eval_asm_label_expr` prefers the current pass's coordinate; the measurement table is only a forward-reference fallback |
-| 4 | `.altinstr_replacement` contained only NOPs | whole functions (source filled with `0x90`) were resolved before executable `.pushsection` blocks | move executable `.pushsection` ranges first, then functions |
+| 2 | `__jump_table` entries pointed into `.text` NOP holes | labels in functions moved to custom sections were still resolved against `.text` | label sectioning via `pushsection_code_ranges` / `custom_func_move_ranges` |
+| 3 | `objtool: weirdly overlapping alternative! 8 != 6` (`pvclock.o`) | nested `ALTERNATIVE_2`: the `.skip` measurement pass produced a stale coordinate (2 instead of 5) | `eval_asm_label_expr` prefers the current pass's coordinate |
+| 4 | `.altinstr_replacement` contained only NOPs | whole functions were resolved before executable `.pushsection` blocks | move executable `.pushsection` ranges first, then functions |
 | 5 | `objtool: can't find jump dest instruction at .altinstr_aux+0x2c` | a function range and a nested `.altinstr_aux` range both contained the jump; first match won | pick the **innermost** containing range |
-| 6 | cross-section jumps inside moved blocks had no relocation | the symbol was the `.L` label, which is not in `.symtab` | emit `R_X86_64_PC32` against the target **section symbol**, `addend = offset - 4` (`cross_section_jump_out_of_exec_pushsection_carries_reloc`) |
+| 6 | cross-section jumps inside moved blocks had no relocation | the symbol was the `.L` label, which is not in `.symtab` | emit `R_X86_64_PC32` against the target **section symbol**, `addend = offset - 4` |
 | 7 | pushsection relocations landed in `.rela.init.text` at NOP-hole offsets | `emit_rel_relocations` used the same first-match rule | same innermost-range rule when migrating relocation offsets |
 | 8 | `testb $1, boot_cpu_data+N(%rip)` read the neighbouring capability byte | PC32 addend was `-4`, but the immediate follows `disp32`, so RIP is `P+5` | `addend = -4 - imm_size` (`-5` for `testb`, `-8` for `testl`) |
-| 9 | PVH boot died at `native_apic_mem_read`, APIC fixmap PTE `0xFFFFFFFF87DFF398` | a block-scope 8-byte struct initialised from a compound literal stored the **buffer address** as the value | `needs_compound_copy` in all three declaration paths (`struct_small_compound_init_in_block`) |
-| 10 | `complex-7.c` fails to compile with `E1128 frame budget exhausted` once the constant 512 B vector band is dropped | `sret_bytes_expr` never registered the 32-byte `_Complex long double` materialisation slots, and summed `Binop` subexpressions as a maximum while the emitter bumps without reclaiming | `complex_ld_slot` + operand/argument/leaf accounting; `Expr::Binop` sums both sides |
+| 9 | PVH boot died at `native_apic_mem_read`, APIC fixmap PTE `0xFFFFFFFF87DFF398` | a block-scope 8-byte struct initialised from a compound literal stored the **buffer address** as the value | `needs_compound_copy` in all three declaration paths |
+| 10 | `complex-7.c` fails to compile with `E1128 frame budget exhausted` once the constant 512 B vector band is dropped | `sret_bytes_expr` never registered the 32-byte `_Complex long double` slots and summed `Binop` subexpressions as a maximum | `complex_ld_slot` + operand/argument/leaf accounting; `Binop` sums both sides |
 
-### 5.11 New, **not yet fixed**: `"+m"` output bound to the `"=@ccz"` slot at `-O2`
+### 5.11 `"+m"` output bound to the `"=@ccz"` slot at `-O2`
 
 **Reproducer** (`scripts/kernel_cc_asm_repro.sh`, copied from
 `arch/x86/include/asm/rmwcc.h`'s `__GEN_RMWcc`, where the condition-code output is
@@ -189,62 +201,474 @@ static inline bool try_cmpxchg(int *v, int old, int new)
 }
 ```
 
-| | `-O0` | `-O2` |
-|---|---|---|
-| gcc | `fail=0 ok=1 v=3` | `fail=0 ok=1 v=3` |
-| dcc | `fail=0 ok=1 v=3` | **`fail=0 ok=0 v=5`** (rc 1) |
+| | `-O0` | `-O2` (before) | `-O2` (after) |
+|---|---|---|---|
+| gcc | `fail=0 ok=1 v=3` | `fail=0 ok=1 v=3` | `fail=0 ok=1 v=3` |
+| dcc | `fail=0 ok=1 v=3` | **`fail=0 ok=0 v=5`** (rc 1) | `fail=0 ok=1 v=3` (rc 0) |
 
-dcc `-O2` emits
+Both causes are in the `-O2` SSA round trip, not in the operand binder: `output_vars` was pushed
+only for outputs whose operand is an `Expr::Ident`, so it was misaligned with `outputs` and the
+`"=@ccz"` write variable moved onto the `"+m"(*v)` slot; and an asm output version was invisible
+to the version census behind constant propagation, which then deleted the store that produced the
+old value. `output_vars` is now a positionally aligned `Vec<Option<SsaVar>>` (rebuild through
+`local_splits::ast_name`) and counts as a write. Two outputs that resolve to the same storage are
+now a hard error (**E0321**) instead of silent codegen, except match-digit outputs (`"0"`/`"1"`).
 
-```
-lock cmpxchgl %rdx, -64(%r13)     # %[var] resolved to -64(%r13) …
-movzbl  -64(%r13), %eax           # … which is c's own frame slot
-```
-
-so the compare-and-swap targets the *condition code variable* instead of `*v`: `v` is
-never written and `c` is read back as whatever the swap left behind. Nothing warns —
-the operand map is simply wrong.
-
-This is exactly the shape inside `arch_atomic_try_cmpxchg()` / `xchg()` in
-`kernel/locking/qspinlock.o`, and it explains the boot failure end to end:
-`queued_spin_lock_slowpath()` gets a garbage `prev` from `xchg_tail()`, skips its
-`if (prev & _Q_TAIL_MASK)` guard, and stores through it
-(`mov %rax,(%rcx)`, `rcx = 0xf9de3ff183e9a89b`) → `#GP` → `#DF` → early panic. The
-generated `.s` of the kernel object shows the same missing write-back.
-
-Status: root-caused, fix not attempted in this cycle. The narrow defect is the operand
-binding of a named memory output when an invisible `@cc` output shares the same `asm`;
-the wider lesson is that a mis-bound operand is silent, so the binding path needs a
-fail-closed check (an output whose address slot collides with another output's slot must
-be an error, not codegen).
-
-### 5.12 New, **not yet fixed**: a fixed 300–400 B reserved frame per function
+### 5.12 Frame economy: 240 B of the 288 B unconditional floor is gone
 
 Same 120 objects (`kernel/`, `mm/`, `lib/`), prologue `sub rsp` per function:
 
-| compiler | most common prologue frames |
+| compiler / stage | most common prologue frames |
 |---|---|
 | gcc | `0x8`, `0x10`, `0x18`, `0x20`, `0x28`, `0x30` |
-| dcc | `0x140`, `0x150`, `0x160`, `0x170`, `0x180`, `0x190` |
+| dcc before | `0x140`, `0x150`, `0x160`, `0x170`, `0x180`, `0x190` |
+| dcc after | `0x20`, `0x60`, `0x30`, `0x50`, `0x70`, `0x90` |
 
-`queued_spin_lock_slowpath()` gets `sub rsp,0x920` (2 336 B) from dcc; gcc's version of
-the same function has **no** `sub rsp` at all. The frame is a sum of bands
-(`abi/layout.rs::LayoutMap::resolve`), and several of them are still reserved
-unconditionally: `FIXED_HDR` 48, `CX_FRAME_BAND` 48, `BF_RMW_RESERVE` 64,
-`stack_reserve` 128 — 288 B before the function holds anything.
+The modal non-trivial frame went from **320 B (`0x140`, 795 sites)** to **96 B (`0x60`, 815
+sites)**; `0x20` — what a leaf with no locals costs — is now the largest single bucket (1 452
+sites). What remains is the floor this cycle did not remove: `FIXED_HDR` 48 B + `temp_slots ≥ 2`
+16 B, i.e. a function with one int local closes at `0x50`–`0x60` where gcc sits at `0x8`–`0x50`.
 
-Two of the three historical offenders are already on demand: the 512 B vector band is
-reserved only when the scan finds a vector type (`vec_band_reserve(0) == 0`, which took a
-flat function from 912 B to 352 B), and the trampoline band is now
-`nested_count × 32` instead of a flat 256. The complex band, the bitfield-RMW band and
-the 128 B floor are still flat.
+`CX_FRAME_BAND` 48 B, `BF_RMW_RESERVE` 64 B and `stack_reserve` 128 B are all demand-driven now.
+That required laying the frame bottom out as a cursor of disjoint ranges
+(`BOTTOM_PAD → cx → va → sc → BOTTOM_PAD → vec → bf → trampoline`, pinned by
+`bottom_bands_own_disjoint_ranges`), after which six upstream accounting holes that the flat
+padding had been absorbing had to be fixed at their sources (VLA offset scratch, `Switch` sret
+slots, `Stmt::Label`/`Invoke`/`EhLandingPad`/`AsmGoto` charged 0, both arms of a branch summed
+instead of `max`, `tramp_top` missing `tramp_reserve`, `vec_temp_off`'s literal `+8`). It also
+fixed a live defect: the bitfield band was a fixed 64 B that fit two layers, while
+`bitfield_rmw_deep_nest.c` nests nine and had been writing 224 B past its own band.
 
-On a 16 KB kernel thread stack this is a live hazard even though it is **not** what
-crashed this boot (§4.3 measured 4.6 KB used at the fault): 288 B of unavoidable frame
-per level means the deepest early-boot chains have only ~55 frames of headroom, and any
-local array can push a caller past its own frame into the next. Fixing it is a
-layout-level change and needs a full-tree rebuild to prove, so it is recorded rather than
-attempted here.
+Frame size is not what holds user-space speed back: after this work Lua `fib(32)` best-of-3 is
+284 ms against gcc's 116 ms (≈2.45×, unchanged from the 2.4× in
+`docs/dcc-lua-sqlite-build-verify-report.md`). What this buys is kernel stack headroom.
+
+### 5.13 Optimization pipeline health check: what the `-O2` step actually buys
+
+**Wall time** (release dcc, 60 random `gcc.c-torture/execute` units, median of 3):
+
+| level | total |
+|---|---|
+| `-O0` | 984 ms |
+| `-O1` | 1 018 ms (**1.03×** `-O0`) |
+| `-O2` | 3 253 ms (3.3×) |
+
+**Hit rate at `-O2`** — compile with `DCC_OPT_SKIP=<pass>` and compare `.o` bytes:
+
+| pass | torture (natural) | opt fixtures |
+|---|---|---|
+| `run_ssa_passes` | 49/60 | 52/60 |
+| `ssa_regalloc` | 23/60 | 45/60 |
+| `cross_function_dce` | 7/60 | 17/60 |
+| `function_inline` | 6/60 | 16/60 |
+| `fold_constants` | 1/60 | 8/60 |
+| `prune_dead_stores` | 2/60 | 1/60 |
+| `ast_gvn`, `loop_opt`, `ipa_modref` | **0/60** | 4/60, 2/60, 0/60 |
+
+Twelve of nineteen named passes change **zero bytes** on 60 real units, yet each walks the whole
+AST. No single skipped pass moves the wall clock measurably (±1 ms/unit): the `-O0`→`-O2` gap is
+superadditive — ~17 full traversals per TU. Where the time goes instead: the allocator is the
+largest consumer (`malloc`/`_int_malloc`/`_int_free`/`unlink_chunk`/`malloc_consolidate`/`cfree`/
+`memmove` ≈ **27 %**) and `Expr`/`Stmt` clone+drop ≈ **11 %**; the hottest `dcc::` routine is
+`ast_gvn::walk_expr_addr_of` at 2.1 %.
+
+Conclusions, in order of measured payoff: (1) stop cloning the AST per pass and share one
+escape/alias fact set — that attacks the 27 % and the 11 % together; (2) gate the inert passes on
+a cheap precondition rather than delete them — `fold_constants`, `fold_constant_branches` and
+`eliminate_unreachable` are load-bearing for the kernel's compile-time-size traps even at 0–2/60
+here. The numbers are corpus-bound (60 small torture units) and re-derivable with
+`scripts/opt_pass_audit.sh`.
+
+### 5.14–5.41 boot-path defects, each fixed at the compiler
+
+Each row has a regression case in the dcc suite (fixture and case name are in the test sources).
+
+| # | Defect | Fix |
+|---|---|---|
+| 14 | static initialisation recognised only the `= { … }` spelling, not the compound-literal `= (T){ … }`: `DEFINE_SPINLOCK` became `.bss` + a runtime store of the buffer address into the lock word (`early_pfn_lock`), and a file-scope `(T){…}` silently emitted zeros | one `static_brace_list` predicate at all five static-init sites; aggregate runtime init goes through `gen_static_local_init`'s block copy |
+| 15 | `rvalue_is_buffer_addr` answered by size before shape, so ≤ 8 B compound literals and statement expressions were read as values instead of addresses | value model split into type axis / delivery axis; `assign_needs_whole_copy(ty, rhs)` is the only predicate |
+| 16 | `__attribute__((cleanup))` at function-body scope never ran, so `guard()` unlocked nothing | `emit_func_scope_cleanups` in the epilogue, return value preserved across the destructor call |
+| 17 | a folded `(u64)` literal lost its width in the SSA round trip (`put_dec_full8`: truncate to 32 bits, then shift by 32) | `bin_operand_tys` records both operand widths per instruction destination |
+| 18 | `__builtin_clzll`'s width came from the operand, not the name; `1UL << 34` asked for 1 TB (sparse usemap) | width from the builtin name; `call_arg_tys` records argument AST types |
+| 19 | descriptor-table register forms encoded without `mod=11` (`ltr %eax` → `ltr (%rax)`) | `0xC0` prefix on the register form; `0x66` for `str`/`sldt`; same fix for fsgsbase |
+| 20 | `cpuhp_hp_states + state` (incomplete array + enum subscript) added at 32 bits | address-shaped operands are 8 bytes wide; `Type::Enum` is integer in `infer_binop_type` |
+| 21 | `cmpxchg16b` encoded as `cmpxchg8b` (no REX.W) and its address scratch was overwritten by a pinned `%rbx` | pre-scan fixed-register constraints; `rex(true)` in both arms; `(%reg)` in the `-S` path |
+| 22 | `__int128` member initialisers stored nothing (`emit_store` only handles 1/2/4/8 B) | `store_i128_from_rax_rdx` for the array, vector and member arms |
+| 23 | `__aligned(1 << ENUM)` collapsed to 1 (alignment 256 → 8, `init_pwq` BUG) | enumerators are evaluated; "cannot evaluate" returns `None`, not the left operand |
+| 24 | an 8 B `guard(mutex)` object stored the materialisation slot's address, so the destructor unlocked the wrong address | all three declaration sites ask `assign_needs_whole_copy` |
+| 25 | a chained designator into a bitfield lost the bit offset (every IDT gate had `p = 0`) | `designator_bitfield` walks the whole chain; static and runtime paths share it |
+| 26 | frame slots were a monotone watermark: completed block scopes and inlined copies kept their slots (`perf_event_task_tick` 11 904 → 1 264 B) | scope-aware `ScopedVarAlloc` releases the watermark at block exit |
+| 27 | `"m"` asm operands carried a materialised value instead of an address; MMIO wrote into a frame slot | `constraint_prefers_memory`; `"m"` lowers to an address and rebuilds as `Deref` |
+| 28 | `op $imm, sym(%rip)` relocated off by the immediate size, and 8-bit ALU used the 32-bit form | `push_rip_data_rel(…, tail)`; `0x80 /digit` for 8-bit |
+| 29 | the zero-init of the frame wiped the over-aligned frame anchor, so the epilogue restored `rsp = 0` | emit the anchor after the zero init |
+| 30 | `_Bool` conversion truncated to 8 bits (`0x200` → false), breaking `irqd_is_activated` | `emit_normalize_bool` + `emit_xmm0_to_bool`, and the same rule in constant folding |
+| 31 | `++`/`--` zero-extended the stack slot and then added 64 bits (`-1` → `0xffffffff`) | read through `mov_from_stack` (declared width and signedness) |
+| 32 | `call *%[paravirt_opptr]` lost GAS's 6-byte `ff 15 disp32` shape; the byte-matching alternative rejected it | `asm_static_sym_addr` → `SymDisp`; REX only when a register needs it |
+| 33 | `security_hook_list` elements were 64 B apart while the consumer used 24 B (array-member address initialiser fell into a zero-length fallback) | `Member{ty: Array}` evaluates to `ConstValue::Addr`; fallbacks use the target slot width |
+| 34 | compound-literal array elements were flattened by brace elision (`static_calls_table` mis-placed) | `is_braced_init` (`InitList \| CompoundLit`) at every "has braces" site |
+| 35 | an 8 B aggregate statement expression was stored by slot address into a member (`nodemask_of_node`) | member and element initialisers ask `assign_needs_whole_copy` |
+| 36 | a `for`-init cleanup scope closed inside the init clause, so `scoped_guard` destructed before the loop held the lock | `Stmt::For` closes the cleanup scope at the loop exit |
+| 37 | a GNU range designator over an aggregate wrote zeros, so every `hlist_nulls` sentinel became `NULL` | range elements go through `encode_array_elem`; `[f ... l].field` is expanded first |
+| 38 | `PreservedDecl` initialisers read homes by base name while SSA liveness only saw instruction uses; two parameters shared a register | liveness expands base-name readers to every version of that base |
+| 39 | a speculatively inlined 672 B local pushed `do_one_initcall`'s frame to 1 792 B; four frame-economy defects surfaced while measuring it | inline gate on the largest local (256 B), direct binding of read-only parameters, dead-declaration pruning, fix of the double-counted variable band, static `"m"` printed as `sym(%rip)` |
+| 40 | x87 inline asm had no RIP-relative form, no REX.B on memory operands, and one ESC table per mnemonic family (`fpu/bugs.c` did not build) | encoder rewritten from GAS's table, operand-kind and size aware |
+| 41 | §5.39's "a read-only parameter may bind straight to the caller's lvalue" did not look at `asm`: `__ffs(word)`'s `"=r"(word)` output wrote through to the caller's `start`, so `__free_pages_memory` (mm/memblock.c) re-freed the same page forever and the boot hung right after `mem auto-init` | the direct-bind gate also asks `asm_written_roots_of` — asm/asm-goto outputs and memory-constrained inputs; the expression-inline path refuses the same shapes through `needs_slot` |
+
+### 5.42 Callee-saved save area is demand-driven: `hdr = 16 + 8·cs + 8·temps`
+
+The frame header used to reserve four callee-saved slots (`rbx`, `r12`, `r14`, `r15`) plus
+8 B for every function, `hdr = 48 + 8·temps`. All four save/restore pairs were emitted
+unconditionally and the unused ones were later overwritten with `nop`, so the *frame* paid
+32 B even in the typical kernel function — the trace that motivated this had 119 frames
+holding 1.11 pool registers on average.
+
+Two things had to be settled before the header could shrink:
+
+* **There was no 8 B hole.** The old `48` is `16 + 4·8`, and `16` is the canary cell plus the
+  variable area's first slot (an object's top slot sits at `-hdr`, so the header's last two
+  `8`s are two different things). The general form is `16 + 8·cs + 8·temps`; at `cs = 4` it is
+  byte-identical to the old arithmetic, which is what
+  `resolve_reproduces_the_legacy_offsets_bit_for_bit` pins. Nothing is reclaimed by
+  re-deriving offsets — every byte saved comes from not saving registers the function does not
+  use.
+* **The count has to be static.** Prologue `sub`, the variable-area top and every temp-slot
+  coordinate are emitted before the body is generated, so "count after the fact" is not
+  available. `Codegen::compute_callee_plan` fixes the bitmap up front from (1) the final home
+  table (file-scope `register asm`, parameter homes, backend-chosen homes), (2) every local
+  declaration in the body — the allocator's `home` and the user's `register_name`, collected
+  recursively — and (3) *any* `asm`: if the function contains inline assembly all four pool
+  registers are planned, because `q`/`Q`/`r` operands plus a clobber list can consume the whole
+  pool at emission time and the alternative failure is `E0311`/a clobbered caller.
+
+`RegBank::set_plan_mask` makes the bitmap authoritative at emission: `alloc_temp`,
+`alloc_temp_except`, `alloc_temp_named`, `is_free` and the asm scratch pool all skip registers
+outside it, and `claim()` records `plan_violation` when a home reaches an unplanned pool
+register. `patch_callee_saves` turns that into a hard `E1137` instead of silently nop'ing a
+save whose slot does not exist (frame size and variable top are already emitted by then, so
+growing the plan at that point is not possible).
+
+Measured by rebuilding two scheduler TUs with the exact `.cmd` line kbuild used
+(`scripts/frame_cs_plan_ab.sh <build-tree> kernel/sched/fair.o …`; frame = prologue pushes × 8
++ the first `sub rsp`). The control is the **same binary** with `DCC_CS_PLAN_ALL=1`, which
+`compute_callee_plan` answers with the pre-change `0x0F`; because `cs = 4` reproduces the old
+`48 + 8·temps` byte for byte, this is a clean A/B and not a comparison of two binaries:
+
+| object | frames, 4-slot plan | on-demand | delta | improved / worse | p50 |
+|---|---|---|---|---|---|
+| `kernel/sched/fair.o` (229) | 40 520 B | 36 264 B | −4 256 B (−10.5 %) | 139 / 0 | 136 → 120 B |
+| `kernel/sched/build_policy.o` (346) | 62 016 B | 56 496 B | −5 520 B (−8.9 %) | 182 / 0 | 136 → 120 B |
+
+p75 on `fair.o` moves 200 → 184 B; on `build_policy.o` it stays at 232 B (the big functions
+are the ones that really hold four registers). The gain is smaller than `(4 − cs)·8` per
+function would suggest because 16-byte alignment swallows part of it, and it is concentrated
+in functions that hold none or one pool register: the scheduler's hot frames are unchanged
+(`pick_next_task_fair` 408 B, `task_tick_fair` 408 B, `dequeue_entity` 424 B,
+`enqueue_task_fair` 456 B — plan `0x0F`, they do keep all four).
+
+Defect this change exposed (fixed here, case in the suite): `collect_stmt_decls` never walked
+`Stmt::For`'s `init` clause, where the parser stores the declaration of `for (int i = …)` (a
+synthesized block). A loop variable homed in `r12` was therefore outside the plan and the new
+fail-closed check fired `E1137` on six `cold_outline_*` fixtures and
+`computed_goto_in_main_survives_the_builtin_linker_path` — i.e. the check found a real home
+that the plan was missing, not a spurious one.
+
+### 5.43 Three full-suite regressions the frame work surfaced
+
+| # | Defect | Fix |
+|---|---|---|
+| 42 | `-O2` dropped `asm("nop")`: `InstKind::InlineAsm { volatile }` copied the AST flag, while both `inst_is_side_effecting` and `inst_has_side_effect` delete an asm that is neither `volatile` nor has outputs. GCC's rule is that an asm with no outputs is implicitly volatile | the IR flag is `*volatile \|\| outputs.is_empty()`; the AST field stays untouched because it separately controls the `mfence` sequence at emission |
+| 43 | the `-S` text for a spilled left operand read `mov %rax, %-16(%r13)` (a stray `%` before the displacement), so GAS rejected it while the byte path was correct | the gas string is `format!("mov {}, {}", …)`; text and bytes come from the same site |
+| 44 | `__kasan_rz_<var>_<j>` was placed at `off − slots·8 − 8j` while `off` is already the object's lowest slot, so for a multi-slot local the last redzone landed on the *next* variable (`struct S s; char b[8]` → `__kasan_rz_s_3` and `b` both at −120). The poison emitter's live-range check hid it, which is why it only showed up as a test that passed for the wrong reason | redzone j sits at `off − 8 − 8j`; the live-range guard stays as defence in depth. The case's `b[7] != 0` assertion was reading uninitialized stack (x86-64 does not zero frames; after the layout change that byte was `0xff`), so `b` is now initialized explicitly — the assertion still proves `memset(p+5,'z',2)` writes exactly two bytes |
+
+### 5.44 Address-scratch pool exhaustion: borrow a live register instead of reusing `%r12`
+
+`alloc_asm_mem_scratch` hands out one of four callee-saved registers (`rbx`, `r12`,
+`r14`, `r15`) as the base of an inline-asm memory operand; the template expands the
+operand as `(%reg)`, so the register must hold the address for the whole asm. When all
+four were already holding live values the old fallback was `return 12`: `%r12` was
+handed out **without saving it**, and the binding step overwrote whatever lived there.
+
+kbuild22 died on exactly that (row in §4.3). `block/blk-mq.o::__blk_mq_alloc_disk`
+ended in `… lock bts %rcx,(%r12); … mov %r12,%rax` — the function returned
+`disk + 0x160`, because `r12` had been loaded with `disk + 0x160` for the
+`set_bit(GD_OWNS_QUEUE, &disk->state)` operand. The gdb session on the stub pinned the
+two sides of the mismatch: `__alloc_disk_node` stored the queue at
+`disk=0xffff888000b96400 +0x50`, while `add_disk_fwnode` was entered with
+`disk=0xffff888000b96560` (exactly +0x160) and `queue=(nil)`; reading
+`disk->queue->mq_ops` then faults at address `0x10`. The chain is
+`loop_init → loop_add → device_add_disk → add_disk_fwnode+0x6c`.
+
+A temporary instrumented build printed the allocator state at that asm:
+`alloc=0b1111 used=0b1111 plan=0b1111 owned=[3,4,8,12,14,15] banned=[] clob={}` —
+the whole pool was allocated, nothing could be handed out, and the `12` fallback was
+taken. The defect is pre-existing (the `return 12` predates the frame work), but it is
+only reachable when a function keeps four pool registers live *and* contains a memory
+operand, which is why it took a kbuild-scale corpus to surface.
+
+The fix keeps one invariant: an operand address is never silently relocated.
+
+* the first pass is unchanged — a free pool register via `alloc_temp_named` returns
+  `(reg, borrowed = false)`;
+* if every candidate is taken, one that is `is_allocated && !is_banned` is **borrowed**:
+  `sub rsp,8; push reg` before the asm (`16 B` total, so the call-site alignment
+  invariant is untouched), and `release_asm_mem_scratch` pops borrowed registers in
+  reverse order before freeing the ordinary ones;
+* if no register is borrowable (all excluded by clobbers/fixed constraints) the
+  statement is rejected with `E0311` instead of emitting a wrong operand;
+* `asm goto` cannot use a borrowed register — its jump-out path skips the `pop`, which
+  would both lose the value and shift `%rsp` permanently — so borrowed registers join
+  the unguardable set (`E0317`), same criterion as a clobbered live register.
+
+Rebuilding the same TU with the fixed compiler gives
+`sub $0x8,%rsp; push %rbx; mov -0x68(%r13),%rbx; … lock bts %rcx,(%rbx); pop %rbx;
+add $0x8,%rsp; mov %r12,%rax`: `%r12` keeps `disk`, `%rbx` (which held a spilled value)
+is saved and restored, and the return value is `disk` again.
+
+Regression cases: `asm_mem_scratch_borrows_when_pool_exhausted` — four file-scope
+`register asm` globals keep the pool busy, so the `-O2` object must contain the
+`sub $0x8,%rsp; push %rX; … lock incq (%rX); pop %rX; add $0x8,%rsp` shape, and all
+four `-O` levels must match gcc at runtime; `asm_mem_scratch_pool_exhaustion_fails_closed`
+— the same busy pool plus all four registers in the clobber list must die with `E0311`
+and produce no object.
+
+### 5.45 A braced string literal neither sized nor filled a character array
+
+`static char core_modes[] = { "file\npipe" "\nsocket" };` (`fs/coredump.c`) is
+C11 6.7.9p14 with the optional braces. Two separate places ignored the braces:
+
+* dimension inference (`ast::deduce_incomplete_array_dim`) recognised a bare
+  `Expr::String` initializer but not `InitList[String]`, so the array fell through to
+  "one initializer item = one element" and was sized **1 byte**;
+* the data emitter's array arm (`gen_global_init_list`) handed the string to
+  `encode_array_elem`, which recognises a whole-row string only when the *element* is
+  a character array (the 2D-array case). For a scalar `char` element the string
+  degraded to its first byte.
+
+Reproduced in four lines: `static char a[] = { "hello" };` produced an object symbol
+`a` of size 1, `sizeof(a) == 1`, and data bytes `68 00 00 00 00 00`. In the kernel this
+shows up twice — `sizeof(core_modes) - 1` becomes 0, so `register_sysctl_sz` rejects
+the whole table (`sysctl table check failed: kernel/core_modes No maxlen`, kbuild22
+log), and the 17-byte initializer is written into a 1-byte object, stomping whichever
+static the linker placed after it.
+
+Fix: both sites treat a one-item braced string as the string rule — dimension =
+`data.len()` (divided by the element width for wide strings), data = the full bytes
+spanning consecutive elements. Pointers (`char *p[] = { "x" }`) keep the one-item
+rule. Regression case `braced_string_literal_array_dim` covers file-scope, `const`,
+function-local `static`, a declared-larger buffer, a `.maxlen` table shaped like the
+kernel's, and all four `-O` levels against gcc.
+
+### 5.46 An array compound literal on a pointer target was stored by value, not by address
+
+`drivers/ata/libata-eh.c` builds its timeout table with
+
+```c
+#define CMDS(cmds...) (const u8 []){ cmds, 0 }
+static const struct ata_eh_cmd_timeout_ent
+ata_eh_cmd_timeout_table[ATA_EH_CMD_TIMEOUT_TABLE_SIZE] = {
+	{ .commands = CMDS(ATA_CMD_ID_ATA, ATA_CMD_ID_ATAPI), .timeouts = … },
+	…
+};
+```
+
+C11 6.3.2.1p3: the compound literal has array type, so the initializer is its
+**address** (array-to-pointer conversion). dcc's struct-field arm of
+`gen_global_init_list` matched every `InitList`/`CompoundLit` value and recursed as if it
+were a nested initializer list, so the array's *contents* were written into the 8-byte
+pointer slot — with **no relocation at all**. In the kbuild23 tree the object showed:
+
+```
+.data  0050 eca10000 00000000  00000000 00000000   ← .commands = 0xa1ec
+       0060 2f470000 00000000  …                  ← .commands = 0x472f
+.rodata (no CMDS arrays: nothing referenced them)
+```
+
+`0xa1ec` is literally `{0xec, 0xa1}` read as a little-endian integer, and the fast path is
+the first boot-time caller: kbuild23's `--boot` died with
+`BUG: unable to handle page fault for address: 000000000000a1ec`,
+`RIP: ata_lookup_timeout_table+0x62`, `RAX=0xa1ec`, `Comm: scsi_eh_1` right after the
+libata probe — exactly the `mov (%rax),%rax; movzbl (%rax)` in its Code dump, i.e. the
+first dereference of the `commands` pointer. (The `timeouts` field was correct because
+it names an array object, and name references already went through the relocation path.)
+
+Fix, one predicate and three call-site guards:
+
+* `Codegen::ptr_decay_literal(target, value)` is true only for a **pointer target** and an
+  `InitList`/`CompoundLit` whose own type is an **array** (`Expr::ty()`); struct/union
+  literals do not decay (`struct S *p = (struct S){…}` is a constraint violation — gcc:
+  "incompatible types" — the address must be written `&(struct S){…}`).
+* `Codegen::ptr_decay_init` materialises the anonymous array through the existing
+  `materialize_compound_literal_rel` path (`.rodata` + `.L.compound.N` local symbol) and
+  emits one `R_X86_64_64` at the pointer slot, routing `.rodata`-internal slots through
+  `push_data_symbol_rel`; ET_EXEC keeps the absolute-address form.
+* `eval_const_expr` asks it first (so every caller that reaches the constant evaluator is
+  covered), and the three sites that unwrap a brace list *before* the evaluator —
+  `gen_global_init_list`'s struct-field and array-element arms, `eval_global_init`, the two
+  custom-section arms and the regular `.data` arm in `compile_rel`, plus
+  `register_static_global` — now skip the nested-list recursion when the target is a
+  pointer.
+
+The rebuilt object now carries what gcc emits:
+
+```
+.data  0050 R_X86_64_64  .L.compound.0      .data  0058 R_X86_64_64  ata_eh_identify_timeouts
+.rodata 0000 eca100 2f4700 f82700 f93700 ef00 9100 e7ea00 4000
+```
+
+Regression case `ptr_decay_of_array_compound_literal_emits_relocation`
+(`tests/fixtures/c/ptr_decay_compound_array.c`) reproduces the kernel's `CMDS()` shape as a
+struct field, a top-level pointer and a pointer-array element, runs the four `-O` levels
+against gcc, and additionally asserts `objdump -r` shows at least four `.L.compound.*`
+relocations in `.data` — a run-only test can pass by luck when the raw bytes happen to be
+small, but the missing relocation is the defect.
+
+### 5.47 An assignment used as a subscript scaled the lvalue's address, not the assigned value
+
+`sound/core/seq/seq_clientmgr.c` (the second Oops of the kbuild23 run, right after §5.46):
+
+```c
+clienttab[client->number = c] = client;
+```
+
+C11 6.5.16p3: the value of an assignment expression is the stored value converted to the
+lvalue type. The subscript consumer asks for the index in `%rcx` (`gen_expr(idx, 1)`), but
+the memory-lvalue arms of `Expr::Assign` computed the RHS into `%rax`, stored it through the
+address in `%rcx`, and left the value in `%rax` — only the Deref arm had a `dst == 1`
+workaround (added earlier for shift counts). The index path then scaled `%rcx`, i.e. the
+lvalue **address**:
+
+```
+mov %rax,%rcx        ; rcx = &client->number
+movslq %esi,%rax     ; c
+mov %eax,(%rcx)      ; store
+imul $0x8,%rcx,%rcx  ; scales &client->number, not c
+```
+
+kbuild23 hit it at `seq_create_client1+0x78f` as `general protection fault … non-canonical
+address 0xfffc43ff90eab168`; the minimal repro `g[s->n = c] = 42` segfaults at `-O0`/`-O1`
+(at `-O2` the value happened to stay live in a temporary, which is why only the kernel —
+whose SSA lowering kept the shape — exposed it in the field).
+
+Fix: `Codegen::deliver_scalar_assign_value(dst, l_ty)` — when the caller asked for a
+specific register, `mov dst, rax` after the store (the value was already reduced to the
+lvalue type by `convert_assign_rhs_in_reg(0, …)` before the store). It is called from every
+scalar memory-lvalue arm: Index (semantic materialise, Ident fallback, general fallback),
+Deref (replacing the `dst == 1` special case), Member non-bitfield, and the generic
+Cast-lvalue fallback. Bitfields already delivered through `%rdx`.
+
+Writing the regression case surfaced a **second, independent** defect:
+`g[(s.n = 4) + 1] = 500;` stored `g[5]` but never assigned `s.n`. `compute_index_offset`
+(`semantics.rs`) folded the subscript with `const_eval::eval`, whose `Expr::Assign` arm
+deliberately returns the RHS value and leaves the store "to runtime"; the constant then
+**replaced** the whole subscript expression. The fold is now gated by the same predicate
+the optimiser uses before replacing an expression
+(`discarded_value_needs_code && !dropping_value_is_safe`), so only structurally
+side-effect-free subscripts become `ByteOffset::Constant`.
+
+Regression case `assign_expression_as_index_delivers_value_and_keeps_side_effect`
+(`tests/fixtures/c/assign_as_index_value.c`): `p->f`, `s.f`, `a[i]` and `*p` as subscripts,
+the kernel's pointer-array shape, assignment-value reduction (`uchar = 300 → 44`), a nested
+`(s.n = 4) + 1` subscript and a shift count, all four `-O` levels against gcc.
+
+### 5.48 A statement expression did not open a scope, so a shadowing `_Bool` re-typed a pointer
+
+`this_cpu_xchg` expands to `__pcpu_size_call_return2`, which declares its result as
+`TYPEOF_UNQUAL(variable) pscr2_ret__` and then runs `do { … } while (!({ … }))`, where the
+condition is a second statement expression declaring `bool pscr2_ret__` (`__this_cpu_try_cmpxchg`).
+`TYPEOF_UNQUAL` resolves to `__typeof__` in this configuration — the compiler reports
+`__clang_major__ 18`, so `CC_HAS_TYPEOF_UNQUAL` is 0 and the macro takes the `__typeof__` branch
+(preprocessed evidence: `kernel/fork.i:110487`) — so the outer temporary is a pointer, the inner
+one a `_Bool`, and they share a name.
+
+`parser.rs` parsed `({` as `(` followed by a block **without pushing a scope**, so the inner
+declaration landed in the scope that already held the outer one. `rename_shadow_var` renames only
+when `exists_in_outer_scopes(name)` says so, which cannot see an object declared in the *same*
+scope, so no rename happened. The backend's `var_map` is keyed by name alone and `register_var`
+keeps the slot while overwriting the type, so `_Bool` won: every store to the outer pointer ran
+through the `_Bool` normalisation (`test`/`setne`/`movzbq`) and the value collapsed to 0/1.
+
+In the field, `alloc_thread_stack_node_from_cache`'s `if (vm_area) return vm_area;` returned `1`
+instead of the pointer and `alloc_thread_stack_node` dereferenced it: `CR2=0x2d` (`1 + 0x2c`).
+
+Fix: the statement-expression block is parsed between `push_scope()` and `pop_scope()`. The
+26-line shape of the same expansion returned `1` instead of `0x1234` on the unfixed compiler.
+Regression case `statement_expression_has_its_own_scope` (`-O0`…`-O3`).
+
+### 5.49 Expression-level inlining leaked the argument type into the parameter
+
+`substitute_call` (`opt.rs`) clones each argument into the callee body by name; the parameter
+declaration is gone by then, so the clone keeps the **caller's** type. For
+
+```c
+static inline struct request *blk_mq_rq_from_pdu(void *pdu)
+{ return pdu - sizeof(struct request); }
+static inline struct request *scsi_cmd_to_rq(struct scsi_cmnd *cmd)
+{ return blk_mq_rq_from_pdu(cmd); }
+```
+
+`pdu - 0xf8` was scaled by `sizeof(struct scsi_cmnd)` (0x128) instead of by 1, i.e.
+`cmd + 0xfffffffffffee140`. `__ata_scsi_queuecmd` then read `rq->tag` through that address,
+`__ata_qc_from_tag()` returned NULL, and `qc->tag = qc->hw_tag = tag` wrote `0x5c` — the kbuild24
+Oops (`CR2=0x5c`).
+
+Fix: every argument is converted to the declared parameter type (C11 6.5.2.2p7) before
+substitution. Statement-level inlining was already correct: it materialises a temp with `p.ty`.
+Regression case `inline_param_uses_declared_param_type` (`-O0`…`-O3`): `p - 1` and `p + 1` on a
+`void *` parameter called with `struct big *` (sizeof 0x40), plus the pointer difference.
+
+### 5.50 The inlined result kept the body's type, not the declared return type
+
+Second half of the same site. `scsi_cmd_to_rq()` is declared to return `struct request *` and its
+body returns a `void *` expression. Substituting the body made the call expression `void *`, so
+`scsi_cmd_to_rq(cmd)->tag` had no member table to resolve against and the field was emitted at
+offset 0 — `list_head.next` read as the tag. `__ata_qc_from_tag()` indexed `ap->qcmd[]` with that
+value and returned NULL, and the same `qc->tag = qc->hw_tag = tag` wrote `0x5c` again (this is
+how the image carrying §5.48–§5.49 faulted).
+
+Layout was ruled out with a probe compiled from libata-scsi's own `.cmd` line: `sizeof(struct
+request)` 0xf8, `sizeof(struct scsi_cmnd)` 0x128 and `offsetof(struct request, tag)` 0x20 are
+identical under dcc and gcc.
+
+Fix: the substituted return expression is converted to the function's declared return type
+(C11 6.8.6.4p3). Regression case `inline_result_uses_declared_return_type` (`-O0`…`-O3`), whose
+non-inlined control is a `noinline` function of the same shape.
+
+### 5.51 A bitfield initialiser list still rewrote through `-24`/`-32`/`-40(%r13)`
+
+The second defect the §5.42 header change exposed, found by the pre-commit torture gate
+(seven `execute/` failures, all `-O0`-only: `bf64-1.c`, `bitfld-5.c`, `pr110166-1.c`,
+`pr39339.c`, `pr78170.c`, `pr98366.c`, `20040307-1.c`). `aggregate.rs::gen_init_list_at`'s
+bitfield arm computes container address / old container / new value in three stack slots and
+they were written as literals `-24`, `-32`, `-40`.
+
+Those three cells are the callee-saved save area (`cs` slot *j* sits at `-(16+8·j)`, so
+`j = 1,2,3`). Before §5.42 all four slots were reserved unconditionally, so the path was
+harmless only when the function never actually held a pool register — the save/restore pair
+was `nop`-patched and the slot nobody read back. With `hdr = 16 + 8·cs + 8·temps` a function
+that holds no pool register has a 32 B header, so the same literals land **inside the
+variable area**: in `struct tmp a = {0x123, 0xFFF000FFF000F}` the value slot `-0x28` is the
+next struct local `b` and the address/container slots `-0x18`/`-0x20` are `a` itself. Two
+structs initialised in one function overwrote each other; the probe printed
+`raw a=1230000000000123 b=1230000000000123` where gcc prints
+`raw a=fff000fff000f123 b=123fff000fff000f` (each struct ending up with the *other* member's
+value in both fields).
+
+Fix: the three slots are the bitfield RMW band's layer geometry
+(`frame_layout.bf_rmw_slot(depth, 0/1/2)`, 3×8 B per 32 B layer, slot 0 = address,
+1 = container, 2 = new value, as in `increment.rs`), and the depth counter is incremented
+around the value expression so a nested RMW inside it takes the next layer. That makes the
+reservation mandatory, so the static scan learns the site: `bf_rmw_chain_depth` treats a
+`CompoundLit` whose type contains a bitfield as a site, and `bf_rmw_depth_item` does the same
+for a `Decl::Var` whose initialiser is an `InitList` and whose **declared** type contains one
+(the literal `InitList` carries the placeholder `Type::Int` from `parser.rs`, so the question
+has to be asked of the declaration). `type_contains_bitfield` recurses through nested
+aggregates and array element types, and answers "yes" for an unresolved `Type::Named` —
+over-reserving costs 32 B, under-reserving writes out of the band.
+
+Regression case `bitfield_init_list_uses_rmw_band`
+(`tests/fixtures/c/bitfield_init_list_slots.c`) checks both container words and both read
+paths at `-O0`/`-O2`; `scripts/torture_test.sh all` is back to **0 failures**
+(3 707 pass, 6 skip).
 
 ## 6. Reproduce
 
@@ -272,17 +696,17 @@ KERNEL_TREE=$TREE BUILD=$BUILD DCC_BIN=$DCC \
 bash scripts/kernel_scan_jump_table.sh "$BUILD/vmlinux"   # expect: ok=5053 bad_nop=0
 readelf -SW "$BUILD/vmlinux" | grep -E 'altinstr|jump_table'
 
-# 5. boot — currently expected to FAIL at ~0.15 s (§4.3, §5.11)
+# 5. boot — the judge is "Run /init as init process" on the serial console
 KERNEL_TREE=$TREE BUILD=$BUILD bash scripts/kernel_pvh_verify.sh --boot
 
 # 6. the §5.11 reproducer as a check (gcc here is a comparison baseline, not a build tool)
 bash scripts/kernel_cc_asm_repro.sh
 #   gcc -O2 : fail=0 ok=1 v=3 rc=0
-#   dcc -O2 : fail=0 ok=0 v=5 rc=1        → RESULT: FAIL until §5.11 is fixed
+#   dcc -O2 : fail=0 ok=1 v=3 rc=0   → 退出码 0 = 缺陷已修；非 0 就是 §5.11 回来了
 
 # 7. the frame histogram of §5.12 (same 120 objects, prologue `sub rsp` only)
-bash scripts/kernel_frame_hist.sh /root/pvh-lmc      # 0x140…0x1b0 dominate
-bash scripts/kernel_frame_hist.sh /root/pvh-gcc-ref  # 0x8…0x50 dominate
+bash scripts/kernel_frame_hist.sh /root/pvh-lmc2    # 0x20 / 0x60 dominate (was 0x140…0x1b0)
+bash scripts/kernel_frame_hist.sh /root/pvh-gcc-ref # 0x8…0x50 dominate
 
 # 8. regression gates
 cd /root/dcc
@@ -290,21 +714,56 @@ cargo test --release --no-fail-fast -- --test-threads=2   # 1 known C++ EH failu
 JOBS=4 bash scripts/torture_test.sh all                   # expect: fail=0
 ```
 
+Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` and
+`scripts/frame_band_probe.sh` document theirs in their script headers.
+
 ## 7. What is not verified / known gaps
 
-* **Boot to userspace is not achieved** by a dcc-only kernel (§4.3). Until §5.11 is
-  fixed, no dcc-built `vmlinux` in this configuration can reach `/init`.
-* **`bzImage` / 16-bit C**: `arch/x86/boot/**` and `realmode/rm/{wakemain,video-mode}.c`
-  are 16-bit C and need a backend dcc does not have (`E0319` + `DCC-GAP`, asserted in
-  §4.4). The PVH route bypasses them; the remaining 16-bit material is assembly and is
-  byte-identical to gcc.
+* **Boot to user space is not yet proven.** A dcc-built image now gets through the whole boot
+  path and hands off (`Run /init as init process`, §4.3), but `/init` — a `#!/bin/sh` script on
+  the initramfs — fails to exec with `-7` (`-E2BIG`), and it still does after `fs/exec.o`,
+  `fs/binfmt_script.o` and `fs/binfmt_elf.o` were rebuilt from the current compiler. The return
+  comes from inside the exec path, not from the boot-path code the earlier rounds fixed; that
+  is the next stop point.
+* **`cleanup` destructors on the return path are emitted only for integer/`Memory` delivery**
+  (§5.16): a function returning `Sse`/`SseUp`/`X87` (`float`/`double`, `__m128`, `long double`,
+  complex) still skips function-body cleanups, because preserving `xmm0`/`st(0)` across the
+  destructor `call` has no cheap form here and destroying a return value is the worse failure.
+  Not on the kernel boot path, but a real gap.
+* **Aggregate delivery has two documented exceptions** (§5.15): (a) `Expr::Cond` over a ≤ 8 B
+  struct still delivers a register value, because `gen_expr_cond`'s materialisation gate says so
+  (`cond_materializes_aggregate` is the single place both sides read), and (b) scalar-shaped
+  types that SysV nevertheless classifies as aggregates (`__int128`, `_Complex`) are outside
+  `is_aggregate_shape`, so the two argument sites in `abi/call.rs` keep an explicit
+  `CompoundLit` arm for them.
+* **`bzImage` / 16-bit C**: `arch/x86/boot/**` and `realmode/rm/{wakemain,video-mode}.c` are
+  16-bit C and need a backend dcc does not have (`E0319` + `DCC-GAP`, asserted in §4.4). The PVH
+  route bypasses them; the remaining 16-bit material is assembly and is byte-identical to gcc.
 * **`COMPAT` / `vdso32`**: `-m32` C, switched off in this configuration.
 * **Modules**: this `localmodconfig` resolves to 1 module and `make vmlinux` does not run
   `modpost` or module linking.
-* **C++**: `cpp_abi_eh_group` (six zero-cost-EH fixtures) still dies with a signal; it
-  predates this cycle (§4.5) and is not on the kernel path.
-* **Frame economy**: §5.12 is measured, not fixed; the 300–400 B floor plus the flat
-  complex/bitfield bands are known to remain.
-* **Silent mis-binding is unguarded**: §5.11 shows an operand binding can be wrong with
-  no diagnostic. A fail-closed check on output-slot collisions is the follow-up that would
-  turn this class of bug into a compile error.
+* **C++**: `cpp_abi_eh_group` (six zero-cost-EH fixtures) still dies with a signal; it predates
+  this cycle (§4.5) and is not on the kernel path.
+* **Frame economy is not finished** (§5.12, §5.42): what is left of the floor is 16 B (the
+  canary cell plus the variable area's first slot) + `temp_slots·8`; the callee-saved area is
+  `popcount(plan)·8` now, and `FIXED_HDR = 48` survives only as the placeholder of an
+  unresolved layout map. The `temp_slots ≥ 2` floor (16 B) still closes every frame at 32 B
+  before the first local, where gcc often uses none.
+* **Pre-existing debug-only defects, not fixed here** (they reproduce identically on a pristine
+  `HEAD`, and wrap silently in the release build, which is why the release-profile cases do not
+  see them): unsigned underflow in the brace-elision remaining-bytes computation
+  (`gcc.c-torture/execute/20030305-1.c` — this one also mis-compiles under release and is fixed
+  here with `saturating_*`), `container_bits - bit_o - bw` underflowing to a ≥ 64 shift in the
+  `reverse_sso` bitfield store (`bitfield-1.c`, `bitfield-endian-1/2.c`), shift-count overflow in
+  SCCP's `eval_binop` (`920702-1.c`, `dic.c`, `pr103314-1.c`, `pr105247.c`, `pr111059-*.c`),
+  plus `mipscop-1..4` (E0316), `920521-1` (E0311), `asmgoto-5` (E0318/E1135) and `20090907-1`
+  (E1136). None is on the kernel path; each deserves its own reduction.
+* **Silent mis-binding is guarded, but only for the statically decidable shape**: E0321 compares
+  a memory operand's resolved address against another output's write destination. Two outputs
+  whose address is parked in a callee-saved register (`"=r"(a[i])`) can still alias at run time.
+* **Pipeline audit is corpus-bound** (§5.13): the 0-hit rates are measured on 60 small torture
+  units; kernel-sized TUs with IPA-shaped calls will move `ipa_modref` and `cross_*_dce`.
+* **Full `cargo test` and `scripts/torture_test.sh all` have not been re-run on the final
+  compiler.** Their last full records are 2026-11-07 (§4.5); the §5.19–§5.50 fixes are covered by
+  their own integration cases, and the lib suite plus the new cases were re-run green on this
+  compiler, but one complete pass (`cargo test --release`, `torture_test.sh all`) is still owed.

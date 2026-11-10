@@ -259,6 +259,17 @@ const CASES: &[ErrorCase] = &[
         extra_args: &[],
         fixture_ext: "c",
     },
+    // §5.11 那一族静默错绑的 fail-closed 闸门：同一条 asm 的两个输出不得落到
+    // 同一块存储（不走 E0311 的「编不出来」透传通道，那里会附一个 `--asm-fallback=gas`
+    // 的提示，而错的是绑定不是编码器）。
+    ErrorCase {
+        name: "e0321_asm_output_conflict",
+        code: "E0321",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
     ErrorCase {
         name: "e1001",
         code: "E1001",

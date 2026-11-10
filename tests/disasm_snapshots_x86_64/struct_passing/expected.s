@@ -1,7 +1,7 @@
 sum_pair:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x60,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x48(%r13)
@@ -15,13 +15,13 @@ mov (%r8),%r8
 add %r8,%rbx
 mov %rbx,%rax
 mov -0x10(%r13),%rbx
-add $0xc0,%rsp
+add $0x60,%rsp
 pop %r13
 ret
 sum_ptf:
 push %r13
 mov %rsp,%r13
-sub $0xc0,%rsp
+sub $0x50,%rsp
 <nop padding>
 movsd %xmm0,-0x40(%r13)
 lea -0x40(%r13),%rax
@@ -36,14 +36,14 @@ movss (%rsp),%xmm0
 add $0x8,%rsp
 addss %xmm1,%xmm0
 <nop padding>
-add $0xc0,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 <nop padding>
 make_pair:
 push %r13
 mov %rsp,%r13
-sub $0x100,%rsp
+sub $0x80,%rsp
 <nop padding>
 mov %rdi,-0x60(%r13)
 mov %rsi,-0x68(%r13)
@@ -61,6 +61,6 @@ mov %rax,(%rcx)
 mov -0x48(%r13),%rax
 mov -0x40(%r13),%rdx
 <nop padding>
-add $0x100,%rsp
+add $0x80,%rsp
 pop %r13
 ret

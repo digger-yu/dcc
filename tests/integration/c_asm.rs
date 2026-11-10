@@ -931,59 +931,22 @@ fn asm_output_on_indexed_lvalue_is_written_back() {
 ///   `0x80 + op*8` 撞成 `88 /r`（mov）；`shlb $2` 报 E0311；`"=m"` 的 char 存回
 ///   走 `89 /r` 越界写 4 字节。
 ///
-/// 只在 -O0/-O1 与 gcc 对照：-O2/-O3 另有一个**与本夹具无关的既有缺陷**（跨 noinline
-/// 调用的全局写被丢），由下面的 xfail 用例单独钉住。判据用运行值而不是产物字节，
-/// 因为这些编码唯一的行为后果就是「写到了别人的位段上」。
+/// 只在四个档位都与 gcc 对照。判据用运行值而不是产物字节，因为这些编码全部
+/// 编得出来、也跑得起来，唯一的行为后果就是「写到了别人的位段上」。
+///
+/// 历史上 -O2/-O3 另有一个与本夹具无关的既有缺陷（跨 `noinline` 调用的全局写被丢），
+/// 当时由一条 xfail 用例单独钉住。那条缺陷已随 §5.11 的 SSA 输出一族修好：
+/// `InlineAsm::output_vars` 计入 `non_propagatable_names` 的版本普查后，asm 前面对
+/// 同一基名的写不再被当成无读者的死存储。按 xfail 自己留的话（「若已修好，请把本用例
+/// 并进上面那条绿灯对照」），四个档位现在全部并进来。
 #[test]
 fn rex_operand_bit_order_matches_gcc() {
     let source = include_str!("../fixtures/asm/asm_rex_operand_bit_order.c");
-    for flag in ["-O0", "-O1"] {
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
         assert_eq!(
             run_gcc_cross_check_opt("rex-bit-order", source, &[flag]),
             0,
             "{flag}: REX 位序/宽度口径与 gcc 不一致（值落到了别的寄存器的位段）"
-        );
-    }
-}
-
-/// 既有缺陷（非本轮引入）：-O2/-O3 下，跨 `noinline` 调用的全局变量写被丢，于是
-/// 后续读拿到第一次写的值。HEAD 实测本夹具 `a=-125 b=-125 c=-125`（gcc 是 11/1/77…），
-/// 最小复现：`f1(){asm("movb $65,%%sil"…); cb=a+d;} f2(){asm(…); cb=v;}` 两个写入者
-/// 交替读 `cb`。
-#[test]
-fn rex_bit_order_fixture_xfail_o2_drops_cross_call_global_writes() {
-    let source = include_str!("../fixtures/asm/asm_rex_operand_bit_order.c");
-    for flag in ["-O2", "-O3"] {
-        let (gsrc, gexe) = {
-            let dir = std::env::temp_dir();
-            let pid = std::process::id();
-            let gsrc = dir.join(format!("dcc-rexx-{pid}.c"));
-            let gexe = dir.join(format!("dcc-rexx-{pid}.gcc"));
-            std::fs::write(&gsrc, source).expect("write fixture");
-            let gb = std::process::Command::new("gcc")
-                .args(["-O0", "-std=gnu2x", "-w", "-o"])
-                .arg(&gexe)
-                .arg(&gsrc)
-                .output()
-                .expect("run gcc");
-            assert!(gb.status.success(), "oracle 侧 gcc 必须能编译本夹具");
-            let _ = std::fs::remove_file(&gsrc);
-            (gsrc, gexe)
-        };
-        let gcc_out = std::process::Command::new(&gexe).output().expect("run gcc exe");
-        let _ = std::fs::remove_file(&gexe);
-        let _ = gsrc;
-        let (dcompile, dexe) = run_compile_and_run_flags("rex-xfail-o2", source, &[flag]);
-        assert!(
-            dcompile.status.success(),
-            "{flag}: dcc 应能编译（缺陷在优化器，不在前端）"
-        );
-        let dcc_out = std::process::Command::new(&dexe).output().expect("run dcc exe");
-        let _ = std::fs::remove_file(dexe);
-        assert_ne!(
-            dcc_out.stdout, gcc_out.stdout,
-            "跨调用的全局写若已修好，请把本用例并进上面那条绿灯对照；\
-             当前 -O2/-O3 应读到第一次写的值（a=-125 被复制给 b/c/e）"
         );
     }
 }
@@ -1220,6 +1183,340 @@ fn s_output_roundtrips_through_gas_for_small_vector() {
     let _ = fs::remove_file(&asm_path);
     let _ = fs::remove_file(&direct_obj);
     let _ = fs::remove_file(&text_obj);
+}
+
+/// 描述符表指令（`0F 00 /x`）与 FSGSBASE（`F3 0F AE /x`）的**寄存器形式**：
+/// `-c` 直发对象与 `-S` → GAS 重汇编两条路必须给出同一条指令。
+///
+/// 为什么这两组指令要单独钉：它们的寄存器形式 ModRM 是 `mod=11 | reg=ext | rm=r`，
+/// 丢掉 mod 位就变成内存操作数 —— 长度只差一个前缀字节，objdump 仍能反汇编，
+/// 静态检查全绿，只有真的跑去读那个地址才炸。现场是内核 `native_load_tr_desc()`
+/// 的 `asm volatile("ltr %w0"::"q" (GDT_ENTRY_TSS*8))`：编成 `ltr (%rax)` 后
+/// PVH 启动读线性地址 0x40，在 `cpu_init_exception_handling+0xe50` 以 #DF 收场
+/// （报告 §5.19）。同一种错法在 `rdfsbase`/`rdgsbase` 家族里也在。
+///
+/// 判据是 GAS：它的编码（包括 `str`/`sldt` 要 0x66、`ltr`/`lldt`/`verr`/`verw`
+/// 不要）就是约定，而且它同时也把“无意义的空 REX”钉住 —— 空 0x40 不改变语义，
+/// 但会让 objdump 把助记符写成 `rex ltr %eax`，与 GAS 产物对不上。
+#[test]
+fn descriptor_and_fsgsbase_register_forms_match_gas_encoding() {
+    let source = include_str!("../fixtures/asm/desc_reg_operand.c");
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let source_path = dir.join(format!("dcc-desc-reg-{tag}.c"));
+    let asm_path = dir.join(format!("dcc-desc-reg-{tag}.s"));
+    let direct_obj = dir.join(format!("dcc-desc-reg-direct-{tag}.o"));
+    let text_obj = dir.join(format!("dcc-desc-reg-text-{tag}.o"));
+    fs::write(&source_path, source).expect("write C fixture");
+
+    let direct = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&direct_obj)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        direct.status.success(),
+        "direct compile stderr: {}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+
+    let s = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -S");
+    assert!(s.status.success(), "-S compile stderr: {}", String::from_utf8_lossy(&s.stderr));
+
+    let assemble = Command::new("as")
+        .args(["-o"])
+        .arg(&text_obj)
+        .arg(&asm_path)
+        .output()
+        .expect("run as");
+    assert!(
+        assemble.status.success(),
+        "as failed: {}",
+        String::from_utf8_lossy(&assemble.stderr)
+    );
+
+    // 函数体 → 只留**本用例盯的那条指令**（ModRM 编码与前缀）。
+    //
+    // 为什么不比整个函数体：两条发射路径在帧布局、16 位赋值的宽度上还有其它
+    // 各写各的地方（例：`saved = t` 在 `-S` 路径被写成 `mov %al`，在 `-c` 路径
+    // 是 `mov %ax`），那不是本用例的判据，混进来只会把真问题淹掉。助记符白名单
+    // 保证只比 `0F 00 /x` 与 `F3 0F AE /x` 这两组。
+    const WATCHED: [&str; 10] = [
+        "ltr",
+        "lldt",
+        "str",
+        "sldt",
+        "verr",
+        "verw",
+        "rdfsbase",
+        "rdgsbase",
+        "wrfsbase",
+        "wrgsbase",
+    ];
+    fn insn_lines(obj: &std::path::Path, func: &str) -> Vec<String> {
+        harness::objdump_insns_of(obj, func, &WATCHED)
+    }
+
+    for func in [
+        "dcc_ltr",
+        "dcc_lldt",
+        "dcc_str",
+        "dcc_sldt",
+        "dcc_verr",
+        "dcc_verw",
+        "dcc_rdgsbase",
+        "dcc_wrgsbase",
+    ] {
+        let direct_lines = insn_lines(&direct_obj, func);
+        let text_lines = insn_lines(&text_obj, func);
+        assert!(
+            direct_lines == text_lines,
+            "{func}: `-c` 直发对象与 `-S`→GAS 的指令不一致（ModRM 的 mod=11 丢了吗？）\n\
+             direct: {direct_lines:?}\n\
+             gas:    {text_lines:?}"
+        );
+        // 每条被盯的助记符在函数里恰好出现一次：多了或少了都是发射路径漂了。
+        assert_eq!(
+            direct_lines.len(),
+            1,
+            "{func}: 直发对象里应有且只有一条被盯的指令，实际 {direct_lines:?}"
+        );
+    }
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    let _ = fs::remove_file(&direct_obj);
+    let _ = fs::remove_file(&text_obj);
+}
+
+/// `lock cmpxchg16b %[ptr]`（`0F C7 /1`）的两个判据（报告 §5.20）：
+///
+///   1. **REX.W 决定是不是 16 字节形式**：不带 W 的 `0F C7 /1` 是 cmpxchg8b
+///      （比较 EDX:EAX、交换 8 字节），带 W 才是 cmpxchg16b（RDX:RAX、16 字节）。
+///      旧实现 Mem/SegMem 两个分支都 `rex(false, ..)`，内核 `slub.o` 里落地成
+///      `f0 40 0f c7 0b  lock rex cmpxchg8b (%rbx)`，boot 在 PageBuddy 附近
+///      triple fault。
+///   2. **`"m"` 操作数的地址 scratch 必须避开固定约束号**：`"b"`/`"c"` 把
+///      rbx/rcx 钉住，地址若也挑中 rbx，`mov ptr,%rbx` 随后被 `mov n_lo,%rbx`
+///      覆盖，指令在 n_lo 的**值**上寻址（现场里是 0）。
+///
+/// 两条发射路径都查：`-c` 直发对象与 `-S`→GAS 必须给出同一条指令；只比
+/// cmpxchg 一组，帧布局与寄存器家不参与判据。
+#[test]
+fn cmpxchg16b_double_is_rexw_and_avoids_fixed_regs() {
+    let source = include_str!("../fixtures/asm/cmpxchg16b_double.c");
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let source_path = dir.join(format!("dcc-cx16b-{tag}.c"));
+    let asm_path = dir.join(format!("dcc-cx16b-{tag}.s"));
+    let direct_obj = dir.join(format!("dcc-cx16b-direct-{tag}.o"));
+    let text_obj = dir.join(format!("dcc-cx16b-text-{tag}.o"));
+    fs::write(&source_path, source).expect("write C fixture");
+
+    let direct = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&direct_obj)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        direct.status.success(),
+        "direct compile stderr: {}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+
+    let s = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -S");
+    assert!(s.status.success(), "-S compile stderr: {}", String::from_utf8_lossy(&s.stderr));
+
+    // `-S` 文本单独查一档：内存操作数必须带 `%`（`(%r12)` 而非 `(r12)`）。
+    // 少了它就是符号 `r12`，GAS 报 undefined symbol —— §5.20 的文本路径缺陷。
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let text_cmpxchg: Vec<&str> = asm_text
+        .lines()
+        .map(str::trim)
+        // 只认**指令行**：`.type dcc_cmpxchg128` / `call dcc_cmpxchg128` 里也有
+        // “cmpxchg” 字样，不能算判据。
+        .filter(|l| l.contains(" cmpxchg16b") || l.contains(" cmpxchg8b"))
+        .collect();
+    assert_eq!(text_cmpxchg.len(), 1, "-S 文本里应恰好一条 cmpxchg，实际 {text_cmpxchg:?}");
+    assert!(
+        text_cmpxchg[0].starts_with("lock cmpxchg16b (%r"),
+        "-S 文本应为 `lock cmpxchg16b (%reg)`（助记符承载 REX.W，内存操作数带 %）：{text_cmpxchg:?}"
+    );
+
+    let assemble = Command::new("as")
+        .args(["-o"])
+        .arg(&text_obj)
+        .arg(&asm_path)
+        .output()
+        .expect("run as");
+    assert!(
+        assemble.status.success(),
+        "as failed: {}",
+        String::from_utf8_lossy(&assemble.stderr)
+    );
+
+    let insns = |obj: &std::path::Path| {
+        harness::objdump_insns_of(obj, "dcc_cmpxchg128", &["lock", "cmpxchg16b", "cmpxchg8b"])
+            .into_iter()
+            .filter(|l| l.contains(" cmpxchg16b") || l.contains(" cmpxchg8b"))
+            .collect::<Vec<_>>()
+    };
+    let direct_lines = insns(&direct_obj);
+    let text_lines = insns(&text_obj);
+    assert_eq!(
+        direct_lines, text_lines,
+        "`-c` 直发对象与 `-S`→GAS 的 cmpxchg 指令不一致\n direct: {direct_lines:?}\n gas:    {text_lines:?}"
+    );
+    assert_eq!(direct_lines.len(), 1, "dcc_cmpxchg128 里应恰好一条 cmpxchg，实际 {direct_lines:?}");
+    let line = &direct_lines[0];
+    assert!(
+        line.contains("cmpxchg16b"),
+        "缺 REX.W：`0F C7 /1` 无 W 是 cmpxchg8b（只交换 8 字节）：{line}"
+    );
+    // 内存基址不得是 a/b/c/d 四个固定约束钉住的号。
+    let open = line.rfind('(').expect("cmpxchg16b 应有内存操作数");
+    let close = line[open..].find(')').expect("内存操作数缺少 )") + open;
+    let base = &line[open + 1..close];
+    for pinned in ["%rax", "%rbx", "%rcx", "%rdx"] {
+        assert!(
+            base != pinned,
+            "地址 scratch 撞上固定约束号 {pinned}（`mov ptr,{pinned}` 会被约束值覆盖）：{line}"
+        );
+    }
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    let _ = fs::remove_file(&direct_obj);
+    let _ = fs::remove_file(&text_obj);
+}
+
+/// `cmpxchg16b` 的运行语义：成功路径把低/高 64 位**都**换掉，失败路径原封
+/// 不动。高 64 位这一条只有真 16 字节指令才成立（cmpxchg8b 只动低 8 字节），
+/// 地址 scratch 撞号则连成功路径都走不到。四档对 gcc 全量对照（CPU 有 cx16）。
+#[test]
+fn cmpxchg16b_double_runtime_matches_gcc() {
+    let source = include_str!("../fixtures/asm/cmpxchg16b_double.c");
+    harness::assert_all_levels_match_gcc(
+        "cmpxchg16b-double",
+        source,
+        "cmpxchg16b 的 16 字节原子交换语义与 gcc 不一致（REX.W 缺失或地址被固定约束覆盖？）",
+    );
+}
+
+/// 池耗尽时地址 scratch 借号 + `push`/`pop`（报告 §5.43 #45）：四个池号全被活值
+/// 占着时，旧实现兜底 `return 12` 静默复用持有 `disk` 的 `%r12`，内核
+/// `__blk_mq_alloc_disk` 于是返回 `disk+0x160`，boot 在 `add_disk_fwnode` 读
+/// `disk->queue` 时 #PF（address 0x10）。
+///
+/// 判据两层：`-O2` 对象里 `sub $0x8,%rsp; push %rX; … lock incq (%rX); pop %rX;
+/// add $0x8,%rsp` 必须成对出现（16 字节对齐不变式也在其中）；四档运行语义与 gcc
+/// 一致（借号没还回去就是错值）。
+#[test]
+fn asm_mem_scratch_borrows_when_pool_exhausted() {
+    let source = include_str!("../fixtures/asm/asm_mem_scratch_borrow.c");
+    harness::assert_all_levels_match_gcc(
+        "asm-mem-scratch-borrow",
+        source,
+        "池耗尽时地址 scratch 借号把活值踩掉了（push/pop 不配对或对齐对缺失）",
+    );
+
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let source_path = dir.join(format!("dcc-borrow-{tag}.c"));
+    let obj = dir.join(format!("dcc-borrow-{tag}.o"));
+    fs::write(&source_path, source).expect("write C fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&obj)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        out.status.success(),
+        "direct compile stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 只留判据关心的助记符：空格全部去掉，比较形态而不是排版。
+    let lines: Vec<String> = harness::objdump_insns_of(
+        &obj,
+        "borrow_test",
+        &["sub", "add", "push", "pop", "lock"],
+    )
+    .iter()
+    .map(|l| l.replace(' ', ""))
+    .collect();
+    let pool = ["%rbx", "%r12", "%r14", "%r15"];
+    let mut borrowed: Option<&str> = None;
+    for i in 0..lines.len() {
+        let Some(reg) = lines[i].strip_prefix("push") else { continue };
+        if !pool.contains(&reg) {
+            continue;
+        }
+        if i == 0 || lines[i - 1] != "sub$0x8,%rsp" {
+            continue;
+        }
+        let incq = format!("lockincq({reg})");
+        let pop = format!("pop{reg}");
+        let Some(j) = (i + 1..lines.len()).find(|&j| lines[j] == pop) else {
+            continue;
+        };
+        let saw_addr = lines[i + 1..j].contains(&incq);
+        let aligned_after = lines.get(j + 1).is_some_and(|l| l == "add$0x8,%rsp");
+        if saw_addr && aligned_after {
+            borrowed = Some(reg);
+            break;
+        }
+    }
+    assert!(
+        borrowed.is_some(),
+        "池耗尽时没有走借号路径（应为 sub $0x8,%rsp; push %rX; lock incq (%rX); \
+         pop %rX; add $0x8,%rsp）：{lines:?}"
+    );
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&obj);
+}
+
+/// 池耗尽且四个号都被同一条 asm 的 clobber 点名 → 没有可借的号：必须 fail-closed
+/// （E0311，不出对象），而不是静默退回某个活值号给出错值（报告 §5.43 #45）。
+#[test]
+fn asm_mem_scratch_pool_exhaustion_fails_closed() {
+    let source = include_str!("../fixtures/asm/asm_mem_scratch_exhausted.c");
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let source_path = dir.join(format!("dcc-scratch-reject-{tag}.c"));
+    let obj = dir.join(format!("dcc-scratch-reject-{tag}.o"));
+    fs::write(&source_path, source).expect("write C fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&obj)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -c");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "一个号都借不到时不应出对象：{stderr}");
+    assert!(!obj.exists(), "拒绝后仍写了对象文件：{}", obj.display());
+    assert!(stderr.contains("E0311"), "错误码应是 E0311（asm 无可编码产物）：{stderr}");
+    assert!(
+        stderr.contains("内存操作数地址找不到可用寄存器"),
+        "诊断应点名地址 scratch 无号可发：{stderr}"
+    );
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&obj);
 }
 
 /// inline asm: lock cmpxchg 内存操作数
@@ -4232,6 +4529,23 @@ void use_fp(struct fpstate *fp)
 	asm volatile("fsubp %st,%st(1)");
 	asm volatile("verw %[g]" : : [g] "m" (gdtr) : "cc");
 }
+static double fd_x = 4195835.0;
+static double fd_y = 3145727.0;
+/* arch/x86/kernel/fpu/bugs.c 的 FDIV 自检逐字形状 */
+int fdiv_shape(void)
+{
+	int b;
+	asm volatile("fninit\n\tfldl %1\n\tfdivl %2\n\tfmull %2\n\tfldl %1\n\tfistpl %0\n\tfwait\n\tfninit"
+		: "=m" (b) : "m" (fd_x), "m" (fd_y));
+	return b;
+}
+/* `t` 通道的两个内存端：fldt = DB /5，fstpt = DB /7 */
+long double ld_mem_pair(long double v)
+{
+	long double r;
+	asm volatile("fldt %1\n\tfstpt %0" : "=m" (r) : "m" (v));
+	return r;
+}
 "#;
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -4270,6 +4584,12 @@ void use_fp(struct fpstate *fp)
     };
     let dcc = text(&op);
     let gcc = text(&gp);
+    let dis = Command::new("objdump")
+        .arg("-d")
+        .arg(&op)
+        .output()
+        .expect("objdump dcc object");
+    let dis = String::from_utf8_lossy(&dis.stdout).to_string();
     let _ = fs::remove_file(&sp);
     let _ = fs::remove_file(&op);
     let _ = fs::remove_file(&gp);
@@ -4297,6 +4617,31 @@ void use_fp(struct fpstate *fp)
     };
     assert!(frstor(&gcc), "gcc 的 frstor 基准形状未命中");
     assert!(frstor(&dcc), "dcc 没编出 frstor (DD /4, 内存形式)");
+
+    // x87 内存形式：ESC 由**操作数宽度**决定，不是由助记符的"家族"决定。
+    // `fldl` 是 DD /0（m64），旧表与 `flds` 共用 D9 /0 ⇒ 只读 4 字节；`fdivl`/`fmull`
+    // 同理应为 DC /6、DC /1。`fistpl` 是 DB /3（m32，与旧表一致），但输出槽在
+    // `%r13` 上时 ModRM 前必须有 REX.B，否则 r/m=101 被解码成 `%rbp` —— 写到
+    // 调用者的栈上（`41 DB 5D …` 才是 `fistpl -0x40(%r13)`）。
+    let x87_mem = |hay: &[u8], esc: u8, ext: u8| -> bool {
+        hay.windows(2)
+            .any(|w| w[0] == esc && w[1] & 0xC0 != 0xC0 && (w[1] >> 3) & 7 == ext)
+    };
+    for (esc, ext, what) in [
+        (0xDDu8, 0u8, "fldl (m64, DD /0)"),
+        (0xDC, 6, "fdivl (m64, DC /6)"),
+        (0xDC, 1, "fmull (m64, DC /1)"),
+        (0xDB, 3, "fistpl (m32, DB /3)"),
+        (0xDB, 5, "fldt (m80, DB /5)"),
+        (0xDB, 7, "fstpt (m80, DB /7)"),
+    ] {
+        assert!(x87_mem(&gcc, esc, ext), "gcc 里找不到 {what}");
+        assert!(x87_mem(&dcc, esc, ext), "dcc 里找不到 {what}");
+    }
+    // 帧基址是 %r13；任何 `fistpl …(%rbp)` 都是漏了 REX.B 的产物（%rbp 未初始化）。
+    for line in dis.lines().filter(|l| l.contains("fistpl")) {
+        assert!(!line.contains("(%rbp)"), "fistpl 用了未初始化的 %rbp: {line}");
+    }
 }
 
 /// `$<常量表达式>` 形式的立即数：内核 `arch/x86/include/asm/ibt.h` 的
@@ -5400,4 +5745,142 @@ fn asm_goto_label_defined_in_dead_block_survives_const_if_folding() {
              `asm goto` 的落点悬空。体内:\n{body}"
         );
     }
+}
+
+/// `call *%[opptr]` 的**字节形状**（报告 §5.32）：x86 alternatives 的
+/// `ALT_FLAG_DIRECT_CALL` 替换器 `alt_replace_call()` 只认 `ff 15 disp32`
+/// （`instrlen == 6`），否则 `BUG()`。
+///
+/// 旧形态是「地址落进栈槽再寄存器间接调用」：
+/// `lea pv_ops+off(%rip),%rax; mov %rax,-N(%r13); mov -N(%r13),%rbx; rex call *(%rbx)`
+/// ——语义等价、字节形状错（`40 ff 13`），boot 1.9 s 在 `alternative.c:558` 停住。
+///
+/// 两条判据：
+///   * 全局常量字段链（`"m"(pv_ops.cpu.x)`）：必须 `call *0xHEX(%rip)`，且 `-S`
+///     文本同样是 `call *pv_ops+off(%rip)`；
+///   * 指针参数的 `"m"` 操作数（地址是加载值）：仍是 `call *(%r..)` 寄存器形式
+///     —— 这一半防「把动态地址也折成 rip 相对」的过修。
+///
+/// 为什么不执行：这些函数会调用未初始化的函数指针。
+#[test]
+fn asm_mem_operand_call_uses_rip_relative_form() {
+    let src = include_str!("../fixtures/c/asm_direct_paravirt_call.c");
+
+    let (out, obj) = run_object_test_flags("pv-call", src, &["-O2"]);
+    assert!(
+        out.status.success(),
+        "编译失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 静态组：全局对象的常量字段链。
+    for func in ["pv_call_irq_disable", "pv_call_safe_halt"] {
+        // 助记符白名单只认 `call`：旧形态的 objdump 文本是 `rex call *(%rbx)`
+        // （mnemonic = rex），于是 len==0 —— 这个断言本身就是缺陷判据。
+        let calls = harness::objdump_insns_of(&obj, func, &["call"]);
+        assert_eq!(
+            calls.len(),
+            1,
+            "{func}: 应恰有一条 `call`（0 条 = 仍是 `rex call *(%rbx)` 的旧形状），实际 {calls:?}"
+        );
+        assert!(
+            calls[0].contains("(%rip)"),
+            "{func}: 静态字段链的 `\"m\"` 操作数必须是 RIP 相对形式（ff 15 disp32）；\
+             内核 alt_replace_call() 只认 6 字节，别的形状直接 BUG()。实际: {}",
+            calls[0]
+        );
+    }
+
+    // 动态组：指针参数的 `"m"` 操作数——地址来自一次加载，只能走寄存器。
+    let calls = harness::objdump_insns_of(&obj, "pv_call_via_ptr", &["call"]);
+    assert_eq!(calls.len(), 1, "pv_call_via_ptr: 应恰有一条 `call`，实际 {calls:?}");
+    assert!(
+        !calls[0].contains("(%rip)"),
+        "pv_call_via_ptr: 指针参数的地址是加载值，不能折成 RIP 相对（过修）: {}",
+        calls[0]
+    );
+    let _ = fs::remove_file(&obj);
+
+    // `-S` 文本路径：同一份编码器记录的助记符与操作数形状。
+    let (s_out, asm) = harness::run_asm_output_test_flags("pv-call", src, "-O2");
+    assert!(
+        s_out.status.success(),
+        "-S 编译失败: {}",
+        String::from_utf8_lossy(&s_out.stderr)
+    );
+    assert!(
+        asm.contains("call *pv_ops(%rip)"),
+        "`pv_call_irq_disable` 的 -S 文本里没有 `call *pv_ops(%rip)`:\n{asm}"
+    );
+    assert!(
+        asm.contains("call *pv_ops+16(%rip)"),
+        "`pv_call_safe_halt` 的 -S 文本里没有 `call *pv_ops+16(%rip)`（字段偏移丢了？）:\n{asm}"
+    );
+}
+
+/// `"Ir"` 立即数备选必须按 `I` 的取值范围（0..31）判，不能一律当 `i` 代常量。
+///
+/// 现场（内核 7.1 的 `init_rt_rq`）：
+/// ```c
+/// __set_bit(MAX_RT_PRIO /*100*/, array->bitmap);
+/// // arch___set_bit: asm volatile("bts %1,%0" : : "m"(*addr), "Ir"(nr) : "memory");
+/// ```
+/// `bts mem,reg` 由 CPU 按 `nr/64*8` 调整地址、`nr%64` 取位；而
+/// `btsq $imm8,mem` **不调整地址**、只取 `imm8 & 63`。旧 dcc 无视 `I` 的范围把
+/// 100 代成 `$100` ⇒ 置到 bitmap[0] 的 bit 36（100 & 63），与 RT prio 36 撞位，
+/// 启动 3 秒后 `pick_next_rt_entity` 的 `WARN_ON_ONCE(list_empty(queue))` 必响。
+///
+/// 夹具逐字复刻那一形：常量 100 进 `"Ir"`。正确产物是 `bm[1]` 的 bit 36；
+/// 错误产物是 `bm[0]` 的 bit 36（此时 `bm[0]` 的 0x10 位恰是 prio 36 的"幽灵位"）。
+#[test]
+#[cfg(unix)]
+fn asm_ir_constraint_out_of_i_range_uses_register() {
+    let source = "\
+#include <stdio.h>\n\
+static unsigned long bm[2];\n\
+static __inline__ __attribute__((always_inline))\n\
+void bts_ir(unsigned long nr, unsigned long *addr)\n\
+{\n\
+    asm volatile(\"bts %1,%0\" : : \"m\"(*addr), \"Ir\"(nr) : \"memory\");\n\
+}\n\
+__attribute__((noinline)) static void set_bits(void)\n\
+{\n\
+    bm[0] = 0; bm[1] = 0;\n\
+    bts_ir(100, bm);\n\
+    bts_ir(7, bm);\n\
+}\n\
+int main(void)\n\
+{\n\
+    set_bits();\n\
+    printf(\"%lx %lx\\n\", bm[0], bm[1]);\n\
+    return (bm[0] == (1UL << 7) && bm[1] == (1UL << 36)) ? 0 : 1;\n\
+}\n";
+    for flag in ["-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("asm-ir-const", source, &[flag]),
+            0,
+            "[{flag}] `\"Ir\"(100)` 必须落到寄存器（bts mem,reg 才会调地址），\
+             代成 `$100` 会落在 bit 36"
+        );
+    }
+}
+
+/// 反例：约束**只能**接立即数（`N` = 0..255）且值越界时，必须是硬错误。
+///
+/// gcc 对 `"N"(300)` 报 `impossible constraint in 'asm'`；dcc 以前会静默代成
+/// `$300`（编码器截成 imm8）—— 一个能编过但值错的产物。这里钉住 fail-closed。
+#[test]
+fn asm_immediate_only_out_of_range_is_hard_error() {
+    let source = "int f(void) { asm volatile(\"\" : : \"N\"(300)); return 0; }\n";
+    let (output, object_path) = run_object_test("asm-imm-range", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "`\"N\"(300)` 应硬错（越界的立即数不能静默截断），实际成功: {stderr}"
+    );
+    assert!(
+        stderr.contains("impossible constraint") && stderr.contains("out of range"),
+        "诊断应点明约束越界，实际 stderr:\n{stderr}"
+    );
 }

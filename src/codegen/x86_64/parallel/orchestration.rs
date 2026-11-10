@@ -211,6 +211,7 @@ impl Codegen {
             pending_code_rels: cg.pending_code_rels,
             pending_func_addr_rels: cg.pending_func_addr_rels,
             pending_data_rels: cg.pending_data_rels,
+            pending_data_rel_tails: cg.pending_data_rel_tails.into_iter().collect(),
             pending_sib_data_rels: cg.pending_sib_data_rels,
             pending_data_rels_with_off: cg.pending_data_rels_with_off,
             label_addr_refs: cg.label_addr_refs,
@@ -430,6 +431,9 @@ impl Codegen {
         }
         for (pos, sym) in chunk.pending_data_rels {
             self.pending_data_rels.push((base + pos, sym));
+        }
+        for (pos, tail) in chunk.pending_data_rel_tails {
+            self.pending_data_rel_tails.insert(base + pos, tail);
         }
         for (pos, sym, elem_off) in chunk.pending_data_rels_with_off {
             self.pending_data_rels_with_off
@@ -853,6 +857,7 @@ mod tests {
             pending_code_rels: vec![],
             pending_func_addr_rels: vec![],
             pending_data_rels: vec![],
+            pending_data_rel_tails: vec![],
             pending_sib_data_rels: vec![],
             pending_data_rels_with_off: vec![],
             label_addr_refs: vec![],

@@ -588,10 +588,16 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
 
     let stride = element_stride(elem_ty);
 
-    // 尝试编译期求值索引
-    if let Ok(val) = crate::const_eval::eval(idx) {
-        let byte_off = (val as i64).wrapping_mul(stride as i64);
-        return ByteOffset::Constant(byte_off);
+    // 尝试编译期求值索引：**只收结构上无副作用的形态**（与优化器
+    // `const_eval_through_comma` 同一道闸）。`const_eval` 对赋值表达式走宽松
+    // 口径（返回右值、把 store 留给运行期），而这里的结果会把整个下标表达式
+    // **替换成常量**：`g[(s.n = 4) + 1]` 的赋值因此永远不执行（dcc -O0/-O1
+    // 实测整条 store 消失，gcc 不变；报告 §5.47 的第二个缺陷）。
+    if !discarded_value_needs_code(idx) || dropping_value_is_safe(idx) {
+        if let Ok(val) = crate::const_eval::eval(idx) {
+            let byte_off = (val as i64).wrapping_mul(stride as i64);
+            return ByteOffset::Constant(byte_off);
+        }
     }
 
     ByteOffset::Runtime {

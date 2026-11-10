@@ -15,7 +15,9 @@
  *     `["b.1#5:lag1->b_s1", "_tidx_9#10:lag1->_tidx_9_s1", "s.2#12:lag1->s_s1", "i.2#15:lag1->i_s1"]`；
  *   * `rot_load5`：5 级链、trip=40、depth=2 ⇒ 收，4 格；
  *   * `rot_clash`：用户自己占用了 `i_s1` ⇒ 格子自动避让到 `i_s2`（占名分配器是全仓
- *     唯一那一份 `LocMap::reserve_split_name`，这里没有第二套命名判据）；
+ *     唯一那一份 `LocMap::reserve_split_name`，这里没有第二套命名判据）。注意 `i_s1`
+ *     必须活过优化：初值若是常量会被折叠掉、声明被死声明消除删掉，占名对照就失去
+ *     对象（见 `if (n < 0)` 那条不可折叠的写）；
  *   * `rot_short`：与 `rot_load4` 同形状但 trip=4 ⇒ 仍拒，而拒因必须是**真原因**
  *     「trip 太短」，不再是指一条已经不存在的拦路虎；
  *   * `rot_flat`：6 级纯算术链、depth=1 ⇒ 老模型（格子表空 = 基名塌缩）就该收，
@@ -43,7 +45,7 @@ int rot_load4(int n){int s=0;for(int i=0;i<32;i++){int a=idx[i&7]+1;int b=idx[a&
 /* 5 级：同一批格子数（跳轮读按 (生产者,lag) 归并，不与链长成比例） */
 int rot_load5(int n){int s=0;for(int i=0;i<40;i++){int a=idx[i&7]+1;int b=idx[a&7]+1;int c=idx[b&7]+1;int d=idx[c&7]+1;int e=idx[d&7]+1;s+=e;}return s+n;}
 /* 占名对照：用户已有局部 `i_s1`，而归纳变量 `i` 的格子恰好想要 `i_s1` */
-int rot_clash(int n){int s=0,i_s1=5;for(int i=0;i<24;i++){int a=idx[i&7]+1;int b=idx[a&7]+1;int c=idx[b&7]+1;int d=idx[c&7]+1;s+=d;s+=i_s1;}return s+n;}
+int rot_clash(int n){int s=0,i_s1=5;if(n<0)i_s1=0;for(int i=0;i<24;i++){int a=idx[i&7]+1;int b=idx[a&7]+1;int c=idx[b&7]+1;int d=idx[c&7]+1;s+=d;s+=i_s1;}return s+n;}
 /* 同一形状但 trip 太短：仍应被拒（代价判据，不是能力判据） */
 int rot_short(int n){int s=0;for(int i=0;i<4;i++){int a=idx[i&7]+1;int b=idx[a&7]+1;int c=idx[b&7]+1;int d=idx[c&7]+1;s+=d;}return s+n;}
 /* depth=1 的老接受形状：模型 1（基名塌缩）就该收，不许因本轮改动而抖 */

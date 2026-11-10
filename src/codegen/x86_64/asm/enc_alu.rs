@@ -245,18 +245,32 @@ impl Codegen {
                     if bits == 16 {
                         self.emit_insn(&Insn::raw(&[0x66]));
                     }
-                    self.emit_insn(&Insn::raw(&[Self::rex(w, 0, 0, 0)]));
-                    if *v >= -128 && *v <= 127 {
-                        self.emit_insn(&Insn::raw(&[0x83]));
+                    if bits == 8 {
+                        // 8 位宽度的 opcode 只有 `80 /digit ib`：0x81/0x83 是 16/32/64 位，
+                        // 对 `addb $3, g(%rip)` 发 0x83 会把一个字节的加变成 DWORD 写
+                        // （实测写掉邻接的 3 个字节，只是静态变量之间的 padding 掩盖了）。
+                        self.emit_insn(&Insn::raw(&[0x80]));
                         self.emit_asm_modrm_mem_only(op, 0, ASM_BASE_RIP, None, 1);
+                        let pos = self.pos() - 4;
                         self.emit_insn(&Insn::raw(&[*v as u8]));
+                        self.push_rip_data_rel(pos, sym.clone(), 1);
                     } else {
-                        self.emit_insn(&Insn::raw(&[0x81]));
+                        self.emit_insn(&Insn::raw(&[Self::rex(w, 0, 0, 0)]));
+                        let (opcode, imm_size): (u8, u8) = if *v >= -128 && *v <= 127 {
+                            (0x83, 1)
+                        } else {
+                            (0x81, 4)
+                        };
+                        self.emit_insn(&Insn::raw(&[opcode]));
                         self.emit_asm_modrm_mem_only(op, 0, ASM_BASE_RIP, None, 1);
-                        self.emit_insn(&Insn::raw(&(*v as i32).to_le_bytes()));
+                        let pos = self.pos() - 4;
+                        if imm_size == 1 {
+                            self.emit_insn(&Insn::raw(&[*v as u8]));
+                        } else {
+                            self.emit_insn(&Insn::raw(&(*v as i32).to_le_bytes()));
+                        }
+                        self.push_rip_data_rel(pos, sym.clone(), imm_size);
                     }
-                    let pos = self.pos() - 4 - if *v >= -128 && *v <= 127 { 1 } else { 4 };
-                    self.pending_data_rels.push((pos, sym.clone()));
                 } else {
                     self.asm_reject("unsupported ALU operand pattern");
                 }
@@ -556,6 +570,10 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_asm_cmpxchg16b(&mut self, op: &AsmOperand) {
+        // `0F C7 /1` 的 16 字节形式**必须带 REX.W**：不带 W 就是 cmpxchg8b
+        // （只比较/交换 8 字节 EDX:EAX，高 8 字节不动）。旧实现 `rex(false, …)`
+        // 发的是 `f0 40 0f c7 08`，SLUB 的 freelist+counters 双字更新实际只换了
+        // 低 64 位（§5.20）。GAS: `lock cmpxchg16b (%rax)` → `f0 48 0f c7 08`。
         match op {
             AsmOperand::Mem {
                 disp,
@@ -564,7 +582,7 @@ impl Codegen {
                 scale,
             } => {
                 self.emit_insn(&Insn::raw(&[
-                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    Self::rex(true, 0, index.unwrap_or(0), *base),
                     0x0F,
                     0xC7,
                 ]));
@@ -580,7 +598,7 @@ impl Codegen {
                 let (_code, pfx) = Self::seg_meta(*seg);
                 self.emit_insn(&Insn::raw(&[
                     pfx,
-                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    Self::rex(true, 0, index.unwrap_or(0), *base),
                     0x0F,
                     0xC7,
                 ]));
@@ -751,12 +769,12 @@ impl Codegen {
                     if *v >= -128 && *v <= 127 {
                         self.emit_insn(&Insn::raw(&[rex, 0x6B, modrm, 0, 0, 0, 0, *v as u8]));
                         let pos = self.pos() - 5;
-                        self.pending_data_rels.push((pos, sym.clone()));
+                        self.push_rip_data_rel(pos, sym.clone(), 1);
                     } else {
                         self.emit_insn(&Insn::raw(&[rex, 0x69, modrm, 0, 0, 0, 0]));
                         let pos = self.pos() - 4;
-                        self.pending_data_rels.push((pos, sym.clone()));
                         self.emit_insn(&Insn::raw(&(*v as i32).to_le_bytes()));
+                        self.push_rip_data_rel(pos, sym.clone(), 4);
                     }
                 },
                 _ => {
@@ -1034,8 +1052,8 @@ impl Codegen {
                 self.emit_insn(&Insn::raw(&[Self::rex(w, 0, 0, 0), 0xC1]));
                 self.emit_asm_modrm_mem_only(op, 0, ASM_BASE_RIP, None, 1);
                 let pos = self.pos() - 4;
-                self.pending_data_rels.push((pos, sym.clone()));
                 self.emit_insn(&Insn::raw(&[*count as u8]));
+                self.push_rip_data_rel(pos, sym.clone(), 1);
             },
             _ => {
                 self.asm_reject("unsupported shift operand pattern");

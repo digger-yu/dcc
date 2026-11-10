@@ -134,7 +134,10 @@ impl Codegen {
         if let AsmOperand::Reg(r, _) = op {
             self.emit_insn(&Insn::raw(&[0xF3]));
             self.emit_insn(&Insn::raw(&[Self::rex(true, 0, 0, *r)]));
-            self.emit_insn(&Insn::raw(&[0x0F, 0xAE, ((ext & 7) << 3) | (r & 7)]));
+            // `0F AE /x` 的寄存器形式：与描述符表指令同一种错——漏掉 ModRM 的
+            // mod=11 就变成内存操作数（`rdgsbase %rax` → `rdgsbase (%rax)`）。
+            // GAS: `f3 48 0f ae c0`。
+            self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xC0 | ((ext & 7) << 3) | (r & 7)]));
         } else {
             self.asm_reject("fsgsbase requires a register operand");
         }

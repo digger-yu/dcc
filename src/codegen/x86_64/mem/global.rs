@@ -413,9 +413,14 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
             _ => None,
         }
     } else {
-        const_eval::eval(init)
-            .ok()
-            .map(|value| value.to_le_bytes()[..sz].to_vec())
+        const_eval::eval(init).ok().map(|value| {
+            // `_Bool` 静态初始化同样要归一化（C11 6.3.1.2p1）：直接取低字节
+            // 会把 `static _Bool g = 512;` 在 .data 里折成 0（§5.30，objdump 实测为 0）。
+            if matches!(ty, Type::Bool) {
+                return vec![(value != 0) as u8];
+            }
+            value.to_le_bytes()[..sz].to_vec()
+        })
     }
 }
 
