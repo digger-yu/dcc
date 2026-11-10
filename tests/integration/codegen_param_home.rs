@@ -20,41 +20,6 @@
 //      写 `=0`，否则子进程继承环境变量，两臂同形，判据空跑）。本文件的 off 臂一律显式
 //      传 `DCC_HOME_PARAMS=0` 而不是"什么都不传"，就是这个原因。
 
-/// 两档编译+运行，返回 `(rc_off, rc_on, out_off, out_on)`。
-///
-/// `off` 臂显式带 `DCC_HOME_PARAMS=0`：不显式写就等于把判据交给外部环境。
-fn param_home_run(name: &str, src: &str) -> (i32, i32, String, String) {
-    let off: &[(&str, &str)] = &[("DCC_HOME_PARAMS", "0")];
-    let on: &[(&str, &str)] = &[("DCC_HOME_PARAMS", "1")];
-    let (o1, e1) = run_compile_and_run_env(name, src, &["-O2"], off);
-    let (o2, e2) = run_compile_and_run_env(name, src, &["-O2"], on);
-    assert!(o1.status.success() && o2.status.success(), "编译失败");
-    let go = |p: &std::path::PathBuf| {
-        let out = Command::new(p).output().expect("run fixture");
-        assert!(
-            out.status.code().is_some(),
-            "夹具被信号打死: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        (
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-        )
-    };
-    let a = go(&e1);
-    let b = go(&e2);
-    let _ = fs::remove_file(&e1);
-    let _ = fs::remove_file(&e2);
-    (a.0, b.0, a.1, b.1)
-}
-
-/// 两档编到对象，返回字节（结构判据用）。off 同样显式写 `=0`。
-fn param_home_objects(name: &str, src: &str) -> (Vec<u8>, Vec<u8>) {
-    let (_o1, b1) = run_compile_object_env(name, src, "-O2", &[("DCC_HOME_PARAMS", "0")]);
-    let (_o2, b2) = run_compile_object_env(name, src, "-O2", &[("DCC_HOME_PARAMS", "1")]);
-    (b1, b2)
-}
-
 /// 热形参真的落到号上：入站那笔 `mov 形参号 → 帧槽` 必须消失。
 ///
 /// 只看结果值不够——不搬家也一样算得对；只有「入口不再把它写进栈槽」才证明家生效了。

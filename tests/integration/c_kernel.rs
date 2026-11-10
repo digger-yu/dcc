@@ -2774,17 +2774,6 @@ void f(void)
     );
 }
 
-/// 判一个未定义符号名是不是「没解开的数字标签引用」（`1b`、`771f` 这种）。
-/// 写在这里而不是拉一个 regex 依赖：判据就是一条字符规则，要一眼能看完。
-fn regex_like_numeric_ref(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    if bytes.len() < 2 {
-        return false;
-    }
-    let last = bytes[bytes.len() - 1];
-    (last == b'b' || last == b'f') && bytes[..bytes.len() - 1].iter().all(|c| c.is_ascii_digit())
-}
-
 /// `sizeof`/`_Alignof` 的结果类型必须是 `size_t`（LP64 上 = `unsigned long`），不是 `int`。
 ///
 /// 为什么不是「少一个优化」而是错值：`typeof(表达式)` 与 `__auto_type` 的推导直接吃

@@ -3,8 +3,9 @@
 //! 由壳 `tests/integration.rs` 以 `#[path = "common/harness.rs"] mod harness;` 挂载，
 //! 再 `use harness::*;` 注入各主题子文件（子文件自身不得写 `use`/`mod`）。条目一律
 //! `pub(crate)`：integration target 是独立 crate，`pub(crate)` 与 `pub` 效果相同，但
-//! 显式收敛可见面不对外承诺 API。体量自成一体的两组助手分入子模块后重导出：
-//! `harness/elf.rs`（ELF64 解析）、`harness/{driver_cli,cpp_frontend}.rs`（驱动 CLI 与 C++ 前端）。
+//! 显式收敛可见面不对外承诺 API。体量自成一体的几组助手分入子模块后重导出：
+//! `harness/elf.rs`（ELF64 解析）、`harness/{driver_cli,cpp_frontend}.rs`（驱动 CLI 与 C++ 前端）、
+//! `harness/probe.rs`（编译探针与 `.s`/`readelf` 读数）。
 //! 因本文件由 `#[path]` 挂载（子模块默认解析落到 `tests/common/`），需显式写前缀。
 
 #[path = "harness/cpp_frontend.rs"]
@@ -13,6 +14,8 @@ mod cpp_frontend;
 mod driver_cli;
 #[path = "harness/elf.rs"]
 mod elf;
+#[path = "harness/probe.rs"]
+mod probe;
 // 单入口重导出：同一 harness 被多个 target 共用（`integration` 与 `profile`），
 // 每个 target 只消费其中一部分属预期设计，所以在此声明点放宽 unused_imports；
 // 真正未使用的条目仍由 `dead_code` 在各 target 的挂载点上把关。
@@ -20,6 +23,8 @@ mod elf;
 pub(crate) use cpp_frontend::*;
 pub(crate) use driver_cli::*;
 pub(crate) use elf::*;
+#[allow(unused_imports)]
+pub(crate) use probe::*;
 
 use std::fs;
 use std::process::Command;

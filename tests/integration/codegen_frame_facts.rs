@@ -43,50 +43,6 @@ const A1_ON: &str = "0x112F"; // 默认档 + R_CALLSLOT
 const A2_ON: &str = "0x182F"; // 默认档 + R_LABELJOIN
 const A3_ON: &str = "0x142F"; // 默认档 + R_LRU
 
-/// S1 的语料：仓库里最大的一份自包含 C 源（计算转移 + 多帧槽）。
-const S1_CORPUS: &str = "tests/fixtures/c/bootstrap_selftest.c";
-
-/// 数一份汇编里的**帧载入**次数。
-///
-/// 为什么不能用 `grep -c r13`：`mov %rax, -0x30(%r13)` 是存出，把它计进来会让
-/// 「转发掉一次载入」这件事读数不动 —— 判据会对着真正的那一半失效。
-fn frame_loads_in_asm(text: &str) -> usize {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| {
-            l.starts_with("mov")
-                || l.starts_with("add")
-                || l.starts_with("sub")
-                || l.starts_with("cmp")
-                || l.starts_with("test")
-                || l.starts_with("lea")
-        })
-        // 载入 = 带 `(%r13)` 的那一侧在**逗号前**（源）。AT&T 是 `src, dst`。
-        .filter(|l| match l.find(',') {
-            Some(i) => l[..i].contains("(%r13"),
-            None => false,
-        })
-        .count()
-}
-
-fn insn_count(text: &str) -> usize {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| {
-            !l.is_empty()
-                && !l.starts_with('.')
-                && !l.starts_with('#')
-                && l.chars().next().map_or(false, |c| c.is_ascii_lowercase())
-        })
-        .count()
-}
-
-fn compile_s1_with(rules: &str) -> (String, String) {
-    let src = std::fs::read_to_string(S1_CORPUS)
-        .unwrap_or_else(|e| panic!("读语料 {S1_CORPUS} 失败：{e}"));
-    compile_asm_text_with_env("s1-corpus", &src, &["-O2"], &[("DCC_BLOCKOPT_RULES", rules)])
-}
-
 /// 判据 1：一条只写目的号的 raw 指令，之后不得重载与之无关的槽。
 #[test]
 fn raw_facts_survive_after_raw_insn() {
@@ -417,73 +373,6 @@ int main(void) { return run(5) > 0 ? 0 : 1; }
     );
 }
 
-/// 编译到可重定位对象（多个 flag + env 旋钮），拿字节回来交给下面两个 readelf 助手。
-///
-/// 为什么不走 `run_compile_object_env`：它只接一个优化参数，而本用例同时需要 `-O2` 与
-/// `-g` 两个（loclist 只在 -O2 的家分配之后才有意义）。
-fn region_obj_with_env(
-    name: &str,
-    source: &str,
-    flags: &[&str],
-    envs: &[(&str, &str)],
-) -> Vec<u8> {
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let obj = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
-    std::fs::write(&src, source).expect("write fixture");
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.args(["-std=gnu23"]).args(flags).args(["-c"]);
-    for (k, v) in envs {
-        cmd.env(k, v);
-    }
-    let out = cmd.args(["-o"]).arg(&obj).arg(&src).output().expect("run dcc");
-    assert!(out.status.success(), "编译失败: {}", String::from_utf8_lossy(&out.stderr));
-    let bytes = std::fs::read(&obj).unwrap_or_default();
-    let _ = std::fs::remove_file(src);
-    let _ = std::fs::remove_file(obj);
-    bytes
-}
-
-/// 一个对象的节名清单（写成一行，给 `contains(".debug_loc")` 这种存在性判据用）。
-///
-/// `readelf -SW` 的每一行形如 `  [13] .debug_loc PROGBITS ...` ⇒ 节名是第二个字段；
-/// 表头/空行拿不到以 `.` 开头的字段，自然被滤掉。
-fn elf_section_names(obj: &[u8]) -> String {
-    let text = elf_readelf(obj, &["-SW"]);
-    text
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let _ = it.next()?;
-            it.next()
-        })
-        .filter(|n| n.starts_with('.'))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// 把某个节 dump 成人读文本（用于「能不能解」这一类结构判据）。
-fn elf_dump_section(obj: &[u8], sec: &str) -> String {
-    let name = sec.trim_start_matches('.');
-    elf_readelf(obj, &["--wide", "--debug-dump", &format!("{name}")])
-}
-
-fn elf_readelf(obj: &[u8], args: &[&str]) -> String {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("dcc-readelf-{}-{}.o", std::process::id(), args.join("-").replace(['/', '.'], "_")));
-    std::fs::write(&path, obj).expect("write obj for readelf");
-    let out = std::process::Command::new("readelf").args(args).arg(&path).output();
-    let _ = std::fs::remove_file(&path);
-    String::from_utf8_lossy(&out.expect("run readelf").stdout).into_owned()
-}
-
-/// 编译 + 运行 + 取退出码（带 `DCC_BLOCKOPT_RULES` 下发的那一档）。
-fn run_exe_and_check(name: &str, source: &str, rules: &str) -> i32 {
-    let (o, e) = run_compile_and_run_env(name, source, &["-O2"], &[("DCC_BLOCKOPT_RULES", rules)]);
-    assert!(o.status.success(), "{name} 编译失败: {}", String::from_utf8_lossy(&o.stderr));
-    run_exe(&e)
-}
-
 /// A3 的门控不变量：溢出淘汰只影响「事实表还剩多少」，不影响任何值。
 ///
 /// 这一条不主张收益：Gate 0a 在 `luaV_execute` 上量到 `hit_capacity = 0`，也就是
@@ -780,41 +669,6 @@ int f(struct P *p, const char *path, int line) {
 }
 int main(void) { return 0; }
 "#;
-
-/// 按 `-S` 文本逐行累加 rsp 偏移，返回每个 `call` 处的偏移。
-///
-/// 起点取 8：ABI 规定 `call` 刚执行的函数入口 rsp ≡ 8 (mod 16)。只认本后端
-/// 对「改变 rsp」的四种写法（`push`/`pop`/`sub $N, %rsp`/`add $N, %rsp`）。
-/// 遇到 `mov %r13, %rsp` 这类把 rsp 拉回帧基的复位就不再累加 —— 判据只对
-/// 累加段成立，含糊的地方不猜（实测 f 的形状里没有它）。
-fn call_site_rsp_offsets(asm: &str) -> Vec<i64> {
-    let mut off = 8i64;
-    let mut calls = Vec::new();
-    for line in asm.lines() {
-        let l = line.trim();
-        if l == "mov %r13, %rsp" {
-            break;
-        }
-        if let Some(n) = l
-            .strip_prefix("sub $")
-            .and_then(|r| r.strip_suffix(", %rsp"))
-        {
-            off -= n.trim().parse::<i64>().expect("sub rsp 立即数");
-        } else if let Some(n) = l
-            .strip_prefix("add $")
-            .and_then(|r| r.strip_suffix(", %rsp"))
-        {
-            off += n.trim().parse::<i64>().expect("add rsp 立即数");
-        } else if l.starts_with("push ") {
-            off -= 8;
-        } else if l.starts_with("pop ") {
-            off += 8;
-        } else if l.starts_with("call ") {
-            calls.push(off);
-        }
-    }
-    calls
-}
 
 #[test]
 fn nested_call_sites_are_16_byte_aligned() {

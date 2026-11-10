@@ -5526,16 +5526,6 @@ fn retpoline_external_thunk_routes_indirect_branches_to_kernel_thunks() {
     let _ = fs::remove_file(&obj2);
 }
 
-/// 汇编文本里「有一行的整条指令就是它」（去掉前后空白与行内注释后逐字比）。
-/// 用子串判会假阳也假阴：临时文件名、`.file` 指令里都可能出现同样的字母。
-fn has_insn_line(asm_text: &str, mnemonic: &str) -> bool {
-    asm_text.lines().any(|l| {
-        let l = l.trim();
-        let l = l.split_once("/*").map(|(a, _)| a).unwrap_or(l);
-        l.trim() == mnemonic
-    })
-}
-
 /// `rep movs`/`rep stos` 前面那条 `cld` 只在**真的可能脏**时才发。判据全部来自实测：
 /// gcc 参照树 120 个 `.o` 里 266 条 `rep movs/stos`、**0** 条 `cld`，而我们改前同形状发
 /// 126 条（objtool 因此报 `redundant CLD`，全树 2 207 条）；x86-64 SysV 与内核入口都保证

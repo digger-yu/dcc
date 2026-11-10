@@ -2147,24 +2147,6 @@ fn bitfield_rmw_deep_nest() {
     assert_eq!(code, 0, "bitfield_rmw_deep_nest checks failed (exit={code})");
 }
 
-/// F4/F5/F6 smoke-compile (object-only; no link, since fixtures reference
-/// extern pick() or rely on x87 _Imaginary lowering without a driver main).
-fn compile_only(name: &str, src: &str) -> std::process::Output {
-    let dir = std::env::temp_dir();
-    let src_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let obj_path = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
-    std::fs::write(&src_path, src).expect("write fixture");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-std=gnu23", "-O2", "-c", "-o"])
-        .arg(&obj_path)
-        .arg(&src_path)
-        .output()
-        .expect("run dcc");
-    let _ = std::fs::remove_file(&src_path);
-    let _ = std::fs::remove_file(&obj_path);
-    out
-}
-
 /// F4: escaping nested function + deep vector chain must not have the
 /// trampoline band overlap the vector temp band (H3 fix, P2).
 #[test]
