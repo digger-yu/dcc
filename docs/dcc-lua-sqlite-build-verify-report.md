@@ -1,9 +1,11 @@
 # DCC — Lua 5.5.1 + SQLite: build & verification results
 
-**Verdict (re-checked 2026-10-27, dcc `918b9ae7`, gcc 13.3.0).**
+**Verdict (re-checked 2026-11-10, dcc `6b2e5c9e` + the working-tree `-shared` change,
+gcc 13.3.0).**
 dcc builds Lua 5.5.1 and SQLite 3.53.4/3.54.0 from source at `-O0`…`-O3`, and both
 binaries run. The **Lua official suite (`all.lua`) passes at all four levels on all
-three verification paths** (`final OK !!!`, `rc=0`), and after noise normalisation its
+three verification paths** (`final OK !!!`, `rc=0`) **with all five `libs/*.so`
+dynamic modules built by dcc itself** (§3.4), and after noise normalisation its
 output is **line-identical to the `gcc -O2` baseline in all 12 comparisons**
 (§4). §2 shows the four levels are genuinely distinct on the command line, not four
 copies of `-O2`. SQLite has been run against its **official TCL suite
@@ -22,6 +24,13 @@ break. Runtime
 performance is measured separately in §5 (`scripts/bench_lua_sqlite.sh`, clean rebuild
 per level) and is **not** part of this correctness verdict.
 
+One gap left open by the previous revision is closed: `-shared` produced no loadable
+shared object — it was an alias for `-fbuiltin-linker`, whose `.so` writer has no
+dynamic exports — so the module side of "dynamic module loading" had to be gcc-built.
+`-shared` now selects only the output form and links through the host GNU `ld -shared`
+(no host C compiler is started), so the five `libs/*.so` are dcc artifacts and the
+2026-11-10 re-run below used them.
+
 This file records final results only: build commands, result tables, the
 reproduce script and the open gaps.
 
@@ -31,7 +40,7 @@ reproduce script and the open gaps.
 
 | Item | Value |
 |---|---|
-| dcc | this repository `e8424e94`, `cargo build --release` → `target/release/dcc` |
+| dcc | this repository `6b2e5c9e` plus the working-tree `-shared` change (`src/cli.rs`, `src/driver.rs`, `src/link/host_ld.rs`), `cargo build --release` → `target/release/dcc` |
 | Lua | 5.5.1 (`~/lua-5.5.1`) |
 | Lua tests | `~/lua-5.5.1-tests` (official suite, `all.lua`) |
 | SQLite | 3.53.4 amalgamation (`~/sqlite`, `sqlite3.c` + `shell.c`) for §3.2/§5; 3.54.0 **source tree** (`~/sqlite-src-3540000`, from `scripts/setup_sqlite_suite.sh`) for the upstream suite |
@@ -161,23 +170,58 @@ therefore captures the recipe's real argument list from `make` and compiles the 
   (~416 lines, 27–28 test files). It costs one extra run per level and covers
   the area path B gives up; `scripts/check_lua_suite_diff.sh` runs all three.
 
-### 3.4 `libs/*.so` and `LD_LIBRARY_PATH=/tmp/rllib`
+### 3.4 `libs/*.so` (dcc-built) and `LD_LIBRARY_PATH=/tmp/rllib`
 
 The suite's dynamic-module tests load `libs/lib1.so`, `lib11.so`, `lib2.so`,
-`lib21.so`, `lib2-v2.so`. Those are built by the test tree's own makefile with
-**gcc**, not dcc:
+`lib21.so`, `lib2-v2.so`. All five are **dcc artifacts**, built by the test tree's
+own makefile with dcc as `CC` (only the `-O2` level applies; the makefile hard-codes
+it):
 
 ```bash
 cd ~/lua-5.5.1-tests/libs
-make LUA_DIR=~/lua-5.5.1/src CC=gcc      # gcc -Wall -O2 -fPIC -shared …
+make LUA_DIR=~/lua-5.5.1/src CC="$DCC"  # dcc -Wall -O2 -I… -fPIC -shared -o libN.so libN.c
 ```
 
-so the *host* program under test is dcc-built, while the modules are gcc-built
-and leave `lua_*` undefined (12 undefined `lua_*` symbols in `lib2-v2.so`),
-resolved at load time from the executable's exported symbols. In other words
-the "dynamic module loading" coverage is *dcc host + gcc modules*; the `.so`
-side is not a dcc artifact. Path A does load them: deleting `libs/*.so` makes
-path A fail at `main.lua:251` (`lua -l lib2-v2`), while path B still passes.
+dcc compiles each `libN.c` itself (`-fPIC` is honoured by the code generator) and
+links the `.so` through the host GNU `ld -shared` **directly**; the host C compiler
+is not started for any of the five builds:
+
+```
+$ make LUA_DIR=~/lua-5.5.1/src CC=$DCC
+/root/dcc/target/release/dcc -Wall -O2 -I/root/lua-5.5.1/src -fPIC -shared -o lib1.so lib1.c
+dcc: lib1.so (shared, via host ld)
+… (same shape for lib11.so, lib2.so, lib21.so, lib2-v2.so ← lib22.c)
+```
+
+`-shared` used to be an alias for `-fbuiltin-linker`. The built-in linker's `.so`
+writer has no dynamic exports (`.dynsym` entries are written with `st_name = 0` and
+`.dynamic` carries no `DT_HASH`/`DT_GNU_HASH`), so such an artifact `dlopen`ed but
+`dlsym()` found nothing; worse, it rejected the modules' undefined references
+(`lua_*`, `lib1_export`, `luaopen_lib2`) that are undefined **by design**. `-shared`
+now selects only the output form, and `-fbuiltin-linker -shared` is a hard error
+(`E0320`, "cannot emit a loadable shared object") instead of a silent one.
+
+What the dcc-built modules contain (`-O2 -fPIC`, sysv + GNU hash tables, no `TEXTREL`):
+
+| module | `T luaopen_*` | `U lua_*` | `DT_NEEDED` |
+|---|---|---|---|
+| `lib1.so` | 1 (`luaopen_lib1_sub`) | 8 | `libc.so.6` |
+| `lib11.so` | 1 (`luaopen_lib11`) | 0 | `libc.so.6` |
+| `lib2.so` | 1 (`luaopen_lib2`) | 4 | `libc.so.6` |
+| `lib21.so` | 1 (`luaopen_lib21`) | 0 | `libc.so.6` |
+| `lib2-v2.so` | 1 (`luaopen_lib2`) | 12 | `libc.so.6` |
+
+The undefined `lua_*` are resolved at load time from the executable's exported
+symbols (`make linux` links with `-Wl,-E`), and `lib11.so` resolves `lib1_export`
+from `lib1.so`. Path A exercises the chain: `attrib.lua:291` (`package.loadlib` of
+`lib11`, which must return `"exported"`), `attrib.lua:296` (`require"lib2-v2"`) and
+`main.lua:251` (`lua -l lib2-v2`). Deleting `libs/*.so` makes path A fail at
+`main.lua:251`, while path B still passes. Two of the five (`lib2.so`, `lib21.so`)
+are built but never `dlopen`ed by the suite — they cover the build/link path only,
+not loading. The behaviour is pinned by three integration cases in
+`tests/integration/c_link_debug.rs`: `shared_library_is_loadable_and_exports_symbols`,
+`shared_library_leaves_undefined_symbols_for_runtime_binding` and
+`builtin_linker_rejects_shared_output`.
 
 `/tmp/rllib` is a workaround for a missing dev symlink, and only path A needs
 it:
@@ -198,7 +242,8 @@ an error.
 
 ## 4. Verification results
 
-Re-run 2026-10-27 (final compiler `918b9ae7`) with `scripts/check_lua_suite_diff.sh`
+Re-run 2026-11-10 (compiler `6b2e5c9e` + the working-tree `-shared` change; code
+generation untouched) with `scripts/check_lua_suite_diff.sh`
 (`LEVELS="0 1 2 3" VARIANTS="ltests plain user"`); every level is a clean rebuild, the
 reference is the same script's `gcc -O2` tree. "identical" below means **after noise
 normalisation, line for line** (§4.1), and every run also ends in `final OK !!!` with
@@ -229,7 +274,10 @@ discussed in §5.
 builds; the runs above were taken on an otherwise idle host. The script's own verdict is
 `RESULT: PASS（dcc 各档与 gcc -O2 在官方套件上归一化后逐行相同）` — 12/12 comparisons
 identical, three self-noise checks (same gcc tree twice) identical, and the normaliser's
-own `--selftest` (45 checks, half of them "must be red") passes.
+own `--selftest` (45 checks, half of them "must be red") passes. Every run in §4 — the
+12 dcc builds and the gcc reference passes — used the dcc-built modules of §3.4, so the
+`attrib.lua` loadlib block and `main.lua:251` inside the compared output are *dcc host +
+dcc modules*, and the same modules also load in the gcc-built host.
 
 ### 4.1 Line counts and what counts as noise
 
@@ -293,7 +341,10 @@ instead of queueing behind the ~50 minutes that `-O0`/`-O1` plus a second gcc ba
 take; each level's own
 `run-dcc-O{L}.log` is the evidence for its row. The criterion is the **set of failing test
 names** relative to the baseline, so host-dependent upstream failures are not charged
-to dcc.
+to dcc. These SQLite rows were **not** re-run on 2026-11-10: the `-shared` change is
+confined to CLI flag routing and the host-`ld` shared-link path (`src/cli.rs`,
+`src/driver.rs`, `src/link/host_ld.rs`), which no SQLite recipe uses; the Lua rows of
+§4 were re-run on today's binary.
 
 | Build | suite outcome | failing names | new vs baseline |
 |---|---|---|---|
@@ -446,8 +497,8 @@ LUA=~/lua-5.5.1
 TESTS=~/lua-5.5.1-tests
 SQ=~/sqlite
 
-# 0. test modules for dynamic loading (gcc-built on purpose, see §3.4)
-( cd "$TESTS/libs" && rm -f all *.so && make LUA_DIR="$LUA/src" CC=gcc )
+# 0. test modules for dynamic loading (dcc-built, see §3.4)
+( cd "$TESTS/libs" && rm -f all *.so && make LUA_DIR="$LUA/src" CC="$DCC" )
 
 # 0b. only path A needs this (see §3.4): unversioned libreadline.so
 mkdir -p /tmp/rllib
@@ -553,5 +604,10 @@ ITERATIONS=5 bash ~/dcc/scripts/bench_lua_sqlite.sh
   the complete `quick.test` above (all four levels), the 470 upstream tests of §4.5, and
   one upstream workload (`speedtest1`), whose timing is the §5 SQLite row.
 - Targets other than x86-64 Linux (`ptrdiff_t` / integer widths differ).
-- All Lua/SQLite links here go through the host cc; `-fbuiltin-linker` was not
-  exercised with `-Wl,-E` / `--export-dynamic`.
+- `-shared` is verified on x86-64 Linux with GNU `ld` only (§3.4). The built-in
+  linker still cannot emit a loadable `.so`: its `.dynsym`/hash writers are missing,
+  so `-fbuiltin-linker -shared` is refused with `E0320` rather than producing an
+  artifact that `dlopen`s but exports nothing. `-flto` + `-shared`,
+  `-shared --whole-archive`, and module linking on non-glibc toolchains are not
+  exercised. Two of the five modules (`lib2.so`, `lib21.so`) are built but not
+  `dlopen`ed by the suite.
