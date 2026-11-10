@@ -1773,40 +1773,48 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 let v = &a[7..];
                 link_opts_z.push(v.to_string());
             }
-            // -rpath
+            // -rpath: 内置链接器要写进 dynamic 段，宿主 ld/cc 直驱只看
+            // `host_link_args`，不同步就会出现「解析了但静默不写 DT_RUNPATH」。
             "-rpath" => {
                 i += 1;
-                link_rpath.push(
-                    args.get(i)
-                        .ok_or_else(|| CliError::new("missing arg after -rpath"))?
-                        .clone(),
-                );
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -rpath"))?
+                    .clone();
+                host_link_args.push(format!("-Wl,-rpath,{p}"));
+                link_rpath.push(p);
             }
             a if a.starts_with("-Wl,-rpath,") => {
+                host_link_args.push(a.to_string());
                 link_rpath.push(a[11..].to_string());
             }
             // -rpath-link
             "-rpath-link" => {
                 i += 1;
-                link_rpath_link.push(
-                    args.get(i)
-                        .ok_or_else(|| CliError::new("missing arg after -rpath-link"))?
-                        .clone(),
-                );
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -rpath-link"))?
+                    .clone();
+                host_link_args.push(format!("-Wl,-rpath-link,{p}"));
+                link_rpath_link.push(p);
             }
             a if a.starts_with("-Wl,-rpath-link,") => {
+                host_link_args.push(a.to_string());
                 link_rpath_link.push(a[16..].to_string());
             }
-            // -runpath
+            // -runpath: GNU ld 没有独立开关，`-rpath` 在默认 new-dtags 下
+            // 写的就是 DT_RUNPATH，宿主路径按它转发。
             "-runpath" => {
                 i += 1;
-                link_runpath.push(
-                    args.get(i)
-                        .ok_or_else(|| CliError::new("missing arg after -runpath"))?
-                        .clone(),
-                );
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -runpath"))?
+                    .clone();
+                host_link_args.push(format!("-Wl,-rpath,{p}"));
+                link_runpath.push(p);
             }
             a if a.starts_with("-Wl,-runpath,") => {
+                host_link_args.push(format!("-Wl,-rpath,{}", &a[13..]));
                 link_runpath.push(a[13..].to_string());
             }
             // -fuse-ld=
@@ -3667,6 +3675,23 @@ impl CliError {
 mod tests {
     use super::{parse, InputLang};
     use std::path::PathBuf;
+
+    #[test]
+    fn rpath_is_forwarded_to_host_link_args() {
+        for args in [
+            vec!["-Wl,-rpath,/opt/lib", "input.c"],
+            vec!["-rpath", "/opt/lib", "input.c"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            let cfg = parse(&args).expect("rpath option should parse");
+            assert_eq!(cfg.link_opts.rpath.as_deref(), Some("/opt/lib"));
+            assert!(
+                cfg.host_link_args.iter().any(|a| a == "-Wl,-rpath,/opt/lib"),
+                "host ld/cc 直驱路径必须拿到 rpath: {:?}",
+                cfg.host_link_args
+            );
+        }
+    }
 
     #[test]
     fn x_language_aliases_are_supported() {
