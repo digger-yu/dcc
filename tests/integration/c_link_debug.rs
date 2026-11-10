@@ -4267,15 +4267,20 @@ fn gnu_stack_note_section_matches_gas() {
 /// `output_kind = Shared` 的同时把 `built_link` 置真），而内置链接器的 `.so` 写器
 /// 没有导出表 —— `.dynsym` 条目的符号名全写 0、`.dynamic` 里也没有 DT_HASH/
 /// DT_GNU_HASH，产物 `dlopen` 成功但 `dlsym` 一个符号也找不到。Lua 的 C 模块
-/// （`luaopen_*`）正是这一形，所以判据必须是「运行时 dlsym 拿得到并调用正确」，
+/// （`luaopen_*`）正是这一形，所以判据必须是「加载后真的调用到导出函数」，
 /// 只看退出码与文件存在会把静默坏产物放过去。
+///
+/// 夹具零第三方文件：C 源是内联字符串、没有 `#include`，宿主按 `-L/-l/-rpath`
+/// 直接链 `.so`（DT_NEEDED + RUNPATH 交给加载器），不借 `dlopen` 的系统头。
+/// 这样换一台机器 clone 下来跑 `cargo test`，输入完全一致。
 #[test]
 #[cfg(unix)]
 fn shared_library_is_loadable_and_exports_symbols() {
     let dir = std::env::temp_dir();
     let tag = temp_tag();
+    let stem = format!("dccshared{tag}");
     let src = dir.join(format!("dcc-shared-mod-{tag}.c"));
-    let so = dir.join(format!("dcc-shared-mod-{tag}.so"));
+    let so = dir.join(format!("lib{stem}.so"));
     fs::write(
         &src,
         "int shared_add(int a, int b) { return a + b; }\nstatic int hidden_helper(void) { return 1; }\n",
@@ -4320,36 +4325,29 @@ fn shared_library_is_loadable_and_exports_symbols() {
         "共享库不得带 `.interp`（那是可执行/PIE 的 PT_INTERP），节表: {names:?}"
     );
 
-    // 宿主程序：dlopen 绝对路径 + dlsym + 真调用。`run_exe_bounded` 不传 argv，
-    // 所以路径只能编进 C 字符串字面量。
+    // 宿主程序：只写 extern 声明，按 `-L/-l` 直接链 `.so`；DT_NEEDED 与
+    // `-rpath` 交给加载器解析。全链没有 `#include`，输入零第三方文件。
     let host_src = dir.join(format!("dcc-shared-host-{tag}.c"));
     let host_exe = dir.join(format!("dcc-shared-host-{tag}"));
     fs::write(
         &host_src,
-        format!(
-            "#include <dlfcn.h>\n\
-             #include <stdio.h>\n\
-             int main(void) {{\n\
-             \x20   void *h = dlopen(\"{so}\", RTLD_NOW);\n\
-             \x20   if (!h) {{ printf(\"dlopen: %s\\n\", dlerror()); return 1; }}\n\
-             \x20   int (*fn)(int, int) = (int (*)(int, int))dlsym(h, \"shared_add\");\n\
-             \x20   if (!fn) {{ printf(\"dlsym: %s\\n\", dlerror()); return 2; }}\n\
-             \x20   printf(\"shared_add=%d\\n\", fn(20, 22));\n\
-             \x20   return 0;\n\
-             }}\n",
-            so = so.display()
-        ),
+        "extern int shared_add(int, int);\n\
+         int main(void) { return shared_add(20, 22) == 42 ? 0 : 1; }\n",
     )
     .expect("write host fixture");
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-o")
         .arg(&host_exe)
         .arg(&host_src)
+        .arg("-L")
+        .arg(&dir)
+        .arg(format!("-l{stem}"))
+        .arg(format!("-Wl,-rpath,{}", dir.display()))
         .output()
         .expect("run dcc");
     assert!(
         out.status.success(),
-        "编宿主程序失败: {}",
+        "宿主链接 dcc 产出的 .so 失败（导出缺失或 DT_NEEDED/RUNPATH 不对）: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let (code, stdout, err) = run_exe_bounded(&host_exe);
@@ -4359,11 +4357,6 @@ fn shared_library_is_loadable_and_exports_symbols() {
         "加载 dcc 产出的 .so 失败 (rc={code}): {}{}",
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&err)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&stdout).trim(),
-        "shared_add=42",
-        "dlsym 出来的函数调用结果不对"
     );
 
     let _ = fs::remove_file(&src);
@@ -4378,13 +4371,16 @@ fn shared_library_is_loadable_and_exports_symbols() {
 /// 它们都只存在于主程序（`-Wl,-E` 导出）里。旧路径（`-shared` ⇒ 内置链接器）
 /// 在这里直接报一串 E0302 未定义符号，于是模块根本链不出来；`ld -shared`
 /// 则按规范保留 `U` 形态。这里连「宿主符号真的在运行时被解析」一起验。
+///
+/// 夹具同样零第三方文件：两边 C 源都是内联字符串，没有 `#include`。
 #[test]
 #[cfg(unix)]
 fn shared_library_leaves_undefined_symbols_for_runtime_binding() {
     let dir = std::env::temp_dir();
     let tag = temp_tag();
+    let stem = format!("dcchost{tag}");
     let src = dir.join(format!("dcc-shared-undef-{tag}.c"));
-    let so = dir.join(format!("dcc-shared-undef-{tag}.so"));
+    let so = dir.join(format!("lib{stem}.so"));
     fs::write(
         &src,
         "extern int host_export(void);\nint shared_call_host(void) { return host_export() + 1; }\n",
@@ -4402,31 +4398,27 @@ fn shared_library_leaves_undefined_symbols_for_runtime_binding() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // 宿主定义 `host_export` 并以 `-Wl,-E` 导出（与 lua 主程序的构建同形）。
+    // 宿主定义 `host_export` 并以 `-Wl,-E` 导出（与 lua 主程序的构建同形），
+    // 再按 `-L/-l` 直接链 `.so`；加载期由 RUNPATH 找到模块、由主程序的动态
+    // 符号表满足 `host_export`。全链无 `#include`。
     let host_src = dir.join(format!("dcc-shared-undef-host-{tag}.c"));
     let host_exe = dir.join(format!("dcc-shared-undef-host-{tag}"));
     fs::write(
         &host_src,
-        format!(
-            "#include <dlfcn.h>\n\
-             #include <stdio.h>\n\
-             int host_export(void) {{ return 41; }}\n\
-             int main(void) {{\n\
-             \x20   void *h = dlopen(\"{so}\", RTLD_NOW);\n\
-             \x20   if (!h) {{ printf(\"dlopen: %s\\n\", dlerror()); return 1; }}\n\
-             \x20   int (*fn)(void) = (int (*)(void))dlsym(h, \"shared_call_host\");\n\
-             \x20   if (!fn) {{ printf(\"dlsym: %s\\n\", dlerror()); return 2; }}\n\
-             \x20   printf(\"from_host=%d\\n\", fn());\n\
-             \x20   return 0;\n\
-             }}\n",
-            so = so.display()
-        ),
+        "extern int shared_call_host(void);\n\
+         int host_export(void) { return 41; }\n\
+         int main(void) { return shared_call_host() == 42 ? 0 : 1; }\n",
     )
     .expect("write host fixture");
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-Wl,-E", "-o"])
         .arg(&host_exe)
         .arg(&host_src)
+        .arg("-L")
+        .arg(&dir)
+        .arg(format!("-l{stem}"))
+        .arg("-Wl,--allow-shlib-undefined")
+        .arg(format!("-Wl,-rpath,{}", dir.display()))
         .output()
         .expect("run dcc");
     assert!(
@@ -4441,11 +4433,6 @@ fn shared_library_leaves_undefined_symbols_for_runtime_binding() {
         "加载期绑定失败 (rc={code}): {}{}",
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&err)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&stdout).trim(),
-        "from_host=42",
-        "模块没调用到主程序导出的符号"
     );
 
     let _ = fs::remove_file(&src);

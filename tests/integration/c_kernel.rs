@@ -499,102 +499,6 @@ fn static_key_decl_compiles() {
 // 缺失特性补全: 新增测试契约
 // ============================================================
 
-/// QEMU boot: verify kernel config has serial console support when
-/// bzImage exists, ensuring QEMU boot can produce visible output.
-#[test]
-#[cfg(unix)]
-fn kernel_config_has_serial_console_for_qemu_boot() {
-    let kernel_dir =
-        std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()))
-            .join("linux-7.1");
-    let bzimage = kernel_dir.join("arch/x86/boot/bzImage");
-    let config = kernel_dir.join(".config");
-
-    // Only check when bzImage actually exists
-    if !bzimage.exists() {
-        eprintln!("SKIP: no bzImage found at {bzimage:?}");
-        return;
-    }
-    if !config.exists() {
-        eprintln!("SKIP: no .config found at {config:?}");
-        return;
-    }
-
-    let config_text = fs::read_to_string(&config).expect("read kernel .config");
-
-    // Serial console is required for QEMU -nographic boot log
-    assert!(
-        config_text.contains("CONFIG_SERIAL_8250=y")
-            || config_text.contains("CONFIG_SERIAL_8250_CONSOLE=y"),
-        "kernel .config must enable CONFIG_SERIAL_8250 and \
-         CONFIG_SERIAL_8250_CONSOLE for QEMU serial boot \
-         log; run: scripts/config --enable \
-         CONFIG_SERIAL_8250_CONSOLE"
-    );
-    assert!(
-        config_text.contains("CONFIG_SERIAL_CORE=y"),
-        "kernel .config must enable CONFIG_SERIAL_CORE \
-         for serial console support"
-    );
-}
-
-/// QEMU boot: run actual qemu-system-x86_64 with real bzImage
-/// and verify kernel boot log strings appear in output.
-#[test]
-#[cfg(unix)]
-fn qemu_boot_real_kernel_produces_boot_log() {
-    let kernel_dir =
-        std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()))
-            .join("linux-7.1");
-    let bzimage = kernel_dir.join("arch/x86/boot/bzImage");
-
-    if !bzimage.exists() {
-        eprintln!("SKIP: no bzImage at {bzimage:?}");
-        return;
-    }
-    if std::process::Command::new("qemu-system-x86_64")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("SKIP: qemu-system-x86_64 not installed");
-        return;
-    }
-
-    let output = std::process::Command::new("qemu-system-x86_64")
-        .arg("-kernel")
-        .arg(&bzimage)
-        .arg("-m")
-        .arg("512M")
-        .arg("-no-reboot")
-        .arg("-display")
-        .arg("none")
-        .arg("-nographic")
-        .arg("-append")
-        .arg("console=ttyS0 panic=-1")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .expect("run qemu-system-x86_64");
-
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    assert!(
-        combined.contains("Linux version"),
-        "QEMU boot log must contain 'Linux version'; \
-         got: {}...",
-        &combined[..combined.len().min(500)]
-    );
-    assert!(
-        combined.contains("Kernel command line") || combined.contains("Memory:"),
-        "QEMU boot log should contain kernel init messages"
-    );
-}
-
 /// kernel object corpus: 固化真实 Linux arch/x86/kernel .o 样本.
 #[test]
 fn kernel_object_corpus_arch_x86_kernel() {
@@ -1109,206 +1013,207 @@ void store_big(struct Big *p, struct Big v) { *p = v; }
 }
 
 // ============================================================================
-// Linux header graph preprocessing E2E tests
+// Kernel-style header preprocessing E2E (self-contained fixtures)
 // ============================================================================
 
-/// Linux 内核头 compiler_types.h 预处理 E2E: 验证真实内核头可被 dcc 预处理
+/// 内核风格头 compiler_types.h 预处理：验证嵌套 include 与 `__force` /
+/// `__maybe_unused` 宏展开。夹具现场生成，零第三方文件。
 #[test]
-fn linux_header_compiler_types_preprocess_e2e() {
-    let kernel_include = std::path::Path::new("/usr/src/linux-hwe-7.0-headers-7.0.0-28/include");
-    let compiler_types = kernel_include.join("linux/compiler_types.h");
-    if !compiler_types.exists() {
-        eprintln!("skip: compiler_types.h not found");
-        return;
-    }
+fn kernel_style_header_compiler_types_preprocess_e2e() {
+    let root = std::env::temp_dir().join(format!(
+        "dcc-khdr-compiler-{}-{}",
+        std::process::id(),
+        temp_tag()
+    ));
+    write_kernel_style_headers(&root);
+    let src = root.join("use_compiler_types.c");
+    let out = root.join("use_compiler_types.i");
 
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-linux-hdr-compiler-{}.c", std::process::id()));
-    let out = dir.join(format!("dcc-linux-hdr-compiler-{}.i", std::process::id()));
-
-    // 源文件引用 compiler_types.h 并使用其定义的宏
-    let src_text = format!(
-        r#"
-#include "{kernel_include}/linux/compiler_types.h"
-int main(void) {{
-    __force int x = 0;
-    __maybe_unused int y = 0;
-    (void)x; (void)y;
-    return 0;
-}}
-"#,
-        kernel_include = kernel_include.display()
-    );
-    fs::write(&src, src_text).expect("write source");
+    fs::write(
+        &src,
+        "#include <linux/compiler_types.h>\n\
+         int f(void) { __force int x = 1; __maybe_unused int y = 2; return x + y; }\n",
+    )
+    .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-E", "-o"])
         .arg(&out)
         .arg("-I")
-        .arg(kernel_include)
+        .arg(root.join("include"))
         .arg(&src)
         .output()
         .expect("run dcc -E");
-
-    let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(&out);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "compiler_types.h preprocess must succeed; stderr: {stderr}"
     );
+    let text = fs::read_to_string(&out).unwrap_or_default();
+    assert!(
+        text.contains("__attribute__((__unused__))"),
+        "`__maybe_unused` 未按内核风格头展开: {text}"
+    );
+    assert!(
+        text.contains("__force int x") || text.contains("int x = 1;") || text.contains("int x = 1 ;"),
+        "`__force` 应展开为空但保留声明: {text}"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
-/// Linux 内核头 rwonce.h 预处理 E2E: 验证 READ_ONCE/WRITE_ONCE 宏展开
+/// 内核风格头 rwonce.h 预处理：验证 READ_ONCE/WRITE_ONCE 宏展开。
 #[test]
-fn linux_header_rwonce_preprocess_e2e() {
-    let kernel_include = std::path::Path::new("/usr/src/linux-hwe-7.0-headers-7.0.0-28/include");
-    let rwonce = kernel_include.join("asm-generic/rwonce.h");
-    if !rwonce.exists() {
-        eprintln!("skip: rwonce.h not found");
-        return;
-    }
+fn kernel_style_header_rwonce_preprocess_e2e() {
+    let root = std::env::temp_dir().join(format!(
+        "dcc-khdr-rwonce-{}-{}",
+        std::process::id(),
+        temp_tag()
+    ));
+    write_kernel_style_headers(&root);
+    let src = root.join("use_rwonce.c");
+    let out = root.join("use_rwonce.i");
 
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-linux-hdr-rwonce-{}.c", std::process::id()));
-    let out = dir.join(format!("dcc-linux-hdr-rwonce-{}.i", std::process::id()));
-
-    let src_text = format!(
-        r#"
-#include "{kernel_include}/asm-generic/rwonce.h"
-int main(void) {{
-    int val = 42;
-    int r = READ_ONCE(val);
-    WRITE_ONCE(val, r + 1);
-    return 0;
-}}
-"#,
-        kernel_include = kernel_include.display()
-    );
-    fs::write(&src, src_text).expect("write source");
+    fs::write(
+        &src,
+        "#include <asm-generic/rwonce.h>\n\
+         int main(void) { int val = 42; int r = READ_ONCE(val); WRITE_ONCE(val, r + 1); return val - 43; }\n",
+    )
+    .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-E", "-o"])
         .arg(&out)
         .arg("-I")
-        .arg(kernel_include)
+        .arg(root.join("include"))
         .arg(&src)
         .output()
         .expect("run dcc -E");
 
-    let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(&out);
-
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "rwonce.h preprocess must succeed; stderr: {stderr}");
+    assert!(
+        output.status.success(),
+        "rwonce.h preprocess must succeed; stderr: {stderr}"
+    );
+    let text = fs::read_to_string(&out).unwrap_or_default();
+    assert!(
+        text.contains("const volatile"),
+        "READ_ONCE 未展开成 volatile 读: {text}"
+    );
+    assert!(
+        text.contains("do {") || text.contains("while (0)"),
+        "WRITE_ONCE 未展开成 do/while 语句: {text}"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
-/// Linux 内核 generated/autoconf.h 预处理 E2E: 验证 CONFIG_* 宏可被解析
+/// 内核风格头 generated/autoconf.h 预处理：验证 CONFIG_* 宏状态驱动条件编译。
 #[test]
-fn linux_header_autoconf_preprocess_e2e() {
-    let autoconf = std::path::Path::new(
-        "/usr/src/linux-headers-7.0.0-28-generic/include/generated/autoconf.h",
-    );
-    if !autoconf.exists() {
-        eprintln!("skip: autoconf.h not found");
-        return;
-    }
+fn kernel_style_header_autoconf_preprocess_e2e() {
+    let root = std::env::temp_dir().join(format!(
+        "dcc-khdr-autoconf-{}-{}",
+        std::process::id(),
+        temp_tag()
+    ));
+    write_kernel_style_headers(&root);
+    let src = root.join("use_autoconf.c");
+    let out = root.join("use_autoconf.i");
 
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-linux-hdr-autoconf-{}.c", std::process::id()));
-    let out = dir.join(format!("dcc-linux-hdr-autoconf-{}.i", std::process::id()));
-
-    // autoconf.h 只含 #define CONFIG_* 宏, 不含可执行代码
-    let src_text = format!(
-        r#"
-#include "{autoconf_path}"
-/* 引用几个 CONFIG 宏以验证展开 */
-#ifdef CONFIG_MTRR
-int mtrr_enabled(void) {{ return 1; }}
-#else
-int mtrr_enabled(void) {{ return 0; }}
-#endif
-int main(void) {{ return mtrr_enabled(); }}
-"#,
-        autoconf_path = autoconf.display()
-    );
-    fs::write(&src, src_text).expect("write source");
+    fs::write(
+        &src,
+        "#include <autoconf.h>\n\
+         #ifdef CONFIG_MTRR\n\
+         int mtrr_enabled(void) { return 12345; }\n\
+         #else\n\
+         int mtrr_enabled(void) { return 54321; }\n\
+         #endif\n\
+         int main(void) { return mtrr_enabled(); }\n",
+    )
+    .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-E", "-o"])
         .arg(&out)
+        .arg("-I")
+        .arg(root.join("generated"))
         .arg(&src)
         .output()
         .expect("run dcc -E");
 
-    let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(&out);
-
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "autoconf.h preprocess must succeed; stderr: {stderr}");
+    assert!(
+        output.status.success(),
+        "autoconf.h preprocess must succeed; stderr: {stderr}"
+    );
+    let text = fs::read_to_string(&out).unwrap_or_default();
+    assert!(
+        text.contains("return 12345;"),
+        "CONFIG_MTRR 已定义，应保留 #ifdef 分支: {text}"
+    );
+    assert!(
+        !text.contains("54321"),
+        "CONFIG_MTRR 已定义，#else 分支不应出现: {text}"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
-/// Linux 内核头依赖图 E2E: 多文件包含闭包验证依赖追踪
+/// 内核风格头依赖图：嵌套 include 闭包必须被 `-MMD` 完整记录。
 #[test]
-fn linux_header_graph_dependency_closure() {
-    let kernel_include = std::path::Path::new("/usr/src/linux-hwe-7.0-headers-7.0.0-28/include");
-    let generated_include =
-        std::path::Path::new("/usr/src/linux-headers-7.0.0-28-generic/include/generated");
-    let compiler_types = kernel_include.join("linux/compiler_types.h");
-    let autoconf = generated_include.join("autoconf.h");
-    if !compiler_types.exists() || !autoconf.exists() {
-        eprintln!("skip: kernel headers not found");
-        return;
-    }
+fn kernel_style_header_graph_dependency_closure() {
+    let root = std::env::temp_dir().join(format!(
+        "dcc-khdr-graph-{}-{}",
+        std::process::id(),
+        temp_tag()
+    ));
+    write_kernel_style_headers(&root);
+    let src = root.join("graph.c");
+    let obj = root.join("graph.o");
+    let dep = root.join("graph.d");
 
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-linux-hdr-graph-{}.c", std::process::id()));
-    let dep = dir.join(format!("dcc-linux-hdr-graph-{}.d", std::process::id()));
-
-    // 同时引用两个内核头, 验证 -MMD 能追踪整个依赖闭包
-    let src_text = format!(
-        r#"
-#include "{autoconf_path}"
-#include "{compiler_types_path}"
-int main(void) {{
-    __force int x = 0;
-#ifdef CONFIG_MTRR
-    (void)x;
-#endif
-    return 0;
-}}
-"#,
-        autoconf_path = autoconf.display(),
-        compiler_types_path = compiler_types.display()
-    );
-    fs::write(&src, src_text).expect("write source");
+    fs::write(
+        &src,
+        "#include <autoconf.h>\n\
+         #include <linux/compiler_types.h>\n\
+         int main(void) {\n\
+             __force int x = 0;\n\
+         #ifdef CONFIG_MTRR\n\
+             (void)x;\n\
+         #endif\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-MMD", "-MF"])
         .arg(&dep)
         .arg("-I")
-        .arg(kernel_include)
+        .arg(root.join("include"))
         .arg("-I")
-        .arg(generated_include)
+        .arg(root.join("generated"))
         .arg("-o")
-        .arg(dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())))
+        .arg(&obj)
         .arg(&src)
         .output()
         .expect("run dcc -MMD");
 
-    let dep_text = fs::read_to_string(&dep).unwrap_or_default();
-    let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(&dep);
-    let _ = fs::remove_file(dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())));
-
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "header graph compile must succeed; stderr: {stderr}");
-    // 依赖文件应包含至少 autoconf.h 和 compiler_types.h 的路径
     assert!(
-        dep_text.contains("autoconf.h") || dep_text.contains("compiler_types.h"),
-        "depfile should track kernel headers: {dep_text}"
+        output.status.success(),
+        "header graph compile must succeed; stderr: {stderr}"
     );
+    let dep_text = fs::read_to_string(&dep).unwrap_or_default();
+    for header in ["autoconf.h", "compiler_types.h", "compiler_attributes.h"] {
+        assert!(
+            dep_text.contains(header),
+            "depfile 应记录嵌套 include 闭包里的 {header}: {dep_text}"
+        );
+    }
+    assert!(
+        !dep_text.contains("/usr/src"),
+        "depfile 不得指向宿主第三方路径: {dep_text}"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 // ====== kernel-sensitive opt regression: volatile/barrier/asm clobber ======

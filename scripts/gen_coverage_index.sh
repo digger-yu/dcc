@@ -349,6 +349,13 @@ readelf_debug_info_dump compile
 parse_debug_info compile
 var_location aux
 dwarf_reg_name aux
+write_kernel_style_headers aux
+discard_out aux
+objdump_insns_of compile
+run_compile_and_run_env run
+run_compile_object_env compile
+run_gcc_cross_check_both_opts cross-check
+temp_tag aux
 '
 declare -A CRIT
 while IFS=' ' read -r h lab; do

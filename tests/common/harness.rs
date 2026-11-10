@@ -39,6 +39,53 @@ pub(crate) fn temp_tag() -> String {
     format!("{}-{n}", std::process::id())
 }
 
+/// 铺一套**内核风格**的最小头文件树：include guard、嵌套 include、
+/// `READ_ONCE`/`WRITE_ONCE` 与 `CONFIG_*` 宏。
+///
+/// 集成用例的夹具零第三方文件：不读宿主的 `/usr/src` 或任何发行版内核头，
+/// 换一台机器 clone 下来跑 `cargo test`，输入与断言完全一致。真实内核头的
+/// 覆盖由 `scripts/kernel_full_check.sh` 的全树构建负责。
+pub(crate) fn write_kernel_style_headers(root: &std::path::Path) {
+    fs::create_dir_all(root.join("include/linux")).expect("mkdir include/linux");
+    fs::create_dir_all(root.join("include/asm-generic")).expect("mkdir include/asm-generic");
+    fs::create_dir_all(root.join("generated")).expect("mkdir generated");
+    fs::write(
+        root.join("include/linux/compiler_attributes.h"),
+        "#ifndef _LINUX_COMPILER_ATTRIBUTES_H\n\
+         #define _LINUX_COMPILER_ATTRIBUTES_H\n\
+         #define __maybe_unused __attribute__((__unused__))\n\
+         #define __always_inline inline __attribute__((always_inline))\n\
+         #endif\n",
+    )
+    .expect("write compiler_attributes.h");
+    fs::write(
+        root.join("include/linux/compiler_types.h"),
+        "#ifndef _LINUX_COMPILER_TYPES_H\n\
+         #define _LINUX_COMPILER_TYPES_H\n\
+         #include <linux/compiler_attributes.h>\n\
+         #ifndef __CHECKER__\n\
+         # define __force\n\
+         # define __rcu\n\
+         #endif\n\
+         #endif\n",
+    )
+    .expect("write compiler_types.h");
+    fs::write(
+        root.join("include/asm-generic/rwonce.h"),
+        "#ifndef __ASM_GENERIC_RWONCE_H\n\
+         #define __ASM_GENERIC_RWONCE_H\n\
+         #define READ_ONCE(x) (*(const volatile __typeof__(x) *)&(x))\n\
+         #define WRITE_ONCE(x, val) do { *(volatile __typeof__(x) *)&(x) = (val); } while (0)\n\
+         #endif\n",
+    )
+    .expect("write rwonce.h");
+    fs::write(
+        root.join("generated/autoconf.h"),
+        "#define CONFIG_MTRR 1\n#define CONFIG_SMP 1\n",
+    )
+    .expect("write autoconf.h");
+}
+
 pub(crate) fn run_syntax_test(name: &str, source: &str) -> std::process::Output {
     let path = std::env::temp_dir().join(format!("dcc-{name}-{}.c", temp_tag()));
     fs::write(&path, source).expect("write C fixture");
