@@ -63,14 +63,16 @@ tests/
 │   └── harness/
 │       ├── elf.rs                 # ELF64 节/符号/动态段解析（elf64_*、readelf_relocations…）
 │       ├── driver_cli.rs          # 驱动 CLI 面（dcc_cmd、fixtures_dir、write_src、temp_dir）
-│       └── cpp_frontend.rs        # C++ native/legacy 对照助手（callable_key、lower_both…）
-├── integration.rs                 # 壳：< 300 行，只有 use + #[path] mod harness + 15 行 include!
+│       ├── cpp_frontend.rs        # C++ native/legacy 对照助手（callable_key、lower_both…）
+│       └── probe.rs               # 编译探针与读数（compile_only、cg_wrap、frame_loads_in_asm…）
+├── integration.rs                 # 壳：< 300 行，只有 use + #[path] mod harness + 24 行 include!
 ├── integration/                   # 主题子文件（被 include!，不是独立 cargo target）
 │   ├── c_lang.rs                  # 通用 C 语义
 │   ├── c_asm.rs                   # inline asm / mini-asm（关联 fixtures/asm/）
 │   ├── c_kernel.rs                # 内核构造（percpu/static_key/objtool/…）
 │   ├── c_attr_builtin.rs          # __attribute__ / __builtin__
 │   ├── c_pp_c23.rs                # 预处理器与 C89/C11/C23 特性
+│   ├── c_pp_cache.rs              # 预处理 include 缓存的跨 TU 复用边界
 │   ├── c_abi_vararg.rs            # va_list/va_arg/va_copy/SSE-up ABI
 │   ├── c_link_debug.rs            # DWARF/reloc/section/ifunc/vdso/ELF 结构
 │   ├── c_cross.rs                 # 交叉目标（aarch64/riscv/mips/qemu/windows/darwin）
@@ -79,8 +81,16 @@ tests/
 │   ├── cpp_stdlib.rs              # C++ 标准库面（chrono/string/fstream/filesystem）
 │   ├── cpp_runtime.rs             # C++ 运行期/链接面（vtable/ctor-dtor/eh/throw/catch/abi）
 │   ├── opt.rs                     # 优化 pass（lto/ssa/fold/inline/dce/devirt/vector）
+│   ├── opt_licm.rs                # LICM（循环不变式外提）执行级判据
+│   ├── opt_ssa_gate.rs            # SSA 管线准入/重建顺序/循环形态的执行级判据
+│   ├── p16_rotation.rs            # P16 真轮转寄存器的接受、排布与反向对照
+│   ├── codegen_cold_layout.rs     # 冷格外置（DCC_COLD_OUTLINE）
+│   ├── codegen_param_home.rs      # 形参当家（DCC_HOME_PARAMS）
+│   ├── codegen_frame_facts.rs     # 帧槽事实/屏障重划/非局部控制流护栏
 │   ├── xfail.rs                   # 已知预期失败（关联 fixtures/c_xfail/）
-│   └── glue_misc.rs               # 兜底，硬上限 60 test / 1200 行（防新杂物堆）
+│   ├── glue_misc.rs               # 兜底，硬上限 60 test / 1200 行（防新杂物堆）
+│   ├── parallel_rodata.rs         # 并行发射下 .rodata 内部化的产物一致性
+│   └── dwarf_gdb.rs               # DWARF 信息 + gdb 批处理验证
 ├── errors.rs                      # 错误快照测试（独立 target，写法范本）
 ├── profile.rs                     # PGO/profile CLI 面（独立 target）
 ├── perf_regression.rs             # 性能回归（独立 target）
@@ -212,8 +222,8 @@ tests/
 ## 5. harness 用法
 
 `tests/common/harness.rs` 由壳以 `#[path = "common/harness.rs"] mod harness; use harness::*;`
-挂载，条目全部 `pub(crate)`；`harness/elf.rs`、`harness/driver_cli.rs`、`harness/cpp_frontend.rs`
-三个子模块由 harness.rs 自己以 `#[path]` 挂载并 `pub(crate) use …::*` 重导出，所以主题子文件
+挂载，条目全部 `pub(crate)`；`harness/elf.rs`、`harness/driver_cli.rs`、`harness/cpp_frontend.rs`、
+`harness/probe.rs` 四个子模块由 harness.rs 自己以 `#[path]` 挂载并 `pub(crate) use …::*` 重导出，所以主题子文件
 看到的仍是 `harness::*` 单一入口（主题子文件内部不得出现 `mod` / `use`，见 §2.1 规则 2）。
 按用途分组（完整契约与分流表见本文 §5）：
 
@@ -224,6 +234,7 @@ tests/
 | 链接/宿主 | `run_host_link_and_run` / `_with`、`host_link_objects_and_run`、`host_link_cpp_object_and_run`、`run_cpp_object_test`、`run_cpp_with_mode` |
 | ELF/DWARF | `elf64_sections`、`elf64_section_data`、`elf64_syms`、`elf64_func_symbols`、`elf64_undefined_symbols`、`elf64_dynamic_needed`、`readelf_relocations`、`compile_legacy_asm_object` |
 | 断言 | `assert_exit_code`、`assert_bytes_present`、`assert_disasm_present`、`assert_runtime_fails_with`、`assert_kernel_corpus_object` |
+| 编译探针/读数 | `compile_only`、`region_obj_with_env`、`compile_s1_with`、`cold_outline_pair`、`param_home_run`、`cg_wrap`、`frame_loads_in_asm`、`insn_count`、`elf_readelf` |
 | sanitizer/环境 | `run_sanitized_binary`、`tool_exists`、`qemu_runtime_target`、`gcc_src_tree_or_skip`、`host_cc_available`、`path_decision_in`、`object_symbol_size` |
 
 ---
