@@ -10,14 +10,17 @@
 use std::fs;
 use std::process::Command;
 
-use super::{compile_asm_text_with_env, run_compile_and_run_env, run_compile_object_env, run_exe};
+use super::{
+    compile_asm_text_with_env, run_compile_and_run_env, run_compile_object_env, run_exe, temp_tag,
+};
 
 /// F4/F5/F6 smoke-compile（只编译到对象，不链接：夹具引用外部 `pick()`
 /// 或依赖 x87 `_Imaginary` lowering，本来就没有可链接的 main）。
 pub(crate) fn compile_only(name: &str, src: &str) -> std::process::Output {
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let obj_path = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
+    let tag = temp_tag();
+    let src_path = dir.join(format!("dcc-{name}-{tag}.c"));
+    let obj_path = dir.join(format!("dcc-{name}-{tag}.o"));
     fs::write(&src_path, src).expect("write fixture");
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-std=gnu23", "-O2", "-c", "-o"])
@@ -219,8 +222,9 @@ pub(crate) fn region_obj_with_env(
     envs: &[(&str, &str)],
 ) -> Vec<u8> {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let obj = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
+    let tag = temp_tag();
+    let src = dir.join(format!("dcc-{name}-{tag}.c"));
+    let obj = dir.join(format!("dcc-{name}-{tag}.o"));
     fs::write(&src, source).expect("write fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.args(["-std=gnu23"]).args(flags).args(["-c"]);
@@ -263,7 +267,7 @@ pub(crate) fn elf_readelf(obj: &[u8], args: &[&str]) -> String {
     let dir = std::env::temp_dir();
     let path = dir.join(format!(
         "dcc-readelf-{}-{}.o",
-        std::process::id(),
+        temp_tag(),
         args.join("-").replace(['/', '.'], "_")
     ));
     fs::write(&path, obj).expect("write obj for readelf");
