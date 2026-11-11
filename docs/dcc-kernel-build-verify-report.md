@@ -148,13 +148,13 @@ include build-generated headers (`generated/autoconf.h`, `generated/asm-offsets.
 
 ### 4.5 dcc's own test cases
 
-The integration target was re-run on the final compiler carrying §5.59 + §5.60
-(2026-11-12, `cargo test --release --test integration -- --test-threads=2`):
-**integration 1 375 passed, 0 failed** (6 ignored, 66.7 s) — the two extra cases over the
-previous full run are the §5.59 `offsetof` and §5.60 nested-guard fixtures. The lib target was
-not re-run on that same binary: its last full run (2026-11-11, compiler of §5.52–§5.58) was
-**lib 2 612 passed, 0 failed** (2 ignored), so the lib half of `cargo test` is still owed on the
-final binary. The previous full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
+Both targets were re-run on the final compiler carrying §5.59 + §5.60 (2026-11-12):
+`cargo test --release --test integration -- --test-threads=2` logged
+**integration 1 375 passed, 0 failed** (6 ignored, 66.7 s), and
+`cargo test --release --lib -j2 -- --test-threads=2` logged
+**lib 2 612 passed, 0 failed** (2 ignored, 1.6 s, log `logs/cargo_test_lib_final.log`). The two
+integration cases added since the previous full run are the §5.59 `offsetof` and §5.60
+nested-guard fixtures. The previous full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
 **4 054 passed, 8 ignored, 1 failed** — lib 2 607/0 (two ignored), integration 1 332/0 (six
 ignored), `errors` 26/0, `disasm_snapshot` 1/0, `g10_snapshot_baseline` 1/0. The single failure
 is the pre-existing `cpp_abi_eh_group` (six C++ zero-cost-EH fixtures die with a signal;
@@ -1136,12 +1136,9 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
   whose address is parked in a callee-saved register (`"=r"(a[i])`) can still alias at run time.
 * **Pipeline audit is corpus-bound** (§5.13): the 0-hit rates are measured on 60 small torture
   units; kernel-sized TUs with IPA-shaped calls will move `ipa_modref` and `cross_*_dce`.
-* **`scripts/torture_test.sh all` was re-run on the compiler carrying §5.52–§5.58**
-  (`2026-11-11`: torture 3 707 passed / 0 failed / 6 skipped — that is also the pre-commit gate
-  of the `fix: emit REX.B for bswap` commit), and the integration target was re-run on the final
-  binary carrying §5.59 + §5.60 (`2026-11-12`: 1 375 passed / 0 failed / 6 ignored). The lib
-  target was last run on the §5.52–§5.58 compiler (2 612 passed / 0 failed / 2 ignored), so that
-  half of `cargo test` is still owed on the final binary. Both §5.59 and §5.60 also pass at
-  `-O0/-O1/-O2/-O3`, and the torture suite is green on the final binary (pre-commit). One
-  exception is unchanged: `cpp_abi_eh_group` predates this cycle and is not on the kernel path
-  (§4.5).
+* **Both `cargo test` targets and `scripts/torture_test.sh all` were re-run on the final
+  compiler** carrying §5.59 + §5.60 (`2026-11-12`: lib 2 612 passed / 0 failed / 2 ignored,
+  integration 1 375 passed / 0 failed / 6 ignored; torture 3 707 passed / 0 failed / 6 skipped,
+  which is also the pre-commit gate of the two commits). Both §5.59 and §5.60 pass at
+  `-O0/-O1/-O2/-O3`. One exception is unchanged: `cpp_abi_eh_group` predates this cycle and is
+  not on the kernel path (§4.5).
