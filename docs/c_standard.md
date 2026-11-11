@@ -114,7 +114,7 @@ DCC 默认 `-std=gnu11`（与 Linux 7.1 内核一致，见 Documentation/process
 - `__builtin_va_list` / `__builtin_va_start` / `__builtin_va_arg` / `__builtin_va_end` 可变参数支持
 - `__builtin_choose_expr` / `__builtin_types_compatible_p` 编译期类型选择与判断
 - `__builtin_add_overflow` / `__builtin_sub_overflow` / `__builtin_mul_overflow` 溢出检测算术
-- `__builtin_offsetof` 结构体成员偏移计算 (支持嵌套结构体)
+- `__builtin_offsetof` 结构体成员偏移计算 (支持嵌套结构体、匿名成员、常量与运行期下标；下标之后仍可继续选成员)
 - `MODULE_LICENSE` / `MODULE_AUTHOR` / `MODULE_DESCRIPTION` 等内核模块宏
 - `DEFINE_PER_CPU` / `DECLARE_PER_CPU` / `DEFINE_PER_CPU_SHARED_ALIGNED` percpu 变量声明
 - `__percpu` 类型限定符 (展开为 `.data..percpu` section + `__seg_gs`)

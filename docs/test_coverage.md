@@ -208,17 +208,17 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | 指标 | 实测值 |
 |------|--------|
 | 主题子文件（`tests/integration/*.rs`） | 24 |
-| 主题子文件里的 `#[test]` | 1376 |
+| 主题子文件里的 `#[test]` | 1382 |
 | 顶层 target（`tests/*.rs`，含壳） | 8 |
 | 顶层 target 里的 `#[test]`（不含主题） | 102 |
-| 索引数据行合计 | 1478 |
+| 索引数据行合计 | 1484 |
 
 ### 判据分布
 
 | 判据 | 用例数 |
 |------|--------|
 | compile | 867 |
-| cross-check | 258 |
+| cross-check | 264 |
 | report-only | 6 |
 | run | 338 |
 | sanitize | 9 |
@@ -227,7 +227,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | Tier | 用例数 |
 |------|--------|
-| T0 | 1468 |
+| T0 | 1474 |
 | T3 | 10 |
 
 ### C++ ABI 夹具族（磁盘真值 + 代码真值，与人工小节逐条对账）
@@ -253,7 +253,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | 文件（相对 tests/） | 索引行数 | 一致 |
 |---------------------|----------|------|
-| integration/c_lang.rs | 191 | yes |
+| integration/c_lang.rs | 194 | yes |
 | integration/c_asm.rs | 173 | yes |
 | integration/c_kernel.rs | 95 | yes |
 | integration/c_attr_builtin.rs | 119 | yes |
@@ -261,7 +261,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | integration/c_pp_cache.rs | 1 | yes |
 | integration/c_abi_vararg.rs | 40 | yes |
 | integration/c_link_debug.rs | 85 | yes |
-| integration/c_cross.rs | 84 | yes |
+| integration/c_cross.rs | 87 | yes |
 | integration/c_sanitizer.rs | 61 | yes |
 | integration/cpp_lang.rs | 84 | yes |
 | integration/cpp_stdlib.rs | 8 | yes |
@@ -343,6 +343,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `aligned_enum_expr_matches_gcc` | \`fixtures/c/aligned_enum_expr.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `agg_init_guard_mutex_matches_gcc` | \`fixtures/c/agg_init_guard_mutex.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `designator_chain_bitfield_matches_gcc` | \`fixtures/c/designator_chain_bitfield.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `big_struct_designator_zero_matches_gcc` | \`fixtures/c/big_struct_designator_zero.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `float_mod_run_returns_zero` | \`fixtures/c/float_mod.c\` | run | T0 |
 | `tests/integration/c_lang.rs` | `int128_logical_run_returns_zero` | \`fixtures/c/int128_log.c\` | run | T0 |
 | `tests/integration/c_lang.rs` | `global_indexed_run_returns_zero` | \`fixtures/c/global_idx.c\` | run | T0 |
@@ -489,6 +490,8 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `signed_neg_inc_stack_matches_gcc` | \`fixtures/c/signed_neg_inc_stack.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `array_range_designator_init_matches_gcc` | \`fixtures/c/array_range_designator_init.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `preserved_decl_init_readers_matches_gcc` | \`fixtures/c/preserved_decl_init_readers.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `empty_struct_typedef_layout_matches_gcc` | \`fixtures/c/empty_struct_typedef_layout.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `const_switch_fold_nested_break_stays_in_switch` | \`fixtures/c/switch_fold_nested_break.c\` | cross-check | T0 |
 | `tests/integration/c_asm.rs` | `s_output_disassembles_function_body` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `s_output_disassembles_return_thunk_symbol` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `s_output_emits_custom_section_functions` | (inline) | compile | T0 |
@@ -1167,6 +1170,9 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_cross.rs` | `c_ld_implicit_truncate_gcc_cross_check` | \`fixtures/c/ld_implicit_truncate.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `c_static_agg_by_value_gcc_cross_check` | \`fixtures/c/static_agg_by_value.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `c_small_agg_rvalue_delivery_gcc_cross_check` | \`fixtures/c/small_agg_rvalue_delivery.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_cross.rs` | `c_agg_member_of_inline_temp_gcc_cross_check` | \`fixtures/c/agg_member_of_inline_temp.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_cross.rs` | `c_bswap_high_reg_rex_b_gcc_cross_check` | \`fixtures/c/bswap_high_reg_rex_b.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_cross.rs` | `c_offsetof_runtime_subscript_gcc_cross_check` | \`fixtures/c/offsetof_runtime_subscript.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `c_agg_param_reg_stack_split_gcc_cross_check` | \`fixtures/c/agg_param_reg_stack_split.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `c_array2d_global_stride_gcc_cross_check` | \`fixtures/c/array2d_global_stride.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `c_agg_wide_value_load_gcc_cross_check` | \`fixtures/c/agg_wide_value_load.c\` | cross-check | T0 · cfg(unix) |

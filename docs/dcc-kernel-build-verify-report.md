@@ -1,27 +1,26 @@
 # DCC — Linux 7.1.0 (localmodconfig, x86-64): build & verification results
 
-**Status (2026-11-09).** The full clean-tree build, the objtool/ELF checks and the realmode
-comparison are green. The suite numbers quoted in §4.5 are the last full runs (compiler of
-§5.16–§5.18); the fixes after them are covered by their own cases, and one full re-run on the
-final compiler is still owed (§7).
-**The boot is not yet proven on a tree built entirely by the current compiler**: the empty-tree
-rebuild carrying §5.14–§5.41 is running in `/root/pvh-lmc3` (kbuild21), and
-`scripts/kernel_pvh_verify.sh --boot` on its `vmlinux` is the verdict that §4.3 will carry.
-Each completed round has moved the first stop further; the recent stop points are tabulated
-there.
+**Status (2026-11-11).** The full-tree build, the objtool/ELF checks, the realmode comparison
+and the runtime/module closure are green, and the stress round is green as well: with `-smp 4`
+plus a virtio-net device the dcc-built kernel and the gcc-built baseline print the same
+**26** `RT|`/`MOD|` lines (`scripts/runtime_closure.sh --stress`: 7 passed, 0 failed). The
+4-vCPU init stack runs close to its guard page; the measured rate is in the first bullet of §7. Every
+object in `/root/pvh-lmc3` was produced by the current compiler identity — the audit of all
+4 612 `.cmd` files finds no gcc command line (§2). §5.59, a runtime `offsetof` defect that the
+kernel itself exposed, is fixed and the affected objects were rebuilt.
 
 ## 1. Sources and environment
 
 | Item | Value |
 |---|---|
-| dcc | this repository `79935fe9` plus this cycle's uncommitted fixes; `cargo build --release` → `target/release/dcc` (built 2026-11-09 11:12) |
+| dcc | this repository, working tree of 2026-11-11 (base `c4e34751` plus the §5.59 SSA bail); `cargo build --release -j2` → `target/release/dcc` |
 | Kernel | Linux 7.1.0, pristine source tree `/root/linux-pvh-src` (no git metadata, no local patches) |
 | Config | `localmodconfig` seeded from `defconfig`, then `PVH=y`, `SUSPEND=n`, `HIBERNATION=n`, `ACPI_SLEEP=n`, `IA32_EMULATION=n`, `COMPAT=n` |
-| Build dir | out-of-tree `O=/root/pvh-lmc*`, started empty each round; include cache (`~/.dcc`) deleted first, so every unit is preprocessed cold |
-| Host | Linux x86-64, 4 cores; `gcc 13.3.0` is used only as a comparison baseline, never as a build compiler |
+| Build dir | out-of-tree `O=/root/pvh-lmc3` (3 005 objects, 4 612 `.cmd`); after the cold round only incremental rounds — no `make clean` |
+| Host | Linux x86-64, 4 cores; `gcc 13.3.0` is used only as a comparison baseline in `/root/pvh-gcc-rt`, never as a build compiler; `scripts/runtime_closure.sh --audit` proves it |
 | Emulator | QEMU 8.2.2 (`-kernel` PVH entry, `-m 1024M`, serial console) |
 
-`.config` has 1 577 `=y` and 1 `=m` symbols; the build tree holds 2 998 object files. The same
+`.config` has 1 577 `=y` and 1 `=m` symbols; the build tree holds 3 005 object files. The same
 `CC` runs at configure and build time, so `CONFIG_CC_VERSION_TEXT` stays `dcc 0.1.0`. kbuild
 therefore also records `CONFIG_CC_IS_CLANG=y` (dcc predefines `__clang__`); that is consistent
 rather than contradictory, because the clang-shaped `-f…`/`-m…` flags kbuild then derives are
@@ -39,6 +38,13 @@ checks make the claim falsifiable:
   99. **0 trap hits** for this build.
 * the same script counts `GCC-DELEGATE` lines in the build log (the wrapper used to fall back to
   gcc for a few infrastructure files). **0 delegate lines.**
+* `scripts/runtime_closure.sh --audit` reads the first token of every `savedcmd_` line in the
+  tree's `*.cmd` files. A gcc command line there means an object was compiled by gcc inside the
+  dcc tree; the current tree reports 4 612 `.cmd`, none with a gcc first token. The check looks
+  only at the first token because the `gcc` substring is on almost every line (`-I/usr/lib/gcc/…`);
+  a substring check produced 565 false positives. The audit compares the recorded command line,
+  not the dcc binary version; objects from an older dcc build are tracked by
+  `scripts/kernel_purge_stale_objects.sh` instead.
 
 Host `ld` still does the final link — dcc emits relocatable objects and drives the system linker
 directly; it is not a linker. That is the same split as a gcc build (`gcc` → `as` → `ld`), with
@@ -47,13 +53,14 @@ dcc replacing `cc` and `as` for the compilation steps.
 ## 3. Build
 
 ```bash
-KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc \
+KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc3 \
   bash scripts/kernel_pvh_verify.sh --config
-KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc DCC_BIN=target/release/dcc JOBS=2 \
+KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc3 DCC_BIN=target/release/dcc JOBS=2 \
   bash scripts/kernel_pvh_verify.sh --build
 ```
 
-Measured on the cold-cache clean build:
+Measured on the cold-cache clean round (an earlier build directory; the current tree only
+received incremental rounds):
 
 | Metric | Value |
 |---|---|
@@ -117,8 +124,9 @@ The judge is the serial console reaching `DCC kernel: init reached successfully`
 | incremental (85 TUs: `block`, `ata`, `scsi`, `cdrom`) carrying §5.50 | +§5.50 | **`Run /init as init process` at 10.16 s** — first image past the whole boot path; `/init` then fails to exec with `-7` | open |
 | incremental (`fs`, `init`) carrying all of the above | same | `Run /init as init process` at 10.42 s, `/init` exec returns `-7` again | open |
 | full rebuild (kbuild26) carrying §5.51–§5.57 | +§5.51–§5.57 | `/init` runs: 8 of the 9 `RT\|` tests pass, `RT\|ext4\|FAIL:mount` — `JBD2: no valid journal superblock found`; the whole `MOD\|` panel is green | §5.58 |
-| incremental (46 TUs: `fs/jbd2`, `fs/ext4`) carrying §5.58 | +§5.58 | `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`; all **21** `RT\|`/`MOD\|` lines are byte-identical to the gcc-built kernel (same `.config`, `scripts/runtime_closure.sh --compare`: PASS 21/21) | — |
+| incremental (46 TUs: `fs/jbd2`, `fs/ext4`) carrying §5.58 | +§5.58 | `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`; all **21** `RT\|`/`MOD\|` lines (the panel size at that time — the stress layer added five, §4.3 last row) are byte-identical to the gcc-built kernel (same `.config`, `scripts/runtime_closure.sh --compare`: PASS 21/21) | — |
 | full rebuild (kbuild27, 2 922 CC, one compiler identity) carrying §5.51–§5.58 | +§5.51–§5.58 | `Run /init as init process` → `RT\|basic` … `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`, `RT\|status\|0`; `configs.ko` and `hello.ko` rebuilt by the same compiler (`insmod`, proc read, `lsmod`, `dmesg`, `rmmod`, resident) → `MOD\|done`; the 21 `RT\|`/`MOD\|` lines are again byte-identical to the gcc-built kernel | — |
+| incremental 2026-11-11 (fib_trie, arp, eth, virtio-net, kernel/{events,cgroup}, `*_sockglue`, …) carrying §5.59 | +§5.59 | `-smp 4` + virtio-net: `RT\|smp\|online=4`, `RT\|net\|eth0 arp-complete`, `RT\|blk\|256KiB fsync 4x64KiB`, `RT\|exit\|0`, `RT\|status\|0`; all **26** `RT\|`/`MOD\|` lines byte-identical to the gcc-built kernel (`--stress`: 7 passed, 0 failed, 0 panic on either side) | — |
 
 The `WARNING … kernel/module/main.c:1723 at __layout_sections` printed when `configs.ko` is
 inserted is **not** a dcc diagnostic: the gcc-built kernel prints the same warning
@@ -140,13 +148,17 @@ include build-generated headers (`generated/autoconf.h`, `generated/asm-offsets.
 
 ### 4.5 dcc's own test cases
 
-Last full `cargo test --release --no-fail-fast -- --test-threads=2` (2026-11-07, compiler of
-§5.18), log `logs/cargo_test_ssa_width.log`: **4 054 passed, 8 ignored, 1 failed** — lib
-2 607/0 (two ignored), integration 1 332/0 (six ignored), `errors` 26/0, `disasm_snapshot` 1/0,
-`g10_snapshot_baseline` 1/0. The single failure is the pre-existing `cpp_abi_eh_group`
-(six C++ zero-cost-EH fixtures die with a signal; identical before this cycle and not on the
-kernel path). Every defect in §5 carries a regression case, most of them a C fixture checked
-against gcc at `-O0/-O1/-O2/-O3`.
+The last full `cargo test --release --no-fail-fast -- --test-threads=2` ran on the compiler
+carrying §5.52–§5.58 (2026-11-11): **lib 2 612 passed, 0 failed** (2 ignored) and
+**integration 1 373 passed, 0 failed** (6 ignored). The §5.59 SSA bail landed after that full
+run, so its evidence is the new case at all four `-O` levels plus the pre-commit torture suite
+on the final binary — a full `cargo test` re-run on that binary is still owed. The previous
+full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
+**4 054 passed, 8 ignored, 1 failed** — lib 2 607/0 (two ignored), integration 1 332/0 (six
+ignored), `errors` 26/0, `disasm_snapshot` 1/0, `g10_snapshot_baseline` 1/0. The single failure
+is the pre-existing `cpp_abi_eh_group` (six C++ zero-cost-EH fixtures die with a signal;
+identical before this cycle and not on the kernel path). Every defect in §5 carries a regression
+case, most of them a C fixture checked against gcc at `-O0/-O1/-O2/-O3`.
 
 Product fingerprints were re-frozen when frame layout legitimately moved: 34 disassembly
 snapshots under `tests/disasm_snapshots_x86_64/` and the five `tests/fixtures/g10_*.sha256`
@@ -168,12 +180,14 @@ The compiler carrying §5.51 adds `bitfield_init_list_uses_rmw_band`
 (`tests/fixtures/c/bitfield_init_list_slots.c`), and the 12-name `bitfield` filter of the
 integration suite passes as a group.
 
-On the compiler carrying §5.52–§5.58 the same two suites are green: **lib 2 612 passed, 0 failed**
-(2 ignored) and **integration 1 373 passed, 0 failed** (6 ignored). New cases in this round:
+New cases in the §5.52–§5.58 round:
 `codegen::x86_64::insn::tests::bswap_reg_basic` (byte encodings `41 0F C8` / `41 0F CD` / `49 0F C8`
 plus the `gas_text`), `const_eval::tests::eval_int_lit_strips_suffix_in_every_radix`, and the fixture
 `tests/fixtures/c/bswap_high_reg_rex_b.c` cross-checked against gcc at `-O0/-O1/-O2/-O3`
 (`c_bswap_high_reg_rex_b_gcc_cross_check`).
+
+§5.59 adds `c_offsetof_runtime_subscript_gcc_cross_check`
+(`tests/fixtures/c/offsetof_runtime_subscript.c`), also run at all four `-O` levels against gcc.
 
 User-space suites on the fixed compiler (`scripts/bench_lua_sqlite.sh`): Lua builds and runs
 identically to gcc at **all four** `-O` levels (same functional output, same `fib(32)` result),
@@ -936,15 +950,59 @@ to the ordinary call path (fixture bit 64, unit test
 `const_eval::tests::eval_int_lit_strips_suffix_in_every_radix`).
 
 Evidence: with 46 TUs (`fs/jbd2`, `fs/ext4`) rebuilt by the fixed compiler the same image boots to
-`RT|ext4|magic roundtrip umount` and `RT|exit|0`, and all 21 `RT|`/`MOD|` lines are byte-identical
-to the gcc-built kernel (`scripts/runtime_closure.sh --compare`: PASS, 21/21).
+`RT|ext4|magic roundtrip umount` and `RT|exit|0`, and all 21 `RT|`/`MOD|` lines of that panel
+are byte-identical to the gcc-built kernel (`scripts/runtime_closure.sh --compare`: PASS, 21/21).
+The panel has since grown to 26 lines with the stress layer (§4.3); the 26-line comparison is
+the current judge.
+
+### 5.59 A runtime `offsetof` subscript swallowed the member segment that followed it
+
+`fib_trie` insert crashed with a GPF in `put_child`: the faulting `chi` was not a node at all
+(`ffffea0000273540`, vmemmap junk), and the kernel's own `TNODE_SIZE(1ul << bits)` was the
+reason. `offsetof(struct tnode, kv[0].tnode[n])` evaluated to **32** — the offset of `kv`
+alone — instead of `40 + 8n`.
+
+Two code paths disagreed and both were wrong, but only for the shape "subscript followed by
+another member":
+
+* `compute_offset` handled `kv[0]`, then tried to descend into the **field's** type
+  (`struct key_vector[1]`) instead of the element type, hit `Type::Array`, and stopped at
+  `offsetof(kv)`.
+* `find_offsetof_field_type` ignored subscripts entirely, so the runtime path scaled the first
+  subscript with the array type and dropped every later segment.
+
+dcc `-O2` produced exactly that: `mov $32,%eax; mov $0,%ecx; shlq $4,%rcx; addq %rcx,%rax`
+(only `kv[0]`, stride 16). `tnode_new()` therefore `kzalloc(32)`; `tn = tnode->kv` is at
+`+0x20`, so the `key_vector` header and the child slots were written past the object into the
+neighbouring slab. Minimal repro (`TNODE_SIZE(2)` / `(4)` / `(1ul << 1)`): gcc 56/72/56 at every
+`-O`; dcc 32/32/32 before, 56/72/56 after.
+
+Fix: one plan builder, `offsetof_plan()`, used by both codegen entry points. Constant
+subscripts fold into the base offset; runtime subscripts carry their own element type so each
+stride is `sizeof(element)`, and the member walk continues from the type **after** the
+subscripts — which is what `kv[0].tnode[n]` needs to reach `tnode`.
+
+The same blind spot had a second instance one layer up: the SSA builder lowered
+`Expr::Offsetof` to a literal with `eval_offsetof(ty, member)`, i.e.
+`eval_offsetof_opt(…).unwrap_or(0)`, so at `-O2` a function containing a runtime subscript
+evaluated to **0** while `-O0` (AST codegen) was correct. The fixture caught it
+(`v2 = v4 = sh1 = sh2 = 0` at `-O2`). The SSA builder now calls
+`unsupported("offsetof with runtime subscript")`, which keeps that function on the AST channel
+where `offsetof_plan` runs; correctness beats the lost SSA pass.
+
+Evidence: the rebuilt object reports `TNEW0 … size=56` (bits=1) and `size=72` (bits=2), every
+child slot starts `NULL`, `RT|net|eth0 arp-complete` and `RT|exit|0` are reached, and the
+`--stress` round is byte-identical to gcc (26 lines, §4.3). Regression case:
+`tests/fixtures/c/offsetof_runtime_subscript.c`
+(`c_offsetof_runtime_subscript_gcc_cross_check`, gcc cross-check at `-O0/-O1/-O2/-O3`,
+exit codes 1–6 name the failing shape).
 
 ## 6. Reproduce
 
 ```bash
 DCC=/root/dcc/target/release/dcc
 TREE=/root/linux-pvh-src
-BUILD=/root/pvh-lmc
+BUILD=/root/pvh-lmc3
 
 # 0. dcc itself
 cd /root/dcc && cargo build --release -j2
@@ -972,11 +1030,8 @@ KERNEL_TREE=$TREE BUILD=$BUILD bash scripts/kernel_pvh_verify.sh --boot
 bash scripts/build_runtime_initramfs.sh        # runtime.cpio.gz + rt-ext4.img
 bash scripts/runtime_closure.sh --modules      # configs.ko (multi-file) + hello.ko, dcc + modpost
 bash scripts/runtime_closure.sh --gcc-build    # /root/pvh-gcc-rt, same .config, gcc SDK
-qemu-system-x86_64 -kernel "$BUILD/vmlinux" -initrd initramfs/runtime.cpio.gz \
-  -drive file=initramfs/rt-ext4.img,format=raw,if=virtio \
-  -append "console=ttyS0 earlyprintk=serial init=/init panic=-1" \
-  -m 1024M -no-reboot -nographic -smp 1 > /tmp/boot_dcc.log 2>&1
-bash scripts/runtime_closure.sh --compare /tmp/boot_dcc.log /tmp/boot_gcc.log   # PASS 21/21
+bash scripts/runtime_closure.sh --stress       # -smp 4 + virtio-net, both kernels, cmp 26/26
+bash scripts/runtime_closure.sh --audit        # every .cmd must name the dcc wrapper, not gcc
 
 # 6. the §5.11 reproducer as a check (gcc here is a comparison baseline, not a build tool)
 bash scripts/kernel_cc_asm_repro.sh
@@ -984,7 +1039,7 @@ bash scripts/kernel_cc_asm_repro.sh
 #   dcc -O2 : fail=0 ok=1 v=3 rc=0   → 退出码 0 = 缺陷已修；非 0 就是 §5.11 回来了
 
 # 7. the frame histogram of §5.12 (same 120 objects, prologue `sub rsp` only)
-bash scripts/kernel_frame_hist.sh /root/pvh-lmc2    # 0x20 / 0x60 dominate (was 0x140…0x1b0)
+bash scripts/kernel_frame_hist.sh "$BUILD"        # 0x20 / 0x60 dominate (was 0x140…0x1b0)
 bash scripts/kernel_frame_hist.sh /root/pvh-gcc-ref # 0x8…0x50 dominate
 
 # 8. regression gates
@@ -999,10 +1054,15 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
 ## 7. What is not verified / known gaps
 
 * **Boot to user space is proven; “identical to gcc” is proven for the runtime panel, not for every
-  boot line.** A dcc-built image reaches `Run /init as init process`, runs the nine-test panel
-  `RT|basic` … `RT|irq` plus `RT|ext4|magic roundtrip umount` and exits `RT|exit|0`, and the
-  21 `RT|`/`MOD|` lines are byte-identical to the gcc-built kernel (§4.3). The comparison is on
-  those lines, not on the whole dmesg: timings, addresses and banner strings differ by construction.
+  boot line.** A dcc-built image reaches `Run /init as init process`, runs the 17 `RT|` lines
+  (`RT|basic` … `RT|ext4|magic roundtrip umount`, `RT|net|eth0 arp-complete`, `RT|exit|0`) plus
+  the 9 `MOD|` lines, and all 26 are byte-identical to the gcc-built kernel — including the
+  `-smp 4` + virtio-net round (§4.3). The comparison is on those lines, not on the whole dmesg:
+  timings, addresses and banner strings differ by construction. With `-smp 4` the 16 KiB init
+  stack is close to its guard page: 1 of 7 consecutive boots died in the `virtio_blk` probe
+  chain (`__zone_watermark_unusable_free` entered with RSP = stack base), while the other 6
+  produced the full panel and the gcc kernel never hit it. That is frame economy (§5.12), not
+  a semantic difference; the stable multi-core evidence is the 26-line panel above.
 * **Modules are verified out of tree only.** `make vmlinux` neither runs `modpost` nor links
   modules; `scripts/runtime_closure.sh --modules` builds `configs.ko` (multi-file) and `hello.ko`
   with the same compiler, `modpost` included, and the QEMU panel does `insmod` / proc read /
@@ -1046,8 +1106,10 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
   whose address is parked in a callee-saved register (`"=r"(a[i])`) can still alias at run time.
 * **Pipeline audit is corpus-bound** (§5.13): the 0-hit rates are measured on 60 small torture
   units; kernel-sized TUs with IPA-shaped calls will move `ipa_modref` and `cross_*_dce`.
-* **Full `cargo test` and `scripts/torture_test.sh all` have been re-run on the final compiler**
-  (`2026-11-11`: lib 2 612 passed / integration 1 373 passed, both 0 failed; torture 3 707 passed /
-  0 failed / 6 skipped — that is also the pre-commit gate of the `fix: emit REX.B for bswap`
-  commit). One exception is unchanged: `cpp_abi_eh_group` predates this cycle and is not on the
-  kernel path (§4.5).
+* **Full `cargo test` and `scripts/torture_test.sh all` were re-run on the compiler carrying
+  §5.52–§5.58** (`2026-11-11`: lib 2 612 passed / integration 1 373 passed, both 0 failed;
+  torture 3 707 passed / 0 failed / 6 skipped — that is also the pre-commit gate of the
+  `fix: emit REX.B for bswap` commit). The §5.59 SSA bail landed after that full run: its case
+  passes at `-O0/-O1/-O2/-O3` and the torture suite is green on the final binary (pre-commit),
+  but a full `cargo test` re-run on that binary is still owed. One exception is unchanged:
+  `cpp_abi_eh_group` predates this cycle and is not on the kernel path (§4.5).

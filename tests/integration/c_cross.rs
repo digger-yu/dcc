@@ -1934,6 +1934,29 @@ fn c_bswap_high_reg_rex_b_gcc_cross_check() {
     }
 }
 
+/// 报告 §5.59: `offsetof(struct tnode, kv[0].tnode[n])` 的成员路径同时含
+/// 「常量下标 + 后续成员 + 运行期下标」。旧 codegen 在 `kv[0]` 之后停在数组
+/// 类型，基础偏移只剩 `offsetof(kv)`；运行期下标又拿数组类型当 stride、丢掉
+/// 后面的 `tnode[n]` —— 内核 `TNODE_SIZE` 恒为 32，`tnode_new()` 只分配 32
+/// 字节，kv 头写到对象外。
+#[test]
+#[cfg(unix)]
+fn c_offsetof_runtime_subscript_gcc_cross_check() {
+    let src = include_str!("../fixtures/c/offsetof_runtime_subscript.c");
+    let rc = run_gcc_cross_check("c-offsetof-runtime-subscript", src);
+    assert_eq!(
+        rc, 0,
+        "offsetof_runtime_subscript: 1–6 依次是常量/运行期/移位下标的期望偏移"
+    );
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("c-offsetof-runtime-subscript", src, &[flag]),
+            0,
+            "{flag}: offsetof 运行期下标与后续成员段必须四档一致"
+        );
+    }
+}
+
 /// 缺陷 5: 聚合形参跨寄存器/栈边界拆分放置错 (5 个 int 之后的聚合被整体推到栈上,
 /// 或前半进 rdi 后半留在栈, callee 按同一错误布局读回 → f={1,0} g=0)。
 #[test]

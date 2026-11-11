@@ -80,9 +80,9 @@
 
 | 脚本 | 用途 |
 |------|------|
-| `kernel_full_build.sh` | 全树 `make CC=dcc -k`，收集全部失败而非首错即停 |
-| `kernel_full_check.sh` | modpost / prepare0 / bzImage / QEMU / vmlinux 编排；`STRICT_FULL_BUILD=1` 时核心步骤不许 SKIP |
-| `kernel_build_smoke.sh` | vmlinux / bzImage 冒烟（`BUILD_BZIMAGE=1` 才建 bzImage） |
+| `kernel_full_build.sh` | 旧的全树 `-k` 首跑扫描器（裸 `CC=$DCC HOSTCC=gcc`）；现行验收用 `kernel_pvh_verify.sh` 的包装器 |
+| `kernel_full_check.sh` | modpost / prepare0 / bzImage / QEMU / vmlinux 编排；`STRICT_FULL_BUILD=1` 时核心步骤不许 SKIP（`bzImage` 需 16 位 C 后端，all-dcc 路线不设 `BUILD_BZIMAGE=1`） |
+| `kernel_build_smoke.sh` | vmlinux / bzImage 冒烟（`BUILD_BZIMAGE=1` 才建 bzImage；bzImage 同样依赖 16 位 C 后端） |
 | `prepare0_check.sh` / `prepare0_full.sh` | prepare0 窄目标 / 全链路 |
 | `modpost_link.sh` | modpost 三 TU 链接 + Rust fixdep |
 | `build_fixdep_dcc.sh` | 把 Rust `fixdep` 装进内核树替代 C fixdep |
@@ -94,8 +94,8 @@
 | `vmlinux_regress.sh` | vmlinux 级 pahole / objtool 严格回归（需 ET_EXEC vmlinux） |
 | `test_kernel_features.sh` | 6 项内核构造夹具：dcc `-c` → gcc 链接 → 运行，外加 readelf 的 WEAK 断言 |
 | `arch_x86_compile.sh` | 批量编译 `arch/x86/` 的 C 文件，复用内核命令模板 |
-| `dcc-kernel-cc.sh` | 内核编译包装：基础设施文件用 gcc，其余用 dcc |
-| `dcc-host-wrapper.sh` | Kbuild `HOSTCC` 包装：dcc 编译、gcc 链接，含参数白名单翻译 |
+| `dcc-kernel-cc.sh` | 内核 `CC` 包装：全部 C/asm 交给 `target/release/dcc`，不再代编任何文件（`DCC_KERNEL_ALLOW_GCC_FALLBACK=1` 是唯一显式保底） |
+| `dcc-host-wrapper.sh` | Kbuild `HOSTCC` 包装：编译与链接都交给 dcc（链接由 dcc 直驱 `ld`），含参数白名单翻译 |
 | `kernel_pvh_verify.sh` | 内核「全程 dcc」的 PVH 验收编排：`--partial` / `--config` / `--build` / `--boot`（gcc 陷阱 + delegate 计数 + objtool + QEMU 到用户空间） |
 | `kernel_cc_asm_repro.sh` | §5.11 缺陷的可执行复现：命名 `"+m"` 输出与不可见 `"=@ccz"` 输出同处一条 asm 时绑错帧槽；退出码 0 = 已修 |
 | `kernel_frame_hist.sh` | 序言帧大小直方图（只数每函数第一条 `sub rsp`），§5.12 帧经济的 dcc / gcc 对拍口径 |

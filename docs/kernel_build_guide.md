@@ -22,7 +22,7 @@ gcc 在这里只有一个身份：**对照基线**（`--partial` 的逐字节对
 一切从 `scripts/kernel_pvh_verify.sh` 走，四个阶段可单独跑：
 
 ```bash
-export KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc DCC_BIN=/root/dcc/target/release/dcc
+export KERNEL_TREE=/root/linux-pvh-src BUILD=/root/pvh-lmc3 DCC_BIN=/root/dcc/target/release/dcc
 
 bash scripts/kernel_pvh_verify.sh --config   # 落配置（O= 外建，源码树不动）
 bash scripts/kernel_pvh_verify.sh --build    # 全树 make vmlinux，PATH 上摆 gcc 陷阱
@@ -78,14 +78,14 @@ make -C "$KERNEL_TREE" O="$BUILD" -j2 \
 全树日志只能告诉你哪个对象红了。要只看一个 TU，用构建树里现成的 `.cmd` 指纹重放：
 
 ```bash
-bash scripts/repro_kbuild_tu.sh /root/pvh-lmc arch/x86/kernel/apic/apic.o /tmp/apic.o
+bash scripts/repro_kbuild_tu.sh /root/pvh-lmc3 arch/x86/kernel/apic/apic.o /tmp/apic.o
 ```
 
 它读 `$BUILD/<dir>/.<obj>.cmd` 里的 `savedcmd`，截掉 objtool 段，改写 `-o` 后在 `$BUILD` 目录下执行。
 要把源文件换成自己写的复现件（借同一整套内核 include 路径与宏）：
 
 ```bash
-bash scripts/dcc_kernel_tu.sh /root/pvh-lmc/t.c /tmp/t.o /root/pvh-lmc
+bash scripts/dcc_kernel_tu.sh /root/pvh-lmc3/t.c /tmp/t.o /root/pvh-lmc3
 ```
 
 拿预处理产物缩小现场：把 `savedcmd` 里的 `-c -o …` 换成 `-E -o /tmp/x.i`，得到完整宏展开的单一文件。
@@ -99,7 +99,9 @@ bash scripts/dcc_kernel_tu.sh /root/pvh-lmc/t.c /tmp/t.o /root/pvh-lmc
 ```bash
 cd /root/dcc && cargo build --release -j2                     # 1) 只重编二进制
 bash scripts/kernel_purge_stale_objects.sh "$KERNEL_TREE" /root/dcc/target/release/dcc   # 2) 作废旧产物
-make -C "$KERNEL_TREE" O="$BUILD" -j2 CC=… HOSTCC=… vmlinux    # 3) 同一棵树续跑
+make -C "$KERNEL_TREE" O="$BUILD" -j2 \
+     CC=/root/dcc/scripts/dcc-kernel-cc.sh \
+     HOSTCC=/root/dcc/scripts/dcc-host-wrapper.sh HOSTLD=ld vmlinux   # 3) 同一棵树续跑
 ```
 
 kbuild 的 `if_changed` 只比命令行字符串，句子里写的是包装器路径 —— 编译器换版它不认，
@@ -157,8 +159,16 @@ pgrep -af 'bin/cargo' | head        # arg0 是全路径，^cargo 匹配不到
 
 在同一个 `O=` 目录上用别的 CC 跑任何 `make`（哪怕只是 `prepare0` 重编宿主工具），
 syncconfig 都会按新 CC 重写 `CONFIG_CC_VERSION_TEXT` 及其派生旗标，下一轮全树从
-`include/generated` 起全部过期。要 gcc 版做对照就另开一次性目录或拷到 `/tmp` 手工编。
+`include/generated` 起全部过期。要 gcc 版做对照就另开独立树（本项目用
+`GCC_BUILD=/root/pvh-gcc-rt`，`scripts/runtime_closure.sh --gcc-build` 会断言它与 `BUILD`
+和源码树不是同一棵）。
 判本轮是不是增量只看日志开头：出现 `SYNC include/config/auto.conf.cmd` 就是从 prepare 重来。
+
+混进来的 gcc 对象不会让构建失败——kbuild 只比命令行字符串，`.cmd` 里写着 gcc 的对象就一直是
+gcc 产物。判断时**不要 grep `gcc` 子串**：`-I/usr/lib/gcc/…` 会让几乎每一行命中（实测 565 个
+误报）。跑 `bash scripts/runtime_closure.sh --audit`：它取每个 `.cmd` 的 `savedcmd_` 行，只看
+`:=` 后的首个 token，`gcc` / `gcc-N` / `cc1` / `cc1plus` 即判污染。
+`arch/x86/kernel/{cet,ibt_selftest}.o` 就是这样在定向编译时留在树里的。
 
 ## 6. 产物检查
 
@@ -166,6 +176,8 @@ syncconfig 都会按新 CC 重写 `CONFIG_CC_VERSION_TEXT` 及其派生旗标，
 bash scripts/kernel_scan_jump_table.sh "$BUILD/vmlinux"     # 期望 ok=N bad_nop=0
 bash scripts/kernel_frame_hist.sh "$BUILD"                  # 序言帧分布（对照 gcc 树）
 bash scripts/kernel_cc_asm_repro.sh                         # @cc 不可见输出绑定检查
+bash scripts/runtime_closure.sh --audit                     # 每个 .cmd 的首 token 必须是 dcc 包装器
+bash scripts/runtime_closure.sh --stress                    # -smp 4 + virtio-net，两侧 26 行 RT|/MOD| 逐字节比
 readelf -SW "$BUILD/vmlinux" | grep -E 'altinstr|jump_table'
 ```
 

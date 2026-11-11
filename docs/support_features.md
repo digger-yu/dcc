@@ -19,7 +19,7 @@
 | DWARF + BTF（完整类型信息） | `-g` 生成 `.debug_*` + `.BTF`（含编译单元中所有类型的完整 BTF 信息，支持 pahole -J 直接解析）；BTF 输出保留 const/volatile/restrict 限定符（BTF_KIND_CONST/VOLATILE/RESTRICT），struct/union 字段限定符正确传播，满足 BPF CO-RE 需求 |
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`；`-mfunction-return=thunk-extern` 下函数尾声、空 global asm 函数和 mini-asm `ret` 均跳转 `__x86_return_thunk`，避免 MITIGATION_RETHUNK 裸 `ret` |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
-| QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约；2026-08-27 实际验证：`qemu-system-x86_64` 加载 dcc 编译的 Linux 7.1 bzImage，串口启动日志正常（需启用 `CONFIG_SERIAL_8250_CONSOLE`） |
+| QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约；2026-08-27 实际验证：`qemu-system-x86_64` 加载 dcc 编译的 Linux 7.1 bzImage，串口启动日志正常（需启用 `CONFIG_SERIAL_8250_CONSOLE`）。注意 `bzImage` 的 16 位 C（`arch/x86/boot/**`）dcc 还没有后端：当前 all-dcc 验收走 PVH `vmlinux`（`kernel_build_guide.md` §8），该行记录的是历史上包装器仍代编 16 位 C 时的验证 |
 | Linux vmlinux 完整 ELF 内核映像 | dcc 编译 Linux 7.1 全树生成 16MB vmlinux (ET_EXEC x86-64)；零 objtool 错误；`__ex_table` 异常表、`.fixup` 修复代码、嵌套 `.pushsection`/`.popsection` 完整支持；vdso64.so.dbg 正确生成 |
 | Linux kernel object corpus | 固化真实 Linux `.o` 样本：`tests/fixtures/corpus/io_delay.o`、`fair.o`、`clz_ctz.o`；`kernel_object_corpus_*` 测试校验 ELF64/ET_REL/ORC 节和代表性函数符号 |
 | CI/fixtures 路径防回归 | `.github/workflows/kernel-bench.yml` 与 `scripts/bench_phase_e.sh` 使用当前 `tests/fixtures/smoke/*` 路径；`scripts/check_fixtures.sh` 扫描 workflows/scripts 中的 tests/fixtures 引用并要求文件存在 |
@@ -157,7 +157,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_frame_address` / `return_address` | r13 帧链遍历 |
 | `__builtin_types_compatible_p` / `choose_expr` | parser 折叠 + codegen 兜底 |
 | `__builtin_va_list` / `FILE` / `LINE` / `FUNCTION` / `FUNCSIG` | 类型别名 + codegen 字符串 rodata |
-| `__builtin_offsetof` | 支持嵌套 struct/union/数组下标/匿名 struct |
+| `__builtin_offsetof` | 支持嵌套 struct/union/数组下标/匿名 struct；下标可为运行期表达式（`kv[0].tnode[n]` 形态），偏移按「基偏移 + 下标 × stride」在运行期计算，下标之后仍可继续选成员；`-O2` 的 SSA 不折叠运行期下标（整个函数回 AST 通道）。测试: `tests/fixtures/c/offsetof_runtime_subscript.c` |
 | `__builtin_huge_val` / `huge_valf` / `huge_vall` | IEEE 754 位模式 rodata 加载 |
 | `__builtin_nan` / `nanf` / `nanl` | qNaN 编码 |
 | `__builtin_isnan` / `isinf` / `finite` / `signbit` / `fpclassify` | 正确处理 NaN/Inf 位模式 |

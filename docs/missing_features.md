@@ -58,4 +58,5 @@
   `STRICT_FULL_BUILD=1` 要求 vmlinux / bzImage / modpost / pahole /
   objtool / QEMU boot 全部硬通过）
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` +
-  bzImage；2026-08-27 验证通过，串口启动日志正常）
+  bzImage；2026-08-27 验证通过，串口启动日志正常）。该 bzImage 路线依赖 16 位 C，
+  all-dcc 验收走 PVH `scripts/kernel_pvh_verify.sh --boot`（见 `kernel_build_guide.md` §8）

@@ -60,6 +60,9 @@ bash scripts/update_error_snapshots.sh
 `scripts/kernel_full_check.sh`（默认 modpost / QEMU / vmlinux，缺产物时 SKIP；已有 bzImage 后 QEMU 为硬门禁）。
 需要硬门禁时运行 `STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh`，
 它会强制构建并要求 `vmlinux`、`bzImage`、modpost、pahole、objtool 全部通过。
+注意 `bzImage` 需要 16 位 C 后端（`arch/x86/boot/**`），dcc 还没有：all-dcc 验收走 PVH
+`vmlinux`（`kernel_pvh_verify.sh`），`bzImage` 相关步骤在补上该后端之前不适用（见
+`kernel_build_guide.md` §8）。
 详见 `docs/kernel_build_guide.md`。
 
 ## 6. 测试分层（Tier 0–3）

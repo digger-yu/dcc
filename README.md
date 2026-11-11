@@ -18,9 +18,10 @@ freestanding code, toolchain test suites — where a fast, reviewable compiler b
 > features are known. Issues and patches are welcome, but I cannot promise timely
 > responses."
 
-Status: **alpha**. Proven so far: whole-tree `make CC=dcc` on Linux 7.1 x86_64 → `vmlinux`,
-bzImage and a QEMU boot reaching `/init`; self-hosting `dcc0 → dcc1 → dcc2`; GCC torture
-suite 99.92 % pass (§Testing).
+Status: **alpha**. Proven so far: whole-tree dcc build on Linux 7.1 x86_64 → `vmlinux`
+and a QEMU boot reaching `/init` (PVH entry; `bzImage` needs the 16-bit C backend dcc does
+not have yet, see `docs/kernel_build_guide.md` §8); self-hosting `dcc0 → dcc1 → dcc2`; GCC
+torture suite 99.92 % pass (§Testing).
 
 | | |
 |---|---|
@@ -123,7 +124,9 @@ for anything but freestanding code):
 $ dcc --target aarch64-linux-gnu -O2 -c -o add.o add.c
 $ dcc --target riscv64-linux-gnu -O2 -c -o add.o add.c
 $ dcc --target x86_64-pc-windows-msvc -c -o add.obj add.c   # COFF
-$ make CC=dcc HOSTCC=gcc -j"$(nproc)" bzImage               # whole kernel tree
+$ make CC="$PWD/scripts/dcc-kernel-cc.sh" \
+       HOSTCC="$PWD/scripts/dcc-host-wrapper.sh" -j"$(nproc)" vmlinux   # all-dcc kernel tree
+$ bash scripts/runtime_closure.sh --audit    # no .cmd may start with gcc
 ```
 
 ## Architecture
@@ -253,7 +256,7 @@ allows that set to shrink.
 | Back-end capability probe | `scripts/probe_backend_features.sh` · `ci.yml` (matrix job) |
 | `-c` vs `-S` byte parity | `scripts/check_asm_text_parity.sh` · `ci.yml` (parity job) |
 | Disassembly + reproducibility | `tests/disasm_snapshot.rs`, `tests/reproducibility.rs` |
-| Kernel build + QEMU boot | `scripts/kernel_full_check.sh`, `scripts/qemu_boot_matrix.sh` · `kernel-bench.yml` |
+| Kernel build + QEMU boot | `scripts/kernel_pvh_verify.sh`, `scripts/kernel_full_check.sh`, `scripts/qemu_boot_matrix.sh` · `kernel-bench.yml` |
 | Self-hosting | `make bootstrap` |
 
 Feature → fixture → test index is generated into [`docs/test_coverage.md`](./docs/test_coverage.md);
@@ -264,8 +267,8 @@ contribution rules for tests live in [`tests/README.md`](./tests/README.md).
 Full milestone history: [`docs/roadmap.md`](./docs/roadmap.md). Done: C89–C23 + GNU, C++ subset
 with modules/coroutines/ODR, six code-generating back ends, built-in ELF+PE linker, LTO,
 sanitizers, DWARF/BTF/objtool support, the whole profiling stack, self-hosting, Linux 7.1
-x86_64 full tree → vmlinux + bzImage + QEMU + `/init`, and GCC-tree subsets (libiberty,
-libcpp, generator programs).
+x86_64 full tree → vmlinux + QEMU + `/init` (PVH; `bzImage` awaits the 16-bit C backend),
+and GCC-tree subsets (libiberty, libcpp, generator programs).
 
 **Now**
 

@@ -1677,6 +1677,14 @@ impl Builder {
             Expr::AlignofTy { ty, .. } => Operand::Int(ty.align() as i128),
             Expr::AlignofExpr { e, .. } => Operand::Int(e.ty().align() as i128),
             Expr::Offsetof { ty, member, .. } => {
+                // 运行期下标不是常量：`eval_offsetof` 只能算出常量前缀（读不出的
+                // 下标 `unwrap_or(0)`），旧路径会把它静默当成 0 —— 内核
+                // `TNODE_SIZE(n)` 在 -O2 的 SSA 函数里就会变 0。整个函数退回 AST
+                // 通道，由 codegen 的 `offsetof_plan` 按「基偏移 + 下标 × stride」
+                // 发射（报告 §5.59）。
+                if member.contains('?') {
+                    self.unsupported("offsetof with runtime subscript");
+                }
                 Operand::Int(crate::const_eval::eval_offsetof(ty, member) as i128)
             },
             Expr::AsmExpr {
