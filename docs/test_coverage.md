@@ -208,17 +208,17 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | 指标 | 实测值 |
 |------|--------|
 | 主题子文件（`tests/integration/*.rs`） | 24 |
-| 主题子文件里的 `#[test]` | 1382 |
+| 主题子文件里的 `#[test]` | 1383 |
 | 顶层 target（`tests/*.rs`，含壳） | 8 |
 | 顶层 target 里的 `#[test]`（不含主题） | 102 |
-| 索引数据行合计 | 1484 |
+| 索引数据行合计 | 1485 |
 
 ### 判据分布
 
 | 判据 | 用例数 |
 |------|--------|
 | compile | 867 |
-| cross-check | 264 |
+| cross-check | 265 |
 | report-only | 6 |
 | run | 338 |
 | sanitize | 9 |
@@ -227,7 +227,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | Tier | 用例数 |
 |------|--------|
-| T0 | 1474 |
+| T0 | 1475 |
 | T3 | 10 |
 
 ### C++ ABI 夹具族（磁盘真值 + 代码真值，与人工小节逐条对账）
@@ -253,7 +253,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | 文件（相对 tests/） | 索引行数 | 一致 |
 |---------------------|----------|------|
-| integration/c_lang.rs | 194 | yes |
+| integration/c_lang.rs | 195 | yes |
 | integration/c_asm.rs | 173 | yes |
 | integration/c_kernel.rs | 95 | yes |
 | integration/c_attr_builtin.rs | 119 | yes |
@@ -340,6 +340,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `compound_literal_array_element_init_matches_gcc` | \`fixtures/c/compound_literal_array_element_init.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `stmt_expr_aggregate_member_init_matches_gcc` | \`fixtures/c/stmt_expr_aggregate_member_init.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `scoped_guard_cleanup_scope_matches_gcc` | \`fixtures/c/scoped_guard_cleanup_scope.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `nested_guard_same_name_slots_distinct_matches_gcc` | \`fixtures/c/nested_guard_slots_distinct.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `aligned_enum_expr_matches_gcc` | \`fixtures/c/aligned_enum_expr.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `agg_init_guard_mutex_matches_gcc` | \`fixtures/c/agg_init_guard_mutex.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `designator_chain_bitfield_matches_gcc` | \`fixtures/c/designator_chain_bitfield.c\` | cross-check | T0 |

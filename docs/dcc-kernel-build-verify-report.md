@@ -13,7 +13,7 @@ kernel itself exposed, is fixed and the affected objects were rebuilt.
 
 | Item | Value |
 |---|---|
-| dcc | this repository commit `d97e5437` (2026-11-11, §5.59) plus the then-uncommitted shadow-renaming parser change present in the working tree; `cargo build --release -j2` → `target/release/dcc` |
+| dcc | this repository at 2026-11-12 (§5.59 + §5.60); `cargo build --release -j2` → `target/release/dcc` |
 | Kernel | Linux 7.1.0, pristine source tree `/root/linux-pvh-src` (no git metadata, no local patches) |
 | Config | `localmodconfig` seeded from `defconfig`, then `PVH=y`, `SUSPEND=n`, `HIBERNATION=n`, `ACPI_SLEEP=n`, `IA32_EMULATION=n`, `COMPAT=n` |
 | Build dir | out-of-tree `O=/root/pvh-lmc3` (3 005 objects, 4 612 `.cmd`); after the cold round only incremental rounds — no `make clean` |
@@ -126,7 +126,7 @@ The judge is the serial console reaching `DCC kernel: init reached successfully`
 | full rebuild (kbuild26) carrying §5.51–§5.57 | +§5.51–§5.57 | `/init` runs: 8 of the 9 `RT\|` tests pass, `RT\|ext4\|FAIL:mount` — `JBD2: no valid journal superblock found`; the whole `MOD\|` panel is green | §5.58 |
 | incremental (46 TUs: `fs/jbd2`, `fs/ext4`) carrying §5.58 | +§5.58 | `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`; all **21** `RT\|`/`MOD\|` lines (the panel size at that time — the stress layer added five, §4.3 last row) are byte-identical to the gcc-built kernel (same `.config`, `scripts/runtime_closure.sh --compare`: PASS 21/21) | — |
 | full rebuild (kbuild27, 2 922 CC, one compiler identity) carrying §5.51–§5.58 | +§5.51–§5.58 | `Run /init as init process` → `RT\|basic` … `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`, `RT\|status\|0`; `configs.ko` and `hello.ko` rebuilt by the same compiler (`insmod`, proc read, `lsmod`, `dmesg`, `rmmod`, resident) → `MOD\|done`; the 21 `RT\|`/`MOD\|` lines are again byte-identical to the gcc-built kernel | — |
-| incremental 2026-11-11 (fib_trie, arp, eth, virtio-net, kernel/{events,cgroup}, `*_sockglue`, …) carrying §5.59 | +§5.59 | `-smp 4` + virtio-net: `RT\|smp\|online=4`, `RT\|net\|eth0 arp-complete`, `RT\|blk\|256KiB fsync 4x64KiB`, `RT\|exit\|0`, `RT\|status\|0`; all **26** `RT\|`/`MOD\|` lines byte-identical to the gcc-built kernel (`--stress`: 7 passed, 0 failed, 0 panic on either side) | — |
+| incremental 2026-11-11 (fib_trie, arp, eth, virtio-net, kernel/{events,cgroup}, `*_sockglue`, …) carrying §5.59/§5.60 | +§5.59, §5.60 | `-smp 4` + virtio-net: `RT\|smp\|online=4`, `RT\|sched\|8x20000=160000`, `RT\|threads\|4x20000=80000`, `RT\|net\|eth0 arp-complete`, `RT\|blk\|256KiB fsync 4x64KiB`, `RT\|exit\|0`, `RT\|status\|0`; all **26** `RT\|`/`MOD\|` lines byte-identical to the gcc-built kernel (`--stress`: 7 passed, 0 failed, 0 panic on either side) | — |
 
 The `WARNING … kernel/module/main.c:1723 at __layout_sections` printed when `configs.ko` is
 inserted is **not** a dcc diagnostic: the gcc-built kernel prints the same warning
@@ -148,12 +148,13 @@ include build-generated headers (`generated/autoconf.h`, `generated/asm-offsets.
 
 ### 4.5 dcc's own test cases
 
-The last full `cargo test --release --no-fail-fast -- --test-threads=2` ran on the compiler
-carrying §5.52–§5.58 (2026-11-11): **lib 2 612 passed, 0 failed** (2 ignored) and
-**integration 1 373 passed, 0 failed** (6 ignored). The §5.59 SSA bail landed after that full
-run, so its evidence is the new case at all four `-O` levels plus the pre-commit torture suite
-on the final binary — a full `cargo test` re-run on that binary is still owed. The previous
-full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
+The integration target was re-run on the final compiler carrying §5.59 + §5.60
+(2026-11-12, `cargo test --release --test integration -- --test-threads=2`):
+**integration 1 375 passed, 0 failed** (6 ignored, 66.7 s) — the two extra cases over the
+previous full run are the §5.59 `offsetof` and §5.60 nested-guard fixtures. The lib target was
+not re-run on that same binary: its last full run (2026-11-11, compiler of §5.52–§5.58) was
+**lib 2 612 passed, 0 failed** (2 ignored), so the lib half of `cargo test` is still owed on the
+final binary. The previous full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
 **4 054 passed, 8 ignored, 1 failed** — lib 2 607/0 (two ignored), integration 1 332/0 (six
 ignored), `errors` 26/0, `disasm_snapshot` 1/0, `g10_snapshot_baseline` 1/0. The single failure
 is the pre-existing `cpp_abi_eh_group` (six C++ zero-cost-EH fixtures die with a signal;
@@ -188,6 +189,11 @@ plus the `gas_text`), `const_eval::tests::eval_int_lit_strips_suffix_in_every_ra
 
 §5.59 adds `c_offsetof_runtime_subscript_gcc_cross_check`
 (`tests/fixtures/c/offsetof_runtime_subscript.c`), also run at all four `-O` levels against gcc.
+
+§5.60 adds `nested_guard_same_name_slots_distinct_matches_gcc`
+(`tests/fixtures/c/nested_guard_slots_distinct.c`): two- and three-level nested for-init guards,
+a for-init guard shadowing a block local, and two guards on the same object, at all four `-O`
+levels against gcc.
 
 User-space suites on the fixed compiler (`scripts/bench_lua_sqlite.sh`): Lua builds and runs
 identically to gcc at **all four** `-O` levels (same functional output, same `fib(32)` result),
@@ -997,6 +1003,30 @@ child slot starts `NULL`, `RT|net|eth0 arp-complete` and `RT|exit|0` are reached
 (`c_offsetof_runtime_subscript_gcc_cross_check`, gcc cross-check at `-O0/-O1/-O2/-O3`,
 exit codes 1–6 name the failing shape).
 
+### 5.60 Two nested `scoped_guard()` declarations shared one frame slot
+
+`scoped_guard(mutex, &mm->mm_cid.mutex)` expands to
+`for (CLASS(mutex, scope)(&mm->mm_cid.mutex), *done = NULL; !done; …)`; two nested guards both
+declare `scope` in their for-init clauses. Ordinary block declarations are renamed by
+`rename_shadow_var` when they shadow an outer name, but the for-init path called `parse_decl`
+directly: the declaration had already been inserted into `locals` before any check, and the
+check was never run. The backend's `var_map` is keyed by name, so both guards got one slot; the
+inner `raw_spinlock_irq` guard overwrote the outer mutex guard, the outer cleanup released the
+spinlock as if it were the mutex, and `mm->mm_cid.mutex` stayed locked — `pthread_create` and
+thread exit blocked in `sched_mm_cid_fork` / `sched_mm_cid_exit` with every CPU idle.
+
+Fix: snapshot the visible names (`locals.all_keys()`) **before** parsing the for-init
+declaration, rename a declarator that shadows one of them (or a global), and apply the resulting
+map to the remaining init declarations, the condition, the step and the body — the C for-init
+scope. `rename_shadow_var_if` now holds the common rename and skips `extern` declarations, which
+name a global rather than a new object.
+
+Evidence: `RT|sched|8x20000=160000` and `RT|threads|4x20000=80000` are part of the 26-line
+stress panel and byte-identical to gcc (§4.3). Regression case
+`tests/fixtures/c/nested_guard_slots_distinct.c`
+(`nested_guard_same_name_slots_distinct_matches_gcc`, `-O0`…`-O3`, exit codes 1/2/4/8 name the
+failing shape).
+
 ## 6. Reproduce
 
 ```bash
@@ -1106,10 +1136,12 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
   whose address is parked in a callee-saved register (`"=r"(a[i])`) can still alias at run time.
 * **Pipeline audit is corpus-bound** (§5.13): the 0-hit rates are measured on 60 small torture
   units; kernel-sized TUs with IPA-shaped calls will move `ipa_modref` and `cross_*_dce`.
-* **Full `cargo test` and `scripts/torture_test.sh all` were re-run on the compiler carrying
-  §5.52–§5.58** (`2026-11-11`: lib 2 612 passed / integration 1 373 passed, both 0 failed;
-  torture 3 707 passed / 0 failed / 6 skipped — that is also the pre-commit gate of the
-  `fix: emit REX.B for bswap` commit). The §5.59 SSA bail landed after that full run: its case
-  passes at `-O0/-O1/-O2/-O3` and the torture suite is green on the final binary (pre-commit),
-  but a full `cargo test` re-run on that binary is still owed. One exception is unchanged:
-  `cpp_abi_eh_group` predates this cycle and is not on the kernel path (§4.5).
+* **`scripts/torture_test.sh all` was re-run on the compiler carrying §5.52–§5.58**
+  (`2026-11-11`: torture 3 707 passed / 0 failed / 6 skipped — that is also the pre-commit gate
+  of the `fix: emit REX.B for bswap` commit), and the integration target was re-run on the final
+  binary carrying §5.59 + §5.60 (`2026-11-12`: 1 375 passed / 0 failed / 6 ignored). The lib
+  target was last run on the §5.52–§5.58 compiler (2 612 passed / 0 failed / 2 ignored), so that
+  half of `cargo test` is still owed on the final binary. Both §5.59 and §5.60 also pass at
+  `-O0/-O1/-O2/-O3`, and the torture suite is green on the final binary (pre-commit). One
+  exception is unchanged: `cpp_abi_eh_group` predates this cycle and is not on the kernel path
+  (§4.5).

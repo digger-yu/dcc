@@ -9583,20 +9583,40 @@ impl<'a> Parser<'a> {
             // 检查名字是否在外层作用域或全局作用域中存在 (即被遮蔽)
             // 非嵌套函数时 globals 未加载到 locals, 需额外检查 self.globals
             // 以确保遮蔽全局变量的局部变量被正确重命名
-            if self.locals.exists_in_outer_scopes(name) || self.globals.contains_key(name.as_str())
-            {
-                // 生成唯一名
-                let new_name = format!("{}__dcc_shadow_{}", name, self.shadow_counter);
-                self.shadow_counter += 1;
-                let old_name = name.clone();
-                // 更新当前声明的名称
-                let mut v = v.clone();
-                v.name.name = new_name.clone();
-                // 添加新名到 self.locals (保留旧名, 以便 lookup 不报警告)
-                // shadow_map 会负责重命名后续引用
-                self.locals.insert(new_name.clone(), v.ty.clone());
-                return (Decl::Var(v), Some((old_name, new_name)));
+            let shadowed = self.locals.exists_in_outer_scopes(name)
+                || self.globals.contains_key(name.as_str());
+            return self.rename_shadow_var_if(decl, shadowed);
+        }
+        (decl, None)
+    }
+
+    /// 判据由调用方给：块内声明查外层作用域；for-init 声明与块内变量**同层**，
+    /// 必须在 `parse_decl` **之前**快照名字集（`parse_decl` 已把声明自身插进
+    /// locals，事后查 `contains_key` 恒真）。判据为真时改名并返回映射。
+    fn rename_shadow_var_if(
+        &mut self,
+        decl: Decl,
+        shadowed: bool,
+    ) -> (Decl, Option<(String, String)>) {
+        if !shadowed {
+            return (decl, None);
+        }
+        if let Decl::Var(ref v) = decl {
+            if v.is_extern {
+                return (decl, None);
             }
+            let name = &v.name.name;
+            // 生成唯一名
+            let new_name = format!("{}__dcc_shadow_{}", name, self.shadow_counter);
+            self.shadow_counter += 1;
+            let old_name = name.clone();
+            // 更新当前声明的名称
+            let mut v = v.clone();
+            v.name.name = new_name.clone();
+            // 添加新名到 self.locals (保留旧名, 以便 lookup 不报警告)
+            // shadow_map 会负责重命名后续引用
+            self.locals.insert(new_name.clone(), v.ty.clone());
+            return (Decl::Var(v), Some((old_name, new_name)));
         }
         (decl, None)
     }
@@ -10329,13 +10349,64 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::LParen, "'('") {
                     return None;
                 }
+                // C99 6.8.5.3：for-init 的声明有自己的作用域，循环结束就消失。
+                // 没有这层作用域时，前一个 `for (int i…)` 的 `i` 留在 locals 里，
+                // 同一个块里后一个 `for (int i…)` 会被误判为遮蔽而改名。
+                self.locals.push_scope();
+                // for-init 里的声明与块内声明一样要参与遮蔽重命名。
+                // 现场（7.1 内核 `scoped_guard`）：宏把它展开成
+                // `for (CLASS(_name, scope)(args), *done = NULL; ...)`，内外层
+                // 两个守卫都叫 `scope`。块内声明有 rename_shadow_var 兜住，
+                // for-init 没有 ⇒ 两个 `scope` 共用一帧槽（var_map 以名字索引），
+                // 内层 spinlock 守卫覆写外层 mutex 守卫，外层清理时把 spinlock
+                // 指针当 mutex 解，真正的 mm->mm_cid.mutex 永不释放：
+                // `clone3`/`do_exit` 全部阻塞在 sched_mm_cid_fork/exit。
+                // 映射只覆盖 cond/step/body —— 这正是 C 的 for-init 作用域。
+                let mut init_shadow: Vec<(String, String)> = Vec::new();
                 let init = if self.cur.kind == TokKind::Semi {
                     self.advance();
                     None
+                } else if self.is_decl_start() {
+                    // 快照：parse_decl 会把新声明插进 locals，必须在它之前记录
+                    // 「这个块里已经有什么名字」，否则遮蔽判据对自身恒真。
+                    let pre_names = self.locals.all_keys();
+                    let dsp = self.cur.span.clone(); // 与 parse_stmt 的声明块同 span
+                    let ds = self.parse_decl()?;
+                    let mut items = Vec::new();
+                    for d in ds {
+                        let shadowed = match &d {
+                            Decl::Var(v) => {
+                                !v.is_extern
+                                    && (pre_names.contains(v.name.name.as_str())
+                                        || self.globals.contains_key(v.name.name.as_str()))
+                            },
+                            _ => false,
+                        };
+                        let (d, new_mapping) = if self.in_function {
+                            self.rename_shadow_var_if(d, shadowed)
+                        } else {
+                            (d, None)
+                        };
+                        let mut d = d;
+                        if !init_shadow.is_empty() {
+                            Self::apply_shadow_map_decl(&mut d, &init_shadow);
+                        }
+                        if let Some((old, new)) = new_mapping {
+                            init_shadow.push((old, new));
+                        }
+                        items.push(BlockItem::Decl(d));
+                    }
+                    Some(Box::new(Stmt::Block {
+                        b: Block {
+                            items,
+                            span: dsp.clone(),
+                        },
+                        span: dsp,
+                    }))
                 } else {
                     Some(Box::new(self.parse_stmt()?))
                 };
-                let cond = if self.cur.kind == TokKind::Semi {
+                let mut cond = if self.cur.kind == TokKind::Semi {
                     None
                 } else {
                     Some(self.parse_expr()?)
@@ -10343,7 +10414,7 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::Semi, "';'") {
                     return None;
                 }
-                let step = if self.cur.kind == TokKind::RParen {
+                let mut step = if self.cur.kind == TokKind::RParen {
                     None
                 } else {
                     Some(self.parse_expr()?)
@@ -10351,11 +10422,22 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RParen, "')'") {
                     return None;
                 }
+                let mut body = Box::new(self.parse_stmt()?);
+                self.locals.pop_scope();
+                if !init_shadow.is_empty() {
+                    if let Some(e) = cond.as_mut() {
+                        Self::apply_shadow_map_expr(e, &init_shadow);
+                    }
+                    if let Some(e) = step.as_mut() {
+                        Self::apply_shadow_map_expr(e, &init_shadow);
+                    }
+                    Self::apply_shadow_map_stmt(&mut body, &init_shadow);
+                }
                 Some(Stmt::For {
                     init,
                     cond,
                     step,
-                    body: Box::new(self.parse_stmt()?),
+                    body,
                     span: sp,
                 })
             },

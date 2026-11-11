@@ -937,6 +937,20 @@ fn scoped_guard_cleanup_scope_matches_gcc() {
     );
 }
 
+/// §5.60: 嵌套 `scoped_guard()` 的两个守卫都叫 `scope`，但块内声明有
+/// rename_shadow_var、for-init 声明没有 ⇒ 共用一个帧槽。内核现场：
+/// `sched_mm_cid_exit/fork` 的 `mm_cid.mutex` 永不释放，
+/// `pthread_create`/线程退出全部阻塞（4 核 idle，永久挂死）。
+#[test]
+fn nested_guard_same_name_slots_distinct_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "nested-guard-slots-distinct",
+        include_str!("../fixtures/c/nested_guard_slots_distinct.c"),
+        "嵌套 for-init 同名 cleanup 守卫共用一帧槽，外层析构释放了内层对象\
+         （失败码：1=两层嵌套、2=三层嵌套、4=遮蔽块内同名变量、8=同一对象计数）",
+    );
+}
+
 /// §5.23: `__attribute__((aligned(<常量表达式>)))` 的 mini-parser 必须
 /// 按常量求值到底：枚举常量是操作数，`1 << WORK_STRUCT_PWQ_SHIFT` 不能
 /// 被折成 `1`（那会把 256 对齐静默降成自然对齐）。内核现场：
