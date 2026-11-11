@@ -13,7 +13,7 @@ kernel itself exposed, is fixed and the affected objects were rebuilt.
 
 | Item | Value |
 |---|---|
-| dcc | this repository, working tree of 2026-11-11 (base `c4e34751` plus the §5.59 SSA bail); `cargo build --release -j2` → `target/release/dcc` |
+| dcc | this repository commit `d97e5437` (2026-11-11, §5.59) plus the then-uncommitted shadow-renaming parser change present in the working tree; `cargo build --release -j2` → `target/release/dcc` |
 | Kernel | Linux 7.1.0, pristine source tree `/root/linux-pvh-src` (no git metadata, no local patches) |
 | Config | `localmodconfig` seeded from `defconfig`, then `PVH=y`, `SUSPEND=n`, `HIBERNATION=n`, `ACPI_SLEEP=n`, `IA32_EMULATION=n`, `COMPAT=n` |
 | Build dir | out-of-tree `O=/root/pvh-lmc3` (3 005 objects, 4 612 `.cmd`); after the cold round only incremental rounds — no `make clean` |
@@ -65,7 +65,7 @@ received incremental rounds):
 | Metric | Value |
 |---|---|
 | `CC` lines in the build log | 2 901 |
-| object files in the tree | 2 998 |
+| object files in the tree | 2 998 (cold round; 3 005 after the later incremental rounds) |
 | wall time, `-j2` on 4 cores | 3 h 52 min |
 | `vmlinux` | 171 212 384 B |
 | gcc traps / delegate lines | 0 / 0 |
