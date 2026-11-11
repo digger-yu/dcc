@@ -196,7 +196,8 @@ impl Codegen {
         };
         let parts: Vec<&str> = member.split('.').collect();
         let mut offset = 0usize;
-        let mut current_fields = fields.as_ref();
+        // 字段表拿副本：cur_ty 是每轮的局部变量，借用它的 &[Field] 活不过一轮。
+        let mut current_fields: Vec<crate::ast::Field> = fields.as_ref().clone();
         for (i, part) in parts.iter().enumerate() {
             let (name, bracket_part) = if part.contains('[') {
                 let pos = part.find('[').unwrap();
@@ -205,11 +206,18 @@ impl Codegen {
                 (*part, "")
             };
             // 使用 find_field 支持匿名 struct/union 成员穿透查找
-            if let Some((field, inner_off)) = find_field(current_fields, name) {
+            if let Some((field, inner_off)) =
+                find_field(&current_fields, name).map(|(f, o)| (f.clone(), o))
+            {
                 offset += field.offset + inner_off;
+                // 本段下标吃完后的类型：**下一段必须从这里继续下降**。以前下降用的是
+                // `field.ty`，遇到 `kv[0].tnode[n]` 这种「数组下标后面还有字段」的形状
+                // 就停在 `kv`（Type::Array），内核 `TNODE_SIZE(n)` 于是恒等于
+                // offsetof(struct tnode, kv[0]) = 32：tnode 只分配 32 字节，kv 头
+                // 直接写到对象外，fib_trie 插入时在 put_child 里读邻居 slab 崩掉。
+                let mut cur_ty = field.ty.clone();
                 // 处理常量数组下标: "b[2][3]" → 加 2*stride1 + 3*stride2
                 if !bracket_part.is_empty() {
-                    let mut cur_ty = field.ty.clone();
                     for idx_str in bracket_part.split(['[', ']']) {
                         if idx_str.is_empty() {
                             continue;
@@ -232,8 +240,8 @@ impl Codegen {
                     }
                 }
                 if i < parts.len() - 1 {
-                    if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &field.ty {
-                        current_fields = sub.as_ref();
+                    if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &cur_ty {
+                        current_fields = sub.as_ref().clone();
                     } else {
                         break;
                     }
@@ -243,6 +251,71 @@ impl Codegen {
             }
         }
         offset
+    }
+
+    /// `offsetof` 的运行期求值计划：`(编译期已确定的偏移, 仍需运行期求值的下标)`。
+    ///
+    /// 第二分量每项是 `(该下标在 Expr::Offsetof::indices 中的序号, 元素类型)`；
+    /// 元素类型只用来算 stride（常量走 `size()`，VLA 走 `gen_sizeof_runtime`）。
+    ///
+    /// 以前代码生成拿 `compute_offset` 得基础偏移、再拿 `find_offsetof_field_type`
+    /// 得「字段类型」逐个下标乘 stride，但后者完全不下标，`kv[0].tnode[i]` 返回的是
+    /// `kv` 的数组类型：第一个下标用 16 当 stride（应为 key_vector* 的 8），第二个
+    /// 下标因为类型已经不是数组而被整个丢掉。实测内核 `TNODE_SIZE(1ul << bits)`
+    /// 恒为 32，tnode_new 只分配 32 字节而 kv 之外还要写 8+8n 字节。
+    pub(crate) fn offsetof_plan(
+        ty: &Type,
+        member: &str,
+        indices: &[Box<Expr>],
+    ) -> (usize, Vec<(usize, Type)>) {
+        let fields = match ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
+            _ => return (0, Vec::new()),
+        };
+        let parts: Vec<&str> = member.split('.').collect();
+        let mut offset = 0usize;
+        let mut current_fields: Vec<crate::ast::Field> = fields.as_ref().clone();
+        let mut plan: Vec<(usize, Type)> = Vec::new();
+        let mut sub_i = 0usize;
+        for (i, part) in parts.iter().enumerate() {
+            let (name, bracket_part) = if part.contains('[') {
+                let pos = part.find('[').unwrap();
+                (&part[..pos], &part[pos..])
+            } else {
+                (*part, "")
+            };
+            let Some((field, inner_off)) =
+                find_field(&current_fields, name).map(|(f, o)| (f.clone(), o))
+            else {
+                break;
+            };
+            offset += field.offset + inner_off;
+            let mut cur_ty = field.ty.clone();
+            for _ in bracket_part.split(['[', ']']).filter(|s| !s.trim().is_empty()) {
+                let elem = match &cur_ty {
+                    Type::Array(elem, _) => elem.base.clone(),
+                    _ => break,
+                };
+                // 常量下标直接并入偏移；读不出来的下标排到运行期计划。
+                match indices.get(sub_i) {
+                    Some(ix) => match crate::const_eval::eval(ix) {
+                        Ok(v) => offset += (v as usize).wrapping_mul(elem.size()),
+                        Err(_) => plan.push((sub_i, elem.clone())),
+                    },
+                    None => {},
+                }
+                sub_i += 1;
+                cur_ty = elem;
+            }
+            if i + 1 < parts.len() {
+                if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &cur_ty {
+                    current_fields = sub.as_ref().clone();
+                } else {
+                    break;
+                }
+            }
+        }
+        (offset, plan)
     }
     pub(crate) fn expr_bitfield_width(e: &Expr) -> Option<u32> {
         if let Expr::Member {

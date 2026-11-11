@@ -3390,82 +3390,71 @@ impl Codegen {
                 ref indices,
                 ..
             } => {
-                let base_off = Self::compute_offset(ty, member);
-                if indices.is_empty() {
-                    self.mov_imm(dst, base_off as i128);
-                } else {
-                    // 找到字段的类型
-                    let field_ty = Self::find_offsetof_field_type(ty, member);
-                    // dst = base_off
-                    self.mov_imm(dst, base_off as i128);
-                    // 对每个下标: dst += idx * stride
-                    let mut cur_ty = field_ty;
-                    for idx_expr in indices.iter() {
-                        if let Type::Array(elem, _) = &cur_ty {
-                            // 计算下标值到 rcx
-                            self.gen_expr(idx_expr, 1); // rcx = idx
-                                                        // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
-                            let idx_ty = idx_expr.ty();
-                            if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
-                                // movslq %ecx, %rcx: 48 63 C9
+                // 编译期下标并入 base_off，运行期下标带各自的元素类型逐个乘 stride：
+                // 一条 member-designator 里可能有多段带下标（`kv[0].tnode[i]`），
+                // 每段 stride 不同，不能只按「字段类型」整体循环。
+                let (base_off, plan) = Self::offsetof_plan(ty, member, indices);
+                self.mov_imm(dst, base_off as i128);
+                for (idx_no, elem_ty) in plan {
+                    let idx_expr = &indices[idx_no];
+                    // 计算下标值到 rcx
+                    self.gen_expr(idx_expr, 1); // rcx = idx
+                    // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
+                    let idx_ty = idx_expr.ty();
+                    if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
+                        // movslq %ecx, %rcx: 48 63 C9
+                        let insn = Insn::new(
+                            X86_64Opcode::MovExt {
+                                rip_relative: false,
+                                sign: true,
+                                from: crate::codegen::shared::asm_operand::Width::B32,
+                                to: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: OpcodeOperand::Reg(
+                                    1,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: OpcodeOperand::Reg(
+                                    1,
+                                    crate::codegen::shared::asm_operand::Width::B32,
+                                ),
+                            },
+                            &[],
+                        );
+                        self.emit_insn(&insn);
+                    }
+                    // 计算 stride = sizeof(elem) 并乘到 rcx
+                    if Self::type_has_vla(&elem_ty) {
+                        // VLA: 运行时计算 stride 到 r11
+                        self.gen_sizeof_runtime(&elem_ty, 11); // r11 = stride
+                                                               // rcx *= r11
+                        self.imul_reg(1, 11);
+                    } else {
+                        // 常量 stride
+                        let stride = elem_ty.size() as u128;
+                        if stride > 1 {
+                            if stride.is_power_of_two() {
+                                let shift = (stride.trailing_zeros() as u8).min(31);
+                                // 步骤 2d: Shift{Shl, B64, rcx(=1), Imm8(shift)}.
                                 let insn = Insn::new(
-                                    X86_64Opcode::MovExt {
-                                        rip_relative: false,
-                                        sign: true,
-                                        from: crate::codegen::shared::asm_operand::Width::B32,
-                                        to: crate::codegen::shared::asm_operand::Width::B64,
-                                        dst: OpcodeOperand::Reg(
-                                            1,
-                                            crate::codegen::shared::asm_operand::Width::B64,
-                                        ),
-                                        src: OpcodeOperand::Reg(
-                                            1,
-                                            crate::codegen::shared::asm_operand::Width::B32,
-                                        ),
+                                    X86_64Opcode::Shift {
+                                        op: ShiftOp::Shl,
+                                        width: Width::B64,
+                                        dst: OpcodeOperand::Reg(1, Width::B64),
+                                        amount: ShiftAmount::Imm8(shift),
                                     },
                                     &[],
                                 );
-                                self.emit_insn(&insn);
-                            }
-                            // 计算 stride = sizeof(elem) 并乘到 rcx
-                            if Self::type_has_vla(&elem.base) {
-                                // VLA: 运行时计算 stride 到 r11
-                                self.gen_sizeof_runtime(&elem.base, 11); // r11 = stride
-                                                                         // rcx *= r11
-                                self.imul_reg(1, 11);
-                            } else {
-                                // 常量 stride
-                                let stride = elem.size() as u128;
-                                if stride > 1 {
-                                    if stride.is_power_of_two() {
-                                        let shift = (stride.trailing_zeros() as u8).min(31);
-                                        // 步骤 2d: Shift{Shl, B64, rcx(=1), Imm8(shift)}.
-                                        let insn = Insn::new(
-                                            X86_64Opcode::Shift {
-                                                op: ShiftOp::Shl,
-                                                width: Width::B64,
-                                                dst: OpcodeOperand::Reg(1, Width::B64),
-                                                amount: ShiftAmount::Imm8(shift),
-                                            },
-                                            &[],
-                                        );
-                                        if !self.emit_insn(&insn) {
-                                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(
-                                                4, 1, shift,
-                                            ));
-                                        }
-                                    } else {
-                                        self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
-                                    }
+                                if !self.emit_insn(&insn) {
+                                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(4, 1, shift));
                                 }
+                            } else {
+                                self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
                             }
-                            // dst += rcx
-                            // P11: add rcx, dst via typed AluRm (AluRm r/m=dst, reg=rcx).
-                            self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Add, Width::B64, dst, 1));
-                            // 下降到元素类型
-                            cur_ty = elem.base.clone();
                         }
                     }
+                    // dst += rcx
+                    // P11: add rcx, dst via typed AluRm (AluRm r/m=dst, reg=rcx).
+                    self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Add, Width::B64, dst, 1));
                 }
             },
             Expr::Comma { l, r, .. } => {
