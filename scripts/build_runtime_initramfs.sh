@@ -39,7 +39,7 @@ rm -rf "$ROOTFS"
 mkdir -p "$ROOTFS"/{bin,dev,proc,sys,mnt}
 
 # --- 用户态测试程序（宿主 gcc，静态链接） --------------------------------
-gcc -static -O2 -o "$ROOTFS/t" "$DCC_REPO/tests/runtime/init.c"
+gcc -static -O2 -pthread -o "$ROOTFS/t" "$DCC_REPO/tests/runtime/init.c"
 gcc -static -O2 -o "$ROOTFS/t2" "$DCC_REPO/tests/runtime/t2.c"
 for f in t t2; do
     file "$ROOTFS/$f" | grep -q 'statically linked' \

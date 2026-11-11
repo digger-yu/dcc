@@ -16,6 +16,13 @@ echo "DIAG|dev_list|$(ls /dev 2>&1 | head -c 200)"
 echo "DIAG|dev_vda|$(ls -l /dev/vda 2>&1 | head -c 80)"
 # ext4 journal superblock 物理块 8（镜像上 magic c03b3998）：验证块设备读路径
 echo "DIAG|jsb|$(dd if=/dev/vda bs=4096 skip=8 count=1 2>/dev/null | hexdump -C 2>/dev/null | head -1 | head -c 90)"
+# 网卡/总线探针（仅诊断，不参与对比）
+echo "DIAG|net_list|$(ls /sys/class/net 2>&1 | tr '\n' ' ')"
+echo "DIAG|virtio_devs|$(ls /sys/bus/virtio/devices 2>/dev/null | tr '\n' ' ')"
+echo "DIAG|virtio_bind|$(for d in /sys/bus/virtio/devices/*; do [ -e "$d" ] && echo "$(basename $d):$(basename $(readlink -f $d/driver 2>/dev/null) 2>/dev/null)"; done | tr '\n' ' ')"
+echo "DIAG|cpu_online|$(cat /sys/devices/system/cpu/online 2>&1)"
+echo "DIAG|smpboot|$(dmesg | grep -a 'smp: Brought up' | head -c 80)"
+echo "DIAG|pci_net|$(dmesg | grep -a 'class 0x0200' | head -c 120)"
 
 /t
 echo "RT|status|$?"
