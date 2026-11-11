@@ -116,8 +116,9 @@ The judge is the serial console reaching `DCC kernel: init reached successfully`
 | full rebuild carrying §5.48–§5.49 | +§5.48, §5.49 | `__ata_scsi_queuecmd` still faults, now on `rq->tag` read at offset 0 (`*(int*)rq`) | §5.50 |
 | incremental (85 TUs: `block`, `ata`, `scsi`, `cdrom`) carrying §5.50 | +§5.50 | **`Run /init as init process` at 10.16 s** — first image past the whole boot path; `/init` then fails to exec with `-7` | open |
 | incremental (`fs`, `init`) carrying all of the above | same | `Run /init as init process` at 10.42 s, `/init` exec returns `-7` again | open |
-| full rebuild (kbuild26) carrying §5.51–§5.57 | +§5.51–§5.57 | `/init` runs: 8 of the 9 `RT|` tests pass, `RT|ext4|FAIL:mount` — `JBD2: no valid journal superblock found`; the whole `MOD|` panel is green | §5.58 |
-| incremental (46 TUs: `fs/jbd2`, `fs/ext4`) carrying §5.58 | +§5.58 | `RT|ext4|magic roundtrip umount`, `RT|exit|0`; all **21** `RT|`/`MOD|` lines are byte-identical to the gcc-built kernel (same `.config`, `scripts/runtime_closure.sh --compare`: PASS 21/21) | — |
+| full rebuild (kbuild26) carrying §5.51–§5.57 | +§5.51–§5.57 | `/init` runs: 8 of the 9 `RT\|` tests pass, `RT\|ext4\|FAIL:mount` — `JBD2: no valid journal superblock found`; the whole `MOD\|` panel is green | §5.58 |
+| incremental (46 TUs: `fs/jbd2`, `fs/ext4`) carrying §5.58 | +§5.58 | `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`; all **21** `RT\|`/`MOD\|` lines are byte-identical to the gcc-built kernel (same `.config`, `scripts/runtime_closure.sh --compare`: PASS 21/21) | — |
+| full rebuild (kbuild27, 2 922 CC, one compiler identity) carrying §5.51–§5.58 | +§5.51–§5.58 | `Run /init as init process` → `RT\|basic` … `RT\|ext4\|magic roundtrip umount`, `RT\|exit\|0`, `RT\|status\|0`; `configs.ko` and `hello.ko` rebuilt by the same compiler (`insmod`, proc read, `lsmod`, `dmesg`, `rmmod`, resident) → `MOD\|done`; the 21 `RT\|`/`MOD\|` lines are again byte-identical to the gcc-built kernel | — |
 
 The `WARNING … kernel/module/main.c:1723 at __layout_sections` printed when `configs.ko` is
 inserted is **not** a dcc diagnostic: the gcc-built kernel prints the same warning
@@ -967,6 +968,16 @@ readelf -SW "$BUILD/vmlinux" | grep -E 'altinstr|jump_table'
 # 5. boot — the judge is "Run /init as init process" on the serial console
 KERNEL_TREE=$TREE BUILD=$BUILD bash scripts/kernel_pvh_verify.sh --boot
 
+# 5b. runtime closure (§4.3): initramfs + ext4 image + module panel, then the gcc baseline
+bash scripts/build_runtime_initramfs.sh        # runtime.cpio.gz + rt-ext4.img
+bash scripts/runtime_closure.sh --modules      # configs.ko (multi-file) + hello.ko, dcc + modpost
+bash scripts/runtime_closure.sh --gcc-build    # /root/pvh-gcc-rt, same .config, gcc SDK
+qemu-system-x86_64 -kernel "$BUILD/vmlinux" -initrd initramfs/runtime.cpio.gz \
+  -drive file=initramfs/rt-ext4.img,format=raw,if=virtio \
+  -append "console=ttyS0 earlyprintk=serial init=/init panic=-1" \
+  -m 1024M -no-reboot -nographic -smp 1 > /tmp/boot_dcc.log 2>&1
+bash scripts/runtime_closure.sh --compare /tmp/boot_dcc.log /tmp/boot_gcc.log   # PASS 21/21
+
 # 6. the §5.11 reproducer as a check (gcc here is a comparison baseline, not a build tool)
 bash scripts/kernel_cc_asm_repro.sh
 #   gcc -O2 : fail=0 ok=1 v=3 rc=0
@@ -987,12 +998,16 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
 
 ## 7. What is not verified / known gaps
 
-* **Boot to user space is not yet proven.** A dcc-built image now gets through the whole boot
-  path and hands off (`Run /init as init process`, §4.3), but `/init` — a `#!/bin/sh` script on
-  the initramfs — fails to exec with `-7` (`-E2BIG`), and it still does after `fs/exec.o`,
-  `fs/binfmt_script.o` and `fs/binfmt_elf.o` were rebuilt from the current compiler. The return
-  comes from inside the exec path, not from the boot-path code the earlier rounds fixed; that
-  is the next stop point.
+* **Boot to user space is proven; “identical to gcc” is proven for the runtime panel, not for every
+  boot line.** A dcc-built image reaches `Run /init as init process`, runs the nine-test panel
+  `RT|basic` … `RT|irq` plus `RT|ext4|magic roundtrip umount` and exits `RT|exit|0`, and the
+  21 `RT|`/`MOD|` lines are byte-identical to the gcc-built kernel (§4.3). The comparison is on
+  those lines, not on the whole dmesg: timings, addresses and banner strings differ by construction.
+* **Modules are verified out of tree only.** `make vmlinux` neither runs `modpost` nor links
+  modules; `scripts/runtime_closure.sh --modules` builds `configs.ko` (multi-file) and `hello.ko`
+  with the same compiler, `modpost` included, and the QEMU panel does `insmod` / proc read /
+  `lsmod` / `dmesg` / `rmmod` / resident check. In-tree `modules_install` is not exercised, and the
+  `__layout_sections` warning printed on insert is shared with the gcc kernel (§4.3).
 * **`cleanup` destructors on the return path are emitted only for integer/`Memory` delivery**
   (§5.16): a function returning `Sse`/`SseUp`/`X87` (`float`/`double`, `__m128`, `long double`,
   complex) still skips function-body cleanups, because preserving `xmm0`/`st(0)` across the
@@ -1008,8 +1023,8 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
   16-bit C and need a backend dcc does not have (`E0319` + `DCC-GAP`, asserted in §4.4). The PVH
   route bypasses them; the remaining 16-bit material is assembly and is byte-identical to gcc.
 * **`COMPAT` / `vdso32`**: `-m32` C, switched off in this configuration.
-* **Modules**: this `localmodconfig` resolves to 1 module and `make vmlinux` does not run
-  `modpost` or module linking.
+* **Modules**: the module closure is out of tree (§4.3); this `localmodconfig` resolves to one
+  in-tree module and `make vmlinux` does not run `modpost` for it.
 * **C++**: `cpp_abi_eh_group` (six zero-cost-EH fixtures) still dies with a signal; it predates
   this cycle (§4.5) and is not on the kernel path.
 * **Frame economy is not finished** (§5.12, §5.42): what is left of the floor is 16 B (the
@@ -1031,7 +1046,8 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
   whose address is parked in a callee-saved register (`"=r"(a[i])`) can still alias at run time.
 * **Pipeline audit is corpus-bound** (§5.13): the 0-hit rates are measured on 60 small torture
   units; kernel-sized TUs with IPA-shaped calls will move `ipa_modref` and `cross_*_dce`.
-* **Full `cargo test` and `scripts/torture_test.sh all` have not been re-run on the final
-  compiler.** Their last full records are 2026-11-07 (§4.5); the §5.19–§5.50 fixes are covered by
-  their own integration cases, and the lib suite plus the new cases were re-run green on this
-  compiler, but one complete pass (`cargo test --release`, `torture_test.sh all`) is still owed.
+* **Full `cargo test` and `scripts/torture_test.sh all` have been re-run on the final compiler**
+  (`2026-11-11`: lib 2 612 passed / integration 1 373 passed, both 0 failed; torture 3 707 passed /
+  0 failed / 6 skipped — that is also the pre-commit gate of the `fix: emit REX.B for bswap`
+  commit). One exception is unchanged: `cpp_abi_eh_group` predates this cycle and is not on the
+  kernel path (§4.5).
