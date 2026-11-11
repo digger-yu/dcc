@@ -2191,6 +2191,12 @@ pub fn const_str_id(data: &[u8]) -> u64 {
 /// 仅用于 __builtin_* 折叠等需要从字面量文本构造常量的场景。
 pub fn eval_int_lit(s: &str) -> Option<i128> {
     let s = s.trim();
+    // 后缀先摘，再按进制解析：十六/二/八进制分支把整串交给 `from_str_radix`，
+    // 而 `0x1u` 里的 `u` 不是十六进制数字 —— 旧实现只在十进制分支摘后缀，因此
+    // `eval_int_lit("0x11223344u")` 返回 None。parser 的 `__builtin_bswap*` /
+    // `__builtin_abs` 直折块又先 `advance()` 再折，折空就把 `;` 当成表达式开头，
+    // 报 `E0006 expected expression, got Semi`（§5.58 附带修复）。
+    let s = strip_int_suffix(s);
     if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u128::from_str_radix(rest, 16).ok().map(|v| v as i128)
     } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
@@ -2198,9 +2204,7 @@ pub fn eval_int_lit(s: &str) -> Option<i128> {
     } else if s.starts_with("0") && s.len() > 1 {
         u128::from_str_radix(&s[1..], 8).ok().map(|v| v as i128)
     } else {
-        // 截去 u/l/L/ll/LL 后缀后转十进制
-        let t = strip_int_suffix(s);
-        t.parse::<i128>().ok()
+        s.parse::<i128>().ok()
     }
 }
 
@@ -3067,5 +3071,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `eval_int_lit` 必须在**所有进制**上先摘后缀再解析：旧实现只在十进制
+    /// 分支摘，十六进制的 `0x11223344u` 直接返回 None，parser 的
+    /// `__builtin_bswap*` 直折因此落空并把 `)` 吃掉了（§5.58 附带修复）。
+    #[test]
+    fn eval_int_lit_strips_suffix_in_every_radix() {
+        assert_eq!(super::eval_int_lit("0x11223344u"), Some(0x11223344));
+        assert_eq!(super::eval_int_lit("0xC03B3998U"), Some(0xc03b3998));
+        assert_eq!(super::eval_int_lit("0x11223344ul"), Some(0x11223344));
+        assert_eq!(super::eval_int_lit("0x11223344ULL"), Some(0x11223344));
+        assert_eq!(super::eval_int_lit("0x11223344"), Some(0x11223344));
+        assert_eq!(super::eval_int_lit("0b1010u"), Some(10));
+        assert_eq!(super::eval_int_lit("0777u"), Some(511));
+        assert_eq!(super::eval_int_lit("42u"), Some(42));
+        // 十六进制数字里的 b/e/f 不能被当成后缀剥掉。
+        assert_eq!(super::eval_int_lit("0xbeeff"), Some(0xbeeff));
+        assert_eq!(super::eval_int_lit("0x123wb"), Some(0x123));
     }
 }

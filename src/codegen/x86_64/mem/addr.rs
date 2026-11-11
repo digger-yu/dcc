@@ -236,6 +236,15 @@ impl Codegen {
                 }
                 false
             },
+            // 聚合 **rvalue** 作成员/下标基址（`(<stmt-expr>).w[0]` —— 表单级内联
+            // 把 `f.w[0]` 里的 `f` 换成 StmtExpr 后的常见形）：交付形态只问
+            // `rvalue_is_buffer_addr`，成立时 `gen_expr` 的结果就是对象缓冲地址，
+            // 直接当基址用。少了这一臂，成员 rvalue 的回退分支会把**缓冲地址本身**
+            // 当数据存回结果槽、再取槽地址，读回的是一个栈指针（§5.52 夹具 rc=31）。
+            _ if Self::rvalue_is_buffer_addr(e) => {
+                self.gen_expr(e, dst);
+                true
+            },
             _ => false,
         }
     }

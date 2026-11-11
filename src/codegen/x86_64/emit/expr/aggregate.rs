@@ -207,8 +207,20 @@ impl Codegen {
     /// 这条判据有两个读者, 必须是同一个答案: `gen_expr_cond` 用它**选发射路径**,
     /// [`Self::rvalue_is_buffer_addr`] 用它**报告交付形态**。两边一旦分叉,
     /// 消费端与发射端对同一个 rax 的解释就不同 (地址 vs 数据)。
+    ///
+    /// 判据**只看形态, 不看尺寸**。旧写法带 `value_is_whole_copy(ty)` (尺寸轴),
+    /// 于是 ≤16 B 的聚合三元掉进标量路径, 两支各自 `gen_expr(then_/else_, dst)`;
+    /// 而两支的交付位置由**各自表达形态**决定, 不由尺寸决定 ——
+    /// `StmtExpr` (`__always_inline` 展开) 与 `CompoundLit` 都恒交付缓冲地址。
+    /// 实测现场 (7.1 `vm_brk_flags`):
+    ///   `const vma_flags_t v = is_exec ? mk_vma_flags(VMA_EXEC_BIT) : EMPTY_VMA_FLAGS;`
+    /// `vma_flags_t` 是 8 B 结构体 (bitmap word), dcc 把临时量的**栈地址**
+    /// 写进 `v` 再按值传给 `do_brk_flags`, 于是匿名 BSS VMA 的 `vm_flags`
+    /// 成了 `0xffffc900…`（一个内核栈指针）: bit 3 (7.1 的 `VM_SHARED`)
+    /// 被偶地址置位, `do_anonymous_page` 对 `VM_SHARED` 的检查直接返回
+    /// `VM_FAULT_SIGBUS` —— 用户态写 `__environ` 即被 SIGBUS 打死。
     pub(crate) fn cond_materializes_aggregate(ty: &Type) -> bool {
-        matches!(ty, Type::Struct(..) | Type::Union(..)) && Self::value_is_whole_copy(ty)
+        matches!(ty, Type::Struct(..) | Type::Union(..))
     }
 
     /// 形态分类视图: 剥掉**同类型** (no-op) 的 `Cast` 包装。
@@ -348,7 +360,16 @@ impl Codegen {
                 // 直存即位模式误读 (`my_cimag_d(reassemble_fc(7.5f,8.5f))` 得 3
                 // 而 gcc 得 8.5)。落到下方分量物化路径 (只求值一次)。
             } else if let Expr::Ident { name, .. } = callee.as_ref() {
-                if name.name.starts_with("__builtin_") && !Self::is_fortify_builtin(&name.name) {
+                if self.ident_callee_is_variable(&name.name) {
+                    // 函数指针变量：下面的快路径按**符号名**直呼
+                    // （`emit_sysv_call(Some(name))`），只有 callee 真是函数符号才
+                    // 等价。函数的入口是运行时从变量读到的，按名字直呼会发出
+                    // `call fp` —— 一个未定义符号。落到函数尾部的通用物化路径，
+                    // 由 `gen_expr` → `gen_expr_call` 的同一判据走间接调用。
+                    // 实测（§5.56）`tcp_input.c` 的 `INDIRECT_CALL_INET(...)`：
+                    // 8 B union `tcp_seq_and_ts_off` 的三元进入本路径后，臂里的
+                    // `__f1(...)` 变成 `undefined reference to '__f1'`。
+                } else if name.name.starts_with("__builtin_") && !Self::is_fortify_builtin(&name.name) {
                     // 编译器内建不能当外部符号 `call`：一律跳过下方 SysV 调用段，
                     // 落到函数尾部的通用物化路径 —— 那条路径用 `gen_expr` 求 RHS，
                     // 会走 `gen_builtin` 的内建实现（向量 rvalue 交付在
@@ -1374,12 +1395,16 @@ impl Codegen {
                 // C99: 未显式初始化的字段应零填充
                 let reverse_sso = *reverse_sso;
                 let struct_size = ty.size();
-                if struct_size > 0 && struct_size <= 128 {
-                    // 零填充整个结构 (小结构逐字节, 大结构用 rep stosb)
-                    for i in 0..struct_size {
-                        self.mov_imm(0, 0i128);
-                        self.emit_store(0, base + i as i64, 1);
-                    }
+                // C11 6.7.9p19/p21: 初始化器未列出的成员（含填充字节）必须置零。
+                // 旧写法只在 `struct_size <= 128` 时逐字节清零, >128B 的结构一个
+                // 字节都不清 —— 内核 `struct vma_merge_struct`（0x90B）的
+                // `VMG_MMAP_STATE` 指定初始化器因此把栈残值留在 `.target` 里,
+                // `vma_expand()` 把 1 当 `vm_area_struct *` 解引用（#PF at 0x29）。
+                // 清零与尺寸无关; 用 8/4/2/1 的 store 序列一次覆盖, `zero_mem`
+                // 只写 rax, 不动 rcx/rdi 这些求值期活跃的寄存器。
+                if struct_size > 0 {
+                    self.mov_imm(0, 0i128);
+                    self.zero_mem(base, struct_size);
                 }
                 let mut field_idx = 0;
                 // 跟踪已清零的位域容器偏移, 避免重复清零

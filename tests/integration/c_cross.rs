@@ -1885,6 +1885,55 @@ fn c_small_agg_rvalue_delivery_gcc_cross_check() {
     }
 }
 
+/// 报告 §5.52: `__always_inline` 形参临时量（内联展开后的 StmtExpr）在 rax
+/// 里交付的是**对象地址**。成员访问的物化门旧写法只排除 `CompoundLit`，于是
+/// 把地址当值再存一遍；嵌套成员 (`f().inner.b`) 更会因为
+/// `gen_lvalue_addr(StmtExpr)` 缺失而落回物化分支，轻则读回栈指针，重则在
+/// 没有 cx 物化带的函数里直接触发帧预算断言 panic。内核
+/// `vma_flags_to_legacy(append_vma_flags(…)).__vma_flags[0]` 就是这条路径。
+#[test]
+#[cfg(unix)]
+fn c_agg_member_of_inline_temp_gcc_cross_check() {
+    let src = include_str!("../fixtures/c/agg_member_of_inline_temp.c");
+    let rc = run_gcc_cross_check("c-agg-member-of-inline-temp", src);
+    assert_eq!(
+        rc, 0,
+        "agg_member_of_inline_temp: 1/2/4/8 是内联临时量的成员路径，16/32 是"
+    );
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("c-agg-member-of-inline-temp", src, &[flag]),
+            0,
+            "{flag}: 内联临时量的成员交付必须四档一致"
+        );
+    }
+}
+
+/// 报告 §5.58: `bswap r32/r64` 的寄存器号编在 opcode 低 3 位 + REX.B，没有
+/// modrm。旧 `Insn::bswap_reg` 只在 B64 分支发 REX.B，B32 的 r8 以上被静默编成
+/// `0F C8`（`bswap %eax`）—— 值留在高号寄存器里一个字节都没翻转，
+/// `__builtin_bswap32` 原样返回入参。内核 `journal_check_superblock` 的
+/// `sb->s_header.h_magic != cpu_to_be32(JBD2_MAGIC_NUMBER)` 正是左值占 rax、
+/// 右值（翻转后的常量）落 %r8 这一形，比较恒不相等 → ext4 挂载失败。
+#[test]
+#[cfg(unix)]
+fn c_bswap_high_reg_rex_b_gcc_cross_check() {
+    let src = include_str!("../fixtures/c/bswap_high_reg_rex_b.c");
+    let rc = run_gcc_cross_check("c-bswap-high-reg-rex-b", src);
+    assert_eq!(
+        rc, 0,
+        "bswap_high_reg_rex_b: 1/2 bswap32 右值落高号，3 bswap64，4 bswap16(rol)，\
+         5 角色对调，6 低号对照"
+    );
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("c-bswap-high-reg-rex-b", src, &[flag]),
+            0,
+            "{flag}: bswap 高号寄存器必须四档一致（REX.B 漏发与优化级无关）"
+        );
+    }
+}
+
 /// 缺陷 5: 聚合形参跨寄存器/栈边界拆分放置错 (5 个 int 之后的聚合被整体推到栈上,
 /// 或前半进 rdi 后半留在栈, callee 按同一错误布局读回 → f={1,0} g=0)。
 #[test]

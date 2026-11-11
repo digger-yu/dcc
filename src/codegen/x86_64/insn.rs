@@ -1162,19 +1162,48 @@ impl Insn {
     }
 
     /// P11 Bucket W: bswap r32/r64 (0F C8+rd / REX.W 0F C8+rd).
-    /// width: B32 (no REX) or B64 (REX.W). reg_idx: intel register number.
+    /// width: B32 or B64 (REX.W). reg_idx: intel register number.
+    ///
+    /// 寄存器号编在 opcode 低 3 位 + REX.B，**没有 modrm** —— 所以 r8–r15 在
+    /// B32 宽度下同样只能靠 REX.B 表达（`41 0F C8` = `bswap %r8d`）。此前只有
+    /// B64 分支发 REX，B32 的 r8 以上被静默编成 `0F C8`（`bswap %eax`）：高号
+    /// 寄存器里的值**一个字节都没翻转**，`__builtin_bswap32` 于是返回原值。
+    /// 内核里 `sb->s_header.h_magic != cpu_to_be32(JBD2_MAGIC_NUMBER)` 的右值
+    /// 正好落进 %r8，比较恒不相等 → 报 "no valid journal superblock found"，
+    /// ext4 挂载失败（§5.58）。
     pub fn bswap_reg(width: crate::codegen::shared::asm_operand::Width, reg_idx: u8) -> Self {
+        use crate::codegen::shared::asm_operand::Width;
         let mut out = Vec::with_capacity(3);
-        if matches!(width, crate::codegen::shared::asm_operand::Width::B64) {
-            let mut rex: u8 = 0x48;
-            if reg_idx >= 8 {
-                rex |= 0x01;
-            }
-            out.push(rex);
+        match width {
+            Width::B64 => {
+                let mut rex: u8 = 0x48;
+                if reg_idx >= 8 {
+                    rex |= 0x01;
+                }
+                out.push(rex);
+            },
+            _ => {
+                if reg_idx >= 8 {
+                    out.push(0x41);
+                }
+            },
         }
         out.push(0x0F);
         out.push(0xC8 | (reg_idx & 0x7));
-        Insn::raw_bytes(&out)
+        // 带 gas_text：不带时 -S 只能渲染成 "/* raw */"，-S 与 -c 的 .text
+        // 文本就对不上了（check_asm_text_parity.sh 的判据正是逐行对齐）。
+        let gas = if matches!(width, Width::B64) {
+            format!(
+                "bswap {}",
+                crate::codegen::x86_64::emit::gas::REG64[(reg_idx & 15) as usize]
+            )
+        } else {
+            format!(
+                "bswap {}",
+                crate::codegen::x86_64::emit::gas::REG32[(reg_idx & 15) as usize]
+            )
+        };
+        Insn::raw_bytes(&out).with_gas(gas)
     }
 
     /// P11 Bucket W: rol r16, imm8 (66 C1 /0 ib). Used for SSO 2-byte
@@ -2182,6 +2211,15 @@ mod tests {
         assert_eq!(Insn::bswap_reg(B64, 1).encode_bytes(), Some(vec![0x48, 0x0F, 0xC9]));
         // bswap rax: 48 0F C8
         assert_eq!(Insn::bswap_reg(B64, 0).encode_bytes(), Some(vec![0x48, 0x0F, 0xC8]));
+        // bswap r8d: 41 0F C8（B32 的 r8+ 靠 REX.B，无 REX 就静默退化成 bswap %eax）
+        assert_eq!(Insn::bswap_reg(B32, 8).encode_bytes(), Some(vec![0x41, 0x0F, 0xC8]));
+        // bswap r13d: 41 0F CD
+        assert_eq!(Insn::bswap_reg(B32, 13).encode_bytes(), Some(vec![0x41, 0x0F, 0xCD]));
+        // bswap r8: 49 0F C8（REX.W|REX.B）
+        assert_eq!(Insn::bswap_reg(B64, 8).encode_bytes(), Some(vec![0x49, 0x0F, 0xC8]));
+        // gas_text 与字节同源：-S 不再渲染成 "/* raw */"
+        assert_eq!(Insn::bswap_reg(B32, 8).gas_text.as_deref(), Some("bswap %r8d"));
+        assert_eq!(Insn::bswap_reg(B64, 13).gas_text.as_deref(), Some("bswap %r13"));
     }
 
     #[test]

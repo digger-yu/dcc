@@ -994,6 +994,20 @@ fn designator_chain_bitfield_matches_gcc() {
     );
 }
 
+/// §5.53: 局部结构体/联合体初始化器必须**整块清零**，与尺寸无关。
+/// 旧写法只在 `struct_size <= 128` 时逐字节清，内核 `struct vma_merge_struct`
+/// （0x90B）的 `VMG_MMAP_STATE` 因此把栈残值留在 `.target`，`vma_expand()`
+/// 把 1 当 `vm_area_struct *` 解引用（#PF at 0x29）。
+#[test]
+fn big_struct_designator_zero_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "big-struct-designator-zero",
+        include_str!("../fixtures/c/big_struct_designator_zero.c"),
+        "初始化器未列出的成员必须置零（失败码：1=144B 结构、2=136B 结构、\
+         3=128B 边界、4=160B union、5=嵌套大结构）",
+    );
+}
+
 /// M13.1: float/double 取模软件实装 (divss/divsd + trunc)
 #[test]
 fn float_mod_run_returns_zero() {
@@ -4890,5 +4904,44 @@ fn preserved_decl_init_readers_matches_gcc() {
         include_str!("../fixtures/c/preserved_decl_init_readers.c"),
         "PreservedDecl 初始化式的基名读者未计入活性（失败码：1=内核原形、\
          2=三字段、4=嵌套聚合成员、8=循环体、16=复合字面量）",
+    );
+}
+
+/// §5.54：空 struct typedef（内核 `typedef struct {} netdevice_tracker;`）与
+/// 匿名结构体定义共用 `struct_defs` 的空名键。定义匿名 `struct { ... }` 时把字段
+/// 以空串为键登记，`resolve_type_latest` 又对空名回查 —— 于是 typedef 出来的空
+/// 类型会“长出”**后来**那个匿名结构体的字段。
+///
+/// 后果不是单文件的小错，而是**跨 TU 的布局分裂**：同一个 `struct inet6_dev`
+/// 在 net/ipv6/addrconf.c 里 refcnt 在 0x280、在 net/ipv6/mcast.c 里在 0x270
+/// （gcc 两边都是 0x268）。inet6_init 里 in6_dev_get 自增到别的字段上，
+/// `refcount_t: addition on 0` + `saturated` 两连警告，随后 folio LRU 链表被
+/// 踩烂，init 退出路径 `exit_mmap → lru_activate` GPF。
+#[test]
+fn empty_struct_typedef_layout_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "empty-struct-typedef-layout",
+        include_str!("../fixtures/c/empty_struct_typedef_layout.c"),
+        "空 struct typedef 被匿名结构体定义污染（失败码：1/2=sizeof 非 0、\
+         4/8=成员结构体布局、16/32=第二个空 typedef、64=成员访问偏移）",
+    );
+}
+
+/// §5.55：常量 switch 折叠只摘掉「臂顶层」与「块尾」的 `break`，**嵌在 if/裸块里**
+/// 的 break 会留在树里。switch 删掉后它绑到最近的外层循环上 —— 内核形状是
+/// `include/linux/rmap.h` 的 `__folio_try_dup_anon_rmap`：`case PGTABLE_LEVEL_PTE`
+/// 里 `if (!folio_test_large(folio)) { …; atomic_inc(&folio->_mapcount); break; }`。
+/// 该函数被 `__always_inline` 展开进 `copy_pte_range` 的 `do { … } while` 后，
+/// 5 处 `lock incl`（_mapcount）后面直接 jmp 到循环出口，跳过 rmap 记账与
+/// `__copy_present_ptes`，fork 出来的子进程页表没建立。
+///
+/// 旧产物实测：-O0 正确（该档不折 switch），-O1/-O2/-O3 返回 1（t=0 而非 11）。
+#[test]
+fn const_switch_fold_nested_break_stays_in_switch() {
+    harness::assert_all_levels_match_gcc(
+        "switch-fold-nested-break",
+        include_str!("../fixtures/c/switch_fold_nested_break.c"),
+        "常量 switch 折叠后 if 内嵌 break 绑到外层循环（失败码：1=do-while 提前退出、\
+         2=未命中 if 的臂值错）",
     );
 }

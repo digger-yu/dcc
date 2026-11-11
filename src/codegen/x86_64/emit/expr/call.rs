@@ -9,6 +9,23 @@ use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::Codegen;
 
 impl Codegen {
+    /// `callee` 的 `Ident` 是否指向**变量**（局部 / 嵌套函数的 upvar / 全局），
+    /// 而不是一个函数符号。直接调用判定的单一真源：本文件的 `direct_name` 与
+    /// `aggregate.rs::gen_aggregate_assign_to` 的聚合 Call 快路径共用。
+    ///
+    /// 为什么必须共用：聚合 Call 快路径按**符号名**直呼
+    /// （`emit_sysv_call(Some(name))`），只有「名字是函数符号」时才等价。
+    /// 函数指针变量的值是运行时读到的入口，按名字直呼会发出 `call fp` ——
+    /// 一个未定义符号。内核实测 `net/ipv4/tcp_input.c` 的
+    /// `INDIRECT_CALL_INET(...)`：8 B union `tcp_seq_and_ts_off` 的三元走聚合
+    /// 路径后，臂里的 `__f1(...)` 变成 `undefined reference to '__f1'`
+    /// （报告 §5.56）。
+    pub(crate) fn ident_callee_is_variable(&self, name: &str) -> bool {
+        self.var_map.contains_key(name)
+            || (self.current_func_is_nested && self.upvar_offsets.contains_key(name))
+            || self.is_global_var(name)
+    }
+
     /// 调用返回值的“落到约定位置”收尾（单一真源，取代三处逐字副本）。
     /// - sret：rax = 缓冲地址；
     /// - 一般标量：结果在 rax，按 dst 搬走；
@@ -55,10 +72,7 @@ impl Codegen {
         };
         // 检查是否为直接调用 (callee 是 Ident 且不是局部函数指针变量)
         let direct_name = if let Expr::Ident { name, .. } = call_target {
-            if self.var_map.contains_key(&name.name)
-                || (self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name))
-                || self.is_global_var(&name.name)
-            {
+            if self.ident_callee_is_variable(&name.name) {
                 None // 函数指针变量: 走间接调用
             } else {
                 Some(name.name.clone())

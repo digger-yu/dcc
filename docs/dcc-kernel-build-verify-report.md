@@ -116,6 +116,13 @@ The judge is the serial console reaching `DCC kernel: init reached successfully`
 | full rebuild carrying §5.48–§5.49 | +§5.48, §5.49 | `__ata_scsi_queuecmd` still faults, now on `rq->tag` read at offset 0 (`*(int*)rq`) | §5.50 |
 | incremental (85 TUs: `block`, `ata`, `scsi`, `cdrom`) carrying §5.50 | +§5.50 | **`Run /init as init process` at 10.16 s** — first image past the whole boot path; `/init` then fails to exec with `-7` | open |
 | incremental (`fs`, `init`) carrying all of the above | same | `Run /init as init process` at 10.42 s, `/init` exec returns `-7` again | open |
+| full rebuild (kbuild26) carrying §5.51–§5.57 | +§5.51–§5.57 | `/init` runs: 8 of the 9 `RT|` tests pass, `RT|ext4|FAIL:mount` — `JBD2: no valid journal superblock found`; the whole `MOD|` panel is green | §5.58 |
+| incremental (46 TUs: `fs/jbd2`, `fs/ext4`) carrying §5.58 | +§5.58 | `RT|ext4|magic roundtrip umount`, `RT|exit|0`; all **21** `RT|`/`MOD|` lines are byte-identical to the gcc-built kernel (same `.config`, `scripts/runtime_closure.sh --compare`: PASS 21/21) | — |
+
+The `WARNING … kernel/module/main.c:1723 at __layout_sections` printed when `configs.ko` is
+inserted is **not** a dcc diagnostic: the gcc-built kernel prints the same warning
+(`+0xf5/0x110` there, `+0x288/0x398` here), it does not stop the module from loading, and the panel
+lines around it are identical.
 
 Image identity is checked from the image itself: the `Linux version 7.1.0 (root@di) (dcc 0.1.0,
 GNU ld … 2.42)` string in `.rodata` is what proves a `vmlinux` is dcc-built (a `gcc …` string
@@ -159,6 +166,13 @@ control function to contrast against.
 The compiler carrying §5.51 adds `bitfield_init_list_uses_rmw_band`
 (`tests/fixtures/c/bitfield_init_list_slots.c`), and the 12-name `bitfield` filter of the
 integration suite passes as a group.
+
+On the compiler carrying §5.52–§5.58 the same two suites are green: **lib 2 612 passed, 0 failed**
+(2 ignored) and **integration 1 373 passed, 0 failed** (6 ignored). New cases in this round:
+`codegen::x86_64::insn::tests::bswap_reg_basic` (byte encodings `41 0F C8` / `41 0F CD` / `49 0F C8`
+plus the `gas_text`), `const_eval::tests::eval_int_lit_strips_suffix_in_every_radix`, and the fixture
+`tests/fixtures/c/bswap_high_reg_rex_b.c` cross-checked against gcc at `-O0/-O1/-O2/-O3`
+(`c_bswap_high_reg_rex_b_gcc_cross_check`).
 
 User-space suites on the fixed compiler (`scripts/bench_lua_sqlite.sh`): Lua builds and runs
 identically to gcc at **all four** `-O` levels (same functional output, same `fib(32)` result),
@@ -669,6 +683,260 @@ Regression case `bitfield_init_list_uses_rmw_band`
 (`tests/fixtures/c/bitfield_init_list_slots.c`) checks both container words and both read
 paths at `-O0`/`-O2`; `scripts/torture_test.sh all` is back to **0 failures**
 (3 707 pass, 6 skip).
+
+### 5.52 An inline temp's member access read an object address as its value
+
+`__always_inline` expansion materialises the callee's parameter as a statement
+``expression (`({ struct t rv; …; rv; })`). `gen_expr` delivers the **address** of that temp in
+`rax` — the same convention as a compound literal — but three sites disagreed:
+
+1. `cond_materializes_aggregate` carried a `value_is_whole_copy(ty)` size test, so an
+   aggregate ternary of ≤16 B took the scalar path and each arm delivered per its own
+   shape. `const vma_flags_t v = is_exec ? mk_vma_flags(VMA_EXEC_BIT) : EMPTY_VMA_FLAGS;`
+   (8 B bitmap word) stored the temp's **stack address** into `v` and passed it by value to
+   `do_brk_flags`: the anonymous BSS VMA's `vm_flags` became `0xffffc900…`, bit 3 fell out
+   of the even address, `do_anonymous_page` returned `VM_FAULT_SIGBUS` for a `VM_SHARED`
+   VMA, and the first user write to `__environ` killed init.
+2. `gen_expr_member_rvalue`'s materialisation gate excluded only `CompoundLit`. The
+   StmtExpr arm, memory-returning calls, aggregate ternaries and chained assignments all
+   deliver an address too, so the gate re-stored the address bytes as the value and member
+   reads came back with the stack pointer: `vma_flags_to_legacy(append_vma_flags(…)).__vma_flags[0]`
+   produced `0xffffc900…`, GUP found no `VM_WRITE` and returned `-EFAULT`, exec reported
+   `-E2BIG`.
+3. `gen_lvalue_addr` had no arm for an aggregate rvalue used as a member/subscript base, so
+   `(<stmt-expr>).w[0]` (the shape form-level inlining leaves behind — `substitute_call`
+   rewrites `f.w[0]`'s `f` into the parameter's StmtExpr) fell back to the materialisation
+   branch: the buffer address was stored into the result slot and the slot's **address** was
+   used as the object address. The fixture read a stack pointer back (`0x7ffe…` instead of
+   `0x77`).
+
+Fix: the delivery-shape question has one truth source, `rvalue_is_buffer_addr`, and it
+answers by **shape only** — `cond_materializes_aggregate` no longer asks about size. The
+`gen_lvalue_addr` match grows a guard arm immediately before its `_ => false`:
+
+```rust
+_ if Self::rvalue_is_buffer_addr(e) => {
+    self.gen_expr(e, dst);   // rax = address of the object
+    true
+},
+```
+
+which answers for **every** buffer-addr shape at once (`StmtExpr`, `VaArg`, an aggregate
+`Assign` whose route whole-copies, a materialised aggregate `Cond`) instead of spelling
+`StmtExpr` out a second time, and subsumes item 2: `gen_expr_member_rvalue`'s fallback is no
+longer reached for those shapes. The `Call` arm above it is untouched — it still distinguishes
+`>16 B` (sret buffer, `rax` is the address) from the register-returned `≤16 B` cases, which
+the truth source reports consistently. Regression case
+`agg_member_of_inline_temp` (`tests/fixtures/c/agg_member_of_inline_temp.c`) cross-checks
+`-O0`…`-O3` against gcc: bits 1–16 (all five member paths — 8 B and 16 B structs, a nested
+`.inner.b`, an array-field element through a member expression, and a compound-literal
+argument) failed on stock dcc, while the outlined-call control (bit 32) passed both before
+and after.
+
+### 5.53 A large aggregate initialiser skipped the zero-fill above 128 B
+
+C11 6.7.9p19/p21 requires every member not explicitly initialised (padding included) to be
+zeroed. `gen_init_list` did that only when `struct_size <= 128`: bigger aggregates got **no
+zero-fill at all**. `struct vma_merge_struct` is 0x90 B, and its `VMG_MMAP_STATE` designated
+initialiser left stack garbage in `.target`; `vma_expand()` dereferenced the value 1 as a
+`vm_area_struct *` (`#PF at 0x29`).
+
+Fix: zero the whole object regardless of size — one `mov_imm(0)` followed by
+`zero_mem(base, struct_size)`, whose 8/4/2/1 store sequence writes only `rax` and leaves
+`rcx`/`rdi` (live during the initialiser expressions) alone. Regression case
+`big_struct_designator_zero_matches_gcc` (`tests/fixtures/c/big_struct_designator_zero.c`):
+144 B and 136 B structs, the 128 B boundary, a 160 B union and a nested large struct.
+
+### 5.54 An anonymous struct definition polluted `typedef struct {}`
+
+`include/net/net_trackers.h` has `typedef struct {} netdevice_tracker;`. An anonymous
+struct/union definition has an empty tag name, and the parser registered its fields in
+`struct_defs` under that empty key — while `resolve_type_latest` also *looked up* the empty
+key for empty-typed typedefs. So the moment any later header wrote `struct { … } foo;` (or an
+anonymous member), `netdevice_tracker` "grew" that struct's fields. The damage is not
+local: the same type has a different `sizeof` in different TUs (0/2/4/24 observed), which
+shifts every following member. `struct inet6_dev.refcnt` was at 0x280 in
+`net/ipv6/addrconf.c` and 0x270 in `net/ipv6/mcast.c`, while gcc has 0x268 in both. At boot
+`in6_dev_get` incremented whatever field sat at the offset in that TU — the
+`refcount_t: addition on 0` + `saturated` warning pair — and the corrupted folio LRU list
+surfaced later as a GPF in `exit_mmap → lru_activate` when init exited.
+
+Fix: anonymous definitions are not entered into `struct_defs` (no tag to refer to them by),
+and `resolve_type_latest` only consults the table for a non-empty name. Regression case
+`empty_struct_typedef_layout_matches_gcc` (`tests/fixtures/c/empty_struct_typedef_layout.c`):
+two empty typedefs around two anonymous definitions, sizes and member offsets, and a member
+read that goes through `resolve_type_latest_deep` (failure bits 1/2/4/8/16/32/64).
+
+### 5.55 A constant-switch fold left its nested `break` bound to the caller's loop
+
+The constant-selector `switch` fold dropped the switch but only removed `break`s that were
+at an arm's top level or closed an arm's block. A `break` nested inside `if`/bare block stayed
+in the tree, and with the switch gone it bound to the nearest enclosing **loop**. The kernel
+shape is `include/linux/rmap.h::__folio_try_dup_anon_rmap`:
+
+```c
+case PGTABLE_LEVEL_PTE:
+    if (!folio_test_large(folio)) {
+        if (PageAnonExclusive(page))
+            ClearPageAnonExclusive(page);
+        atomic_inc(&folio->_mapcount);
+        break;              /* nested in the if, not at arm level */
+    }
+```
+
+`__always_inline` expands this into `copy_pte_range`'s `do { … } while`, so the stray
+`break` jumped out of the whole page-table copy loop: in `mm/memory.o` five
+`lock incl (%rbx)` sites (`_mapcount`, offset 0x30 — the `kcsan_check_access` right before
+it checks size 4) were followed by `jmp` to the loop exit (`_raw_spin_unlock(src_ptl)` /
+`__rcu_read_unlock` / `add_mm_rss_vec`), skipping the rmap accounting and
+`__copy_present_ptes`. Forked children ended up with unpopulated page tables.
+
+Fix: after the fold, scan the emitted items (prelude + selector evaluation + kept arms) and
+rewrite any remaining `break` that belongs to the folded switch into `goto __inlN__swend`,
+appending the synthetic label only when something was rewritten
+(`rewrite_breaks_to` recurses through `If`/bare block/labelled statement and does **not**
+cross `while`/`do`/`for`/nested `switch`; statement expressions are not entered, same rule as
+`rewrite_returns_to_dest`). The "emit the label only when a real writer rewrote something"
+rule is the same one `rewrite_returns_to_dest` follows: a dead `Stmt::Label` makes
+`ssa/structure.rs::stmt_has_unstructured_flow` push the whole function onto the
+analysis-only path, which would re-break the constant switches this pass exists for. The
+`is_inliner_label` documentation now covers the third synthetic namespace member
+(`__inl<N>__swend`, alongside the inline exit and the prefix-renamed labels).
+
+Evidence: in the rebuilt `mm/memory.o` the five jumps now target the inline block's tail
+(`0x17a8d`/`0x19d10`/`0x1a1bf`/`0x1b7f3`/`0x1c250`, blocks that open with
+`mov $0,%eax; mov %eax,-0x218; jmp …` — i.e. `return 0` into the `__inl$rv` exit), and the
+old `jmp 0x1cd4c` (loop exit) count is zero. Reproducer
+`tests/fixtures/c/switch_fold_nested_break.c` (always-inline helper, constant switch,
+`break` inside `if`, caller `do { } while`): stock dcc returns 0 at `-O1`/`-O2`/`-O3`
+(`t = 0` instead of 11) where gcc and the fixed dcc return 11; `-O0` was always correct
+(the fold does not run there). Regression case
+`const_switch_fold_nested_break_stays_in_switch`.
+
+### 5.56 `-O2` left an expression-position `__always_inline` unexpanded: 16 KB stacks ran dry
+
+The `-O2` inliner expands only `always_inline`/`flatten` callees. Even for those, the
+expression-position route (`inline_forced_call_as_stmt_expr`, borrowing
+`try_static_inline_general`) refuses arguments with side effects — a *general* static inline
+would then evaluate an argument more than once. With statement-expression binding the
+parameters are temporaries, so each argument is evaluated exactly once, left to right; the
+retry that passes `allow_effectful_args = true` existed but was gated on `args_have_forced`
+("some argument itself contains a forced call that this pass just expanded").
+
+The kernel shape is `__update_load_avg_se`:
+
+```c
+if (___update_load_sum(now, &se->avg, !!se->on_rq, se_runnable(se), cfs_rq->curr == se))
+```
+
+`se_runnable` is a plain `static inline` whose body has an `if`, so expression-position
+inlining does not fire either; the argument stays a `Call`, `expr_has_side_effects(Call) ==
+true`, and the outer `__always_inline` was vetoed on every site. Measured on the scheduler
+chain, dcc vs gcc frames: `__schedule` 528↔104, `pick_next_task_fair` 400↔128,
+`set_next_entity` 320↔24, `__update_load_avg_se` 192↔32 B; `___update_load_sum` (288 B) and
+`rmqueue_pcplist` (400 B) do not exist as symbols in the gcc `vmlinux` at all. Deeper chain ×
+larger frames is what put the 16 KB task stack 8 bytes past its guard page in `kernel_init`'s
+PCI/ACPI path (`decay_load+0xc`, RSP `ffffc9000000fff8` — the flaky kbuild21 crash of §4.3).
+
+Fix: the retry condition is "the arguments have side effects" (before or after the recursive
+descent), not "the arguments contain a forced call":
+
+```rust
+if args_have_forced || args_dirty_before || args_dirty_after { … allow_effectful_args = true … }
+```
+
+Non-forced callees remain blocked by the `forced` gate inside
+`inline_forced_call_as_stmt_expr`, so this cannot migrate a plain `static inline` into
+expression position. Evidence: rebuilding `kernel/sched/build_policy.o` with the exact kbuild
+`.cmd` line drops `___update_load_sum` from the symbol table entirely (no `nm` definition, no
+call relocation in `objdump -dr`), matching gcc's shape.
+
+### 5.57 A `__aligned__` argument carried a GNU `c ?: b` and the parser lost a `)`
+
+`include/linux/cache.h` spells `__cacheline_group_begin_aligned(GROUP, ...)` as
+`__aligned((__VA_ARGS__ + 0) ? : SMP_CACHE_BYTES)`. Three parser gaps combined:
+
+1. `skip_attributes_extract_aligned` entered the attribute's argument `(` without
+   incrementing its bracket counter, so the attribute's own two `)` were consumed one short:
+   the residual `)` stayed in the token stream and `include/net/netns/ipv4.h:93/96` died with
+   `E0003 expected type, got RParen` while compiling `init/main.c`;
+2. `parse_aligned_expr` had no `?` branch, so the GNU omitted-middle `?:` (and the ordinary
+   `c ? a : b`) stopped the constant fold — the same residual `)`;
+3. `parse_aligned_atom` rejected unary `+` (the `( + 0)` spelling an empty `__VA_ARGS__`
+   produces) and folded a literal `0` to `1`. Both are wrong inside a sub-expression:
+   `(0) ? 32 : 64` must be 64 and `(8 + 0) ? : 64` must be 8.
+
+Fix: depth accounting on the argument parens; a `?`/`?:` branch (when the condition is not a
+known constant, the result is constant only if both arms agree); unary `+`; and the literal is
+kept as written. Probes `__aligned__((8) ? 32 : 64)` → 32, `((0) ? 32 : 64)` → 64,
+`((8) ?: 64)` → 8, `((0) ?: 64)` → 64, `((8 + 0) ?: 64)` → 8; two cacheline-aligned structs
+then measure 0xC0.
+
+### 5.58 `bswap r32` into a high register swapped the wrong register: ext4 could not mount
+
+`bswap r32/r64` carries its register in the opcode's low three bits plus REX.B; there is no modrm.
+`Insn::bswap_reg` emitted REX only for the `B64` width, so a 32-bit swap whose destination was
+`%r8`–`%r15` was encoded `0F C8` — `bswap %eax` — instead of `41 0F C8` (`bswap %r8d`): the value
+in the high register was left untouched and `%eax`, someone else's live value, was swapped instead.
+
+The kernel shape is `fs/jbd2/journal.c:journal_check_superblock`:
+
+```c
+if (sb->s_header.h_magic != cpu_to_be32(JBD2_MAGIC_NUMBER) || …
+```
+
+On x86 `cpu_to_be32` is `__swab32`, which for a compile-time constant folds through
+`__builtin_constant_p(…) ? __builtin_bswap32(__x) : __swab32p(&__x)`. The cast-wrapped argument
+`(unsigned)(0xc03b3998U)` bypasses the parser's literal fold (that block only takes a bare
+`Number`), so the swap is emitted by `gen_builtin`. The left operand is live in `%rax` and the
+right one lands in the first callee-saved stage register, `%r8`:
+
+```
+lea SB(%rip),%rax ; mov (%rax),%eax      # h_magic, LE 0x98393bc0
+mov %rax,-16(%r13)                       # park the left operand
+movabs $0xc03b3998,%r8
+bswap %eax                               # meant to be bswap %r8d
+mov -16(%r13),%rax
+cmp %r8d,%eax                            # 0x98393bc0 vs 0xc03b3998: never equal
+```
+
+Every ext4 mount therefore ended with `JBD2: no valid journal superblock found` /
+`EXT4-fs (vda): Could not load journal inode`, and the runtime panel stopped at
+`RT|ext4|FAIL:mount`.
+
+Fix: emit REX.B for the B32 width too, and attach `gas_text` so `-S` renders `bswap %r8d` instead
+of `/* raw */`:
+
+```rust
+match width {
+    Width::B64 => { let mut rex = 0x48; if reg_idx >= 8 { rex |= 0x01; } out.push(rex); },
+    _          => { if reg_idx >= 8 { out.push(0x41); } },
+}
+```
+
+Repro, now fixture `tests/fixtures/c/bswap_high_reg_rex_b.c` (bits 1–32; bit 64 is the literal
+fold below):
+
+```c
+static unsigned g = 0x98393bc0u;
+int main(void) { return g != (unsigned)__builtin_bswap32((unsigned)(0xc03b3998U)); }
+```
+
+dcc returned 1 and gcc 0 at every `-O` level; after the fix both return 0 and the swap is `41 0F C8`.
+The B64 and `bswap16` (`rol r16,8`) paths in the same fixture show the same REX.B requirement.
+
+The same audit turned up the literal fold behind the `E0006` seen while bisecting:
+`const_eval::eval_int_lit` stripped the `u/U/l/L` suffix **only in the decimal branch**, so
+`eval_int_lit("0x11223344u")` returned `None`; the parser's `__builtin_bswap*` and
+`__builtin_abs` arms had already consumed the `Number` and the `)`, leaving the `;` to be parsed as
+an expression (`__builtin_bswap32(0x11223344u) == …`). Suffixes are now stripped before the radix
+dispatch, and both fold arms decide **before** consuming tokens, so an unfoldable literal falls back
+to the ordinary call path (fixture bit 64, unit test
+`const_eval::tests::eval_int_lit_strips_suffix_in_every_radix`).
+
+Evidence: with 46 TUs (`fs/jbd2`, `fs/ext4`) rebuilt by the fixed compiler the same image boots to
+`RT|ext4|magic roundtrip umount` and `RT|exit|0`, and all 21 `RT|`/`MOD|` lines are byte-identical
+to the gcc-built kernel (`scripts/runtime_closure.sh --compare`: PASS, 21/21).
 
 ## 6. Reproduce
 

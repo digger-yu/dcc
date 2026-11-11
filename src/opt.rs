@@ -4551,6 +4551,43 @@ fn fold_branches_stmt(
             }));
             if let Some(kept) = folded_cases {
                 out.extend(kept);
+                // 补落网：上面只摘掉了「臂顶层」与「块尾」的 break，**嵌在 if/裸块里**
+                // 的 break 还留在树里。`switch` 一旦删掉，这些 break 就会绑到外层
+                // 循环上（C 的 break 只认最近的循环/switch，switch 没了就轮到循环）。
+                // 内核实测形状（include/linux/rmap.h `__folio_try_dup_anon_rmap` 的
+                // `case PGTABLE_LEVEL_PTE`）：`if (!folio_test_large(folio)) { …;
+                // atomic_inc(&folio->_mapcount); break; }` —— 这个 switch 被内联进
+                // `copy_pte_range` 的 `do { … } while` 后，break 变成「跳出整个页表
+                // 拷贝循环」：`mm/memory.o` 里 5 处 `lock incl (%rbx)`（_mapcount）
+                // 后面直接 `jmp` 到循环出口的 `_raw_spin_unlock`，跳过 rmap 记账与
+                // `__copy_present_ptes`，fork 出来的子进程页表没建立。
+                // 改成跳到块尾的合成标号：语义与原来的「跳出 switch」逐字相同。
+                let exit = Ident {
+                    name: format!(
+                        "__inl{}__swend",
+                        STMT_INLINE_UID.fetch_add(1, Ordering::Relaxed)
+                    ),
+                    span: span.clone(),
+                };
+                let mut nested_break = false;
+                for it in out.iter_mut() {
+                    if let BlockItem::Stmt(st) = it {
+                        nested_break |= rewrite_breaks_to(st, &exit);
+                    }
+                }
+                if nested_break {
+                    out.push(BlockItem::Stmt(Stmt::Label {
+                        name: exit,
+                        stmt: Box::new(Stmt::Block {
+                            b: Block {
+                                items: vec![],
+                                span: span.clone(),
+                            },
+                            span: span.clone(),
+                        }),
+                        span: span.clone(),
+                    }));
+                }
             }
             *s = Stmt::Block {
                 b: Block {
@@ -4591,6 +4628,41 @@ fn fold_branches_stmt(
             fold_branches_in_expr(e, fenv_access, live_refs);
         },
         _ => {},
+    }
+}
+
+/// 把**属于被常量 switch 折叠掉的那条 switch** 的 `break` 改写成 `goto label`。
+///
+/// 递归边界只有「if / 裸块 / 带标号语句」：循环与嵌套 `switch` 有自己的 break
+/// 归宿，跨过去改写就是另一个语义错误。语句表达式里的 break 与
+/// [`rewrite_returns_to_dest`] 同一条口径（不下探），当前形状用不到。
+fn rewrite_breaks_to(s: &mut Stmt, label: &Ident) -> bool {
+    match s {
+        Stmt::Break { span } => {
+            *s = Stmt::Goto {
+                target: label.clone(),
+                span: span.clone(),
+            };
+            true
+        },
+        Stmt::If { then_, else_, .. } => {
+            let mut hit = rewrite_breaks_to(then_, label);
+            if let Some(e) = else_ {
+                hit |= rewrite_breaks_to(e, label);
+            }
+            hit
+        },
+        Stmt::Block { b, .. } => {
+            let mut hit = false;
+            for it in b.items.iter_mut() {
+                if let BlockItem::Stmt(st) = it {
+                    hit |= rewrite_breaks_to(st, label);
+                }
+            }
+            hit
+        },
+        Stmt::Label { stmt, .. } => rewrite_breaks_to(stmt, label),
+        _ => false,
     }
 }
 
@@ -4762,9 +4834,11 @@ fn stmt_never_falls_through(s: &Stmt) -> bool {
     }
 }
 
-/// 内联器自己生成的标号：`__inl<N>__end`、`__inl<N>__l__inl<N>__end` 这类出口标号，
-/// 以及被它按 `__inl<N>__l` 前缀改名的源标签与 `asm goto` 落点
-/// （`__inl<N>__lt_yes` / `__inl<N>__lout` …）。
+/// 编译器自己生成的标号：内联器的 `__inl<N>__end`、`__inl<N>__l__inl<N>__end`
+/// 这类出口标号、被它按 `__inl<N>__l` 前缀改名的源标签与 `asm goto` 落点
+/// （`__inl<N>__lt_yes` / `__inl<N>__lout` …），以及常量 switch 折叠给残留
+/// `break` 发的块尾标号 `__inl<N>__swend`（见 [`rewrite_breaks_to`]）。
+/// 三者共用同一命名空间，源码写不出 `__inl<数字>__` 开头的标识符。
 ///
 /// 为什么在截断判据里要把它们豁免掉：这类名字只有**同一次展开内部**的 `goto` / `asm goto`
 /// 会引用，外部源码写不出来。「尾段里有没有可能被外部跳进来的落点」这个问题的
@@ -14178,6 +14252,20 @@ fn inline_expr(
             let args_have_forced = args
                 .iter()
                 .any(|a| expr_has_forced_inline_call(a, funcs, caller_flatten));
+            // 下探前的副作用快照。重试的条件不是「实参里有没有 forced 调用」，而是
+            // 「实参里有副作用」：`inline_forced_call_as_stmt_expr` 借道语句级通用臂，
+            // 形参临时量只对实参求值一次且固定从左到右（见 `try_static_inline_general`
+            // 的 `allow_effectful_args` 注释），与直接调用的求值次数逐字相同，所以实参
+            // 里原本就有的普通调用（如 `se_runnable(se)`）不应再否决展开。内核
+            // `if (___update_load_sum(now, &se->avg, !!se->on_rq, se_runnable(se), …))`
+            // 正是这一形状：`se_runnable` 是普通 static inline（体含 if，表达式位置
+            // 不展开），于是外层 `__always_inline` 被“实参有副作用”永久否决，每处
+            // 留一份外带副本 + 真调用（实测调度链多一层帧，16K 内核栈在
+            // kernel_init 期撞底）。非强制 callee 仍由 `inline_forced_call_as_stmt_expr`
+            // 内部的 `forced` 闸门拦着，本重试不会把普通 static 迁进表达式位置。
+            let args_dirty_before = args
+                .iter()
+                .any(crate::semantics::expr_has_side_effects);
             let callee_boxed = Box::new(inline_expr(
                 *callee,
                 funcs,
@@ -14206,7 +14294,10 @@ fn inline_expr(
             // 正是否决这条的判据（它防的是「实参里嵌着一个要递归多一层同步的可内联调用」）。
             // 那一层递归已经在下面走完了，剩下的就是一棵已展开的树，外层可以安心搬进
             // 形参临时量。展开顺序因此是由内向外，与 GCC 对 `__always_inline` 的做法一致。
-            if args_have_forced {
+            let args_dirty_after = args
+                .iter()
+                .any(crate::semantics::expr_has_side_effects);
+            if args_have_forced || args_dirty_before || args_dirty_after {
                 if let Some(expanded) = try_inline_call_at_expr_pos(
                     &callee_boxed, &args, funcs, level, caller_flatten, caller_is_hot,
                     fenv_access, depth, &ty, &span, true,

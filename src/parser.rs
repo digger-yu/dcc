@@ -684,9 +684,16 @@ impl<'a> Parser<'a> {
     }
     /// 解析类型到最新的 struct/union 定义。
     /// 用于 typedef 引用前向声明的 struct 时，获取已完成字段的版本。
+    ///
+    /// 只在**有 tag 名**时回查：匿名 struct/union 的 name 是空串，而 `struct
+    /// { ... }` 定义会把这个空串当键写进 `struct_defs`。若空名也回查，
+    /// `typedef struct {} netdevice_tracker;` 这种空类型就会在后续出现别的
+    /// 匿名结构体后突然“长出”那一个的字段 —— 同一头文件在不同 TU 里 sizeof
+    /// 各不相同（实测 0/2/4/24 都有），把 `struct inet6_dev` 之类跨 TU 的布局
+    /// 撕成互不兼容的两套（内核里 idev->refcnt 一边 0x268 一边 0x280）。
     fn resolve_type_latest(&self, ty: &Type) -> Type {
         match ty {
-            Type::Struct(name, fields, align, _) if fields.is_empty() => {
+            Type::Struct(name, fields, align, _) if fields.is_empty() && !name.is_empty() => {
                 if let Some((f, _, a, reverse_sso)) = self.struct_defs.get(name) {
                     if !f.is_empty() {
                         return Type::Struct(name.clone(), Arc::clone(f), *a, *reverse_sso);
@@ -694,7 +701,7 @@ impl<'a> Parser<'a> {
                 }
                 ty.clone()
             },
-            Type::Union(name, fields, align, _) if fields.is_empty() => {
+            Type::Union(name, fields, align, _) if fields.is_empty() && !name.is_empty() => {
                 if let Some((f, _, a, reverse_sso)) = self.struct_defs.get(name) {
                     if !f.is_empty() {
                         return Type::Union(name.clone(), Arc::clone(f), *a, *reverse_sso);
@@ -941,11 +948,27 @@ impl<'a> Parser<'a> {
               // 解析内部属性列表
             let mut depth = 2i32;
             while depth > 0 && self.cur.kind != TokKind::Eof {
-                // 在 depth==2 时检测 "aligned" 和 "packed"
-                if depth == 2 && self.cur.kind == TokKind::Ident && self.cur.text == "aligned" {
+                // 在 depth==2 时检测 "aligned" 和 "packed"。
+                // 名字要先 trim 下划线再比：GNU 允许 `__aligned__` / `__packed__`
+                // 拼写，内核的 `____cacheline_aligned` 正是
+                // `__attribute__((__aligned__(SMP_CACHE_BYTES)))`。旧写法只认
+                // 不带下划线的拼写，字段级 `__aligned__` 于是被静默丢弃——实测
+                // `struct module` 的 `mem[] __module_memory_align` 少 8 字节
+                // 填充（mem 0x138 vs gcc 0x140），`exit` 偏到 0x478，dcc 编的
+                // 内核与外部模块（或反之）结构布局不一致。声明级
+                // `parse_attributes` 一直 trim（见 "aligned" 分支），两处必须同口径。
+                let attr_name = self.cur.text.trim_matches('_');
+                if depth == 2 && self.cur.kind == TokKind::Ident && attr_name == "aligned" {
                     self.advance();
                     if self.cur.kind == TokKind::LParen {
                         self.advance(); // (
+                        // 进入参数括号要计入 depth：下面「跳过到匹配的 )」会吃掉一个
+                        // 右括号，若此处不 +1，attribute 自己的两个 `)` 就少配对一个，
+                        // 残留的 `)` 一直留给调用方 —— 实测
+                        // `__aligned(( + 0) ? : SMP_CACHE_BYTES)`（内核
+                        // `__cacheline_group_begin_aligned`）在结构体尾部报
+                        // E0003/E0004。旧代码因 `__aligned__` 拼写被忽略从不进这里。
+                        depth += 1;
                                         // 解析对齐值：与声明级 `aligned` 同一个坑，
                                         // 这里也只能吃字面量。字段级 `__aligned(PAGE_SIZE)`
                                         // 同样要按常量表达式求值。
@@ -969,12 +992,13 @@ impl<'a> Parser<'a> {
                         }
                         if self.cur.kind == TokKind::RParen {
                             self.advance(); // )
+                            depth -= 1;
                         }
                     } else {
                         // __attribute__((aligned)) 无参数默认为 16
                         aligned = Some(16);
                     }
-                } else if depth == 2 && self.cur.kind == TokKind::Ident && self.cur.text == "packed"
+                } else if depth == 2 && self.cur.kind == TokKind::Ident && attr_name == "packed"
                 {
                     packed = true;
                     self.advance();
@@ -1003,7 +1027,7 @@ impl<'a> Parser<'a> {
             TokKind::Plus | TokKind::Minus | TokKind::Shl | TokKind::Shr => Some(self.cur.kind),
             _ => None,
         };
-        if let Some(op) = op {
+        let val = if let Some(op) = op {
             self.advance();
             let rhs = self.parse_aligned_term(depth);
             let acc = match (result, rhs) {
@@ -1018,9 +1042,38 @@ impl<'a> Parser<'a> {
                 // 对齐被静默降级成自然对齐，比「放弃提升对齐」更危险。
                 _ => return None,
             };
-            return self.parse_aligned_rest(depth, acc);
+            self.parse_aligned_rest(depth, acc)
+        } else {
+            result
+        };
+        // 条件表达式（C 的 `c ? a : b` 与 GNU 省略中间的 `c ?: b`）。
+        // 内核 `__cacheline_group_begin/end_aligned` 展开后的对齐就是
+        // `(__VA_ARGS__ + 0) ? : SMP_CACHE_BYTES`：`__VA_ARGS__` 为空时
+        // 就是 `0 ?: 64` ⇒ 64。旧实现不认识 `? :`，在参数里停住，
+        // 剩下的 token 让 struct 声明尾部多出一个 `)`（实测
+        // `include/net/netns/ipv4.h` 报 E0003/E0004）。
+        if self.cur.kind == TokKind::Question {
+            self.advance();
+            let then_v = if self.cur.kind == TokKind::Colon {
+                val
+            } else {
+                self.parse_aligned_expr(depth)
+            };
+            if self.cur.kind == TokKind::Colon {
+                self.advance();
+            }
+            let else_v = self.parse_aligned_expr(depth);
+            return match val {
+                Some(c) if c != 0 => then_v,
+                Some(_) => else_v,
+                // 条件求不出常量：只有两支同值才算常量。
+                None => match (then_v, else_v) {
+                    (Some(a), Some(b)) if a == b => Some(a),
+                    _ => None,
+                },
+            };
         }
-        result
+        val
     }
 
     fn parse_aligned_rest(&mut self, depth: &mut i32, acc: usize) -> Option<usize> {
@@ -1068,6 +1121,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_aligned_atom(&mut self, depth: &mut i32) -> Option<usize> {
+        // 一元 `+`：内核对齐宏预处理后是 `( + 0) ? : SMP_CACHE_BYTES`
+        // （`__VA_ARGS__` 为空时的形状）。旧实现落到 Unknown token 分支把
+        // `+` 吃掉就返回，后面的 `0` 没人处理。
+        if self.cur.kind == TokKind::Plus {
+            self.advance();
+            return self.parse_aligned_atom(depth);
+        }
         // sizeof(type) or sizeof expr
         if self.cur.kind == TokKind::KwSizeof
             || (self.cur.kind == TokKind::Ident && self.cur.text == "sizeof")
@@ -1122,7 +1182,11 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Number {
             let v = parse_int_lit(&self.cur.text);
             self.advance();
-            return if v > 0 { Some(v as usize) } else { Some(1) };
+            // 返回真实值，**不要把 0 折成 1**：这是子表达式，`0` 在三目条件、
+            // `8 + 0`、`?:` 的中间项里都是有意义的操作数（旧写法把 `0` 折成 1，
+            // 实测 `__aligned((0) ? 32 : 64)` 得 32、`__aligned((8 + 0) ? : 64)`
+            // 得 9）。「对齐值必须 ≥ 1」的兜底在各调用点做（`if v > 0`）。
+            return Some(v as usize);
         }
         // Parenthesized sub-expression
         if self.cur.kind == TokKind::LParen {
@@ -7237,8 +7301,14 @@ impl<'a> Parser<'a> {
                     Some("little-endian") => host_be,
                     _ => false,
                 };
-                self.struct_defs
-                    .insert(nm.clone(), (Arc::clone(&fields_rc), is_u, struct_align, reverse_sso));
+                // 匿名 struct/union 不进 struct_defs：它没有可供引用的 tag 名，
+                // 以空串为键登记只会污染 `typedef struct {} X;` 这类空类型的回查。
+                if !nm.is_empty() {
+                    self.struct_defs.insert(
+                        nm.clone(),
+                        (Arc::clone(&fields_rc), is_u, struct_align, reverse_sso),
+                    );
+                }
                 let ty = if is_u {
                     Type::Union(nm, fields_rc, struct_align, reverse_sso)
                 } else {
@@ -12496,10 +12566,12 @@ impl<'a> Parser<'a> {
                             "__builtin_abs" | "__builtin_labs" | "__builtin_llabs"
                         ) {
                             if let TokKind::Number = self.cur.kind {
-                                let lit = self.cur.text.clone();
-                                self.advance();
-                                if self.expect(TokKind::RParen, "')'") {
-                                    if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                // 先折再吃 token：折不动时必须把 Number 原样留在流里交给
+                                // 普通调用路径。旧写法先 `advance()` + `expect(')')` 再折，
+                                // 折空时 `;` 就成了表达式开头（E0006，§5.58 附带修复）。
+                                if let Some(v) = crate::const_eval::eval_int_lit(&self.cur.text) {
+                                    self.advance();
+                                    if self.expect(TokKind::RParen, "')'") {
                                         let r = v.wrapping_abs();
                                         e = Expr::Int {
                                             v: r,
@@ -12517,10 +12589,11 @@ impl<'a> Parser<'a> {
                             "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
                         ) {
                             if let TokKind::Number = self.cur.kind {
-                                let lit = self.cur.text.clone();
-                                self.advance();
-                                if self.expect(TokKind::RParen, "')'") {
-                                    if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                // 先折再吃 token（同 __builtin_abs 臂）：折不动就把
+                                // Number 原样留给普通调用路径。
+                                if let Some(v) = crate::const_eval::eval_int_lit(&self.cur.text) {
+                                    self.advance();
+                                    if self.expect(TokKind::RParen, "')'") {
                                         let bits: u64 = v as u64;
                                         let result = match name.name.as_str() {
                                             "__builtin_bswap16" => {
