@@ -3329,6 +3329,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 &final_output,
                 &link_libs,
                 &whole_archive_libs,
+                &cfg.whole_archive_inputs,
                 sysroot.as_deref(),
                 verbose,
                 &cfg.host_link_args,
@@ -3348,6 +3349,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
             &final_output,
             &link_libs,
             &whole_archive_libs,
+            &cfg.whole_archive_inputs,
             sysroot.as_deref(),
             verbose,
             &cfg.host_link_args,
@@ -3432,6 +3434,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
             &final_output,
             &link_libs,
             &whole_archive_libs,
+            &[],
             sysroot.as_deref(),
             verbose,
             &host_link_args,
@@ -3723,6 +3726,7 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             &cfg.output,
             &cfg.link_libs,
             &cfg.whole_archive_libs,
+            &cfg.whole_archive_inputs,
             cfg.sysroot.as_deref(),
             cfg.verbose,
             &cfg.host_link_args,
@@ -3744,6 +3748,7 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         &cfg.output,
         &cfg.link_libs,
         &cfg.whole_archive_libs,
+        &cfg.whole_archive_inputs,
         cfg.sysroot.as_deref(),
         cfg.verbose,
         &cfg.host_link_args,
@@ -3809,6 +3814,7 @@ fn run_shared_link(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             &cfg.output,
             &cfg.link_libs,
             &cfg.whole_archive_libs,
+            &cfg.whole_archive_inputs,
             cfg.sysroot.as_deref(),
             cfg.verbose,
             &cfg.host_link_args,
@@ -3828,6 +3834,7 @@ fn run_shared_link(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         &cfg.output,
         &cfg.link_libs,
         &cfg.whole_archive_libs,
+        &cfg.whole_archive_inputs,
         cfg.sysroot.as_deref(),
         cfg.verbose,
         &cfg.host_link_args,
@@ -3858,6 +3865,7 @@ fn try_host_ld_link(
     output: &Path,
     link_libs: &[String],
     whole_archive_libs: &[String],
+    whole_archive_inputs: &[PathBuf],
     sysroot: Option<&Path>,
     verbose: bool,
     host_link_args: &[String],
@@ -3880,6 +3888,7 @@ fn try_host_ld_link(
         output,
         link_libs,
         whole_archive_libs,
+        whole_archive_inputs,
         search_paths,
         host_link_args,
         dynamic_linker,
@@ -4003,6 +4012,7 @@ fn link_objects_with_host_cc(
     output: &Path,
     link_libs: &[String],
     whole_archive_libs: &[String],
+    whole_archive_inputs: &[std::path::PathBuf],
     sysroot: Option<&Path>,
     verbose: bool,
     host_link_args: &[String],
@@ -4016,7 +4026,16 @@ fn link_objects_with_host_cc(
         cmd.arg(a);
     }
     for obj in objects {
+        // `--whole-archive` 是**位置相关**的：必须紧挨着归档，不能像库那样
+        // 统一堆到对象列表之后。
+        let wa = whole_archive_inputs.iter().any(|w| w == obj);
+        if wa {
+            cmd.arg("-Wl,--whole-archive");
+        }
         cmd.arg(obj);
+        if wa {
+            cmd.arg("-Wl,--no-whole-archive");
+        }
     }
     // 自动包含 dcc C++ 运行时库 (如果存在)
     let dcc_runtime = std::path::PathBuf::from("/root/dcc/src/cpp/stdlib/runtime/dccpp_runtime.c");

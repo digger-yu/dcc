@@ -25,6 +25,11 @@ pub struct LinkRequest<'a> {
     pub output: &'a Path,
     pub link_libs: &'a [String],
     pub whole_archive_libs: &'a [String],
+    /// 位于 `--whole-archive` 区间内的显式输入（`.a` 路径）。
+    ///
+    /// `ld` 的 `--whole-archive` 是位置相关的；只把它透传到对象列表之后，
+    /// 显式归档里的未被引用成员仍会被丢弃。这里按输入路径逐个包裹。
+    pub whole_archive_inputs: &'a [PathBuf],
     pub search_paths: &'a [PathBuf],
     pub host_link_args: &'a [String],
     /// `-Wl,--dynamic-linker=` 显式覆盖；None 用本机默认解释器
@@ -368,7 +373,15 @@ pub fn link(req: &LinkRequest<'_>) -> Result<Outcome, String> {
         }
     }
     for o in req.objects {
+        // `--whole-archive` 紧贴归档，不能堆到所有对象之后（位置相关）。
+        let wa = req.whole_archive_inputs.iter().any(|w| w == o);
+        if wa {
+            cmd.arg("--whole-archive");
+        }
         cmd.arg(o);
+        if wa {
+            cmd.arg("--no-whole-archive");
+        }
     }
     // `-Wl,` 透传参数（`-E`、`-rpath`、`-z now` 等）按 cc 的规则拆开交给 ld。
     // 显式 dynamic-linker 已经在上面统一处理，这里跳过重复项。

@@ -405,6 +405,7 @@ mod tests {
             link_opts: crate::link::link_opts::LinkOpts::default(),
             link_libs: vec![],
             whole_archive_libs: vec![],
+            whole_archive_inputs: vec![],
             lib_search_paths: vec![],
             gc_sections_root: vec![],
             no_semantic_interposition: false,

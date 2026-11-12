@@ -4441,6 +4441,127 @@ fn shared_library_leaves_undefined_symbols_for_runtime_binding() {
     let _ = fs::remove_file(&host_exe);
 }
 
+/// `-Wl,--whole-archive` 必须对**显式 `.a` 路径**按位置生效，而不只是 `-l` 名字。
+///
+/// 区间标志是位置相关的（只包住它与 `--no-whole-archive` 之间的输入）。dcc 的
+/// CLI 曾把它当成“给后续 `-l` 名字打标记”的全局开关，显式的 `libw.a` 参数不在
+/// 集合里 ⇒ 归档中未被引用的成员仍被丢弃，`-shared --whole-archive` 静默退化成
+/// 普通静态链接。这里用「一个成员被引用、另一个只能靠 whole-archive 进来」的
+/// 形状，正反两臂同时成立才算通过：正臂两个符号都在 `.dynsym`，反臂都不在，
+/// 否则“两个都在”可能只是链接器顺手全拉了。
+///
+/// 归档用宿主 `ar` 打（dcc 不产归档），成员由 dcc 编；没有 `ar` 的环境跳过。
+#[test]
+#[cfg(unix)]
+fn whole_archive_applies_to_explicit_archive_paths() {
+    if Command::new("ar").arg("--version").output().is_err() {
+        eprintln!("skip whole_archive_applies_to_explicit_archive_paths: 宿主没有 ar");
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let tag = temp_tag();
+    let w1_src = dir.join(format!("dcc-wa-w1-{tag}.c"));
+    let w2_src = dir.join(format!("dcc-wa-w2-{tag}.c"));
+    let w1_obj = dir.join(format!("dcc-wa-w1-{tag}.o"));
+    let w2_obj = dir.join(format!("dcc-wa-w2-{tag}.o"));
+    let archive = dir.join(format!("libdccwa{tag}.a"));
+    let so_whole = dir.join(format!("dcc-wa-whole-{tag}.so"));
+    let so_plain = dir.join(format!("dcc-wa-plain-{tag}.so"));
+    fs::write(&w1_src, "int w1_export(void) { return 1; }\n").expect("write w1");
+    fs::write(&w2_src, "int w2_export(void) { return 2; }\n").expect("write w2");
+    let compile = |src: &std::path::Path, obj: &std::path::Path| {
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-fPIC", "-c", "-o"])
+            .arg(obj)
+            .arg(src)
+            .output()
+            .expect("run dcc -c");
+        assert!(
+            out.status.success(),
+            "编归档成员失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    compile(&w1_src, &w1_obj);
+    compile(&w2_src, &w2_obj);
+    let out = Command::new("ar")
+        .arg("crs")
+        .arg(&archive)
+        .arg(&w1_obj)
+        .arg(&w2_obj)
+        .output()
+        .expect("run ar");
+    assert!(
+        out.status.success(),
+        "ar 打包失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `.dynsym` 里有定义的 T 符号。nm 的列是 `<addr> T <name>`。
+    let defined_t = |so: &std::path::Path, name: &str| -> bool {
+        let out = Command::new("nm")
+            .args(["-D", "--defined-only"])
+            .arg(so)
+            .output()
+            .expect("run nm");
+        assert!(
+            out.status.success(),
+            "nm -D 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+            let mut f = l.split_whitespace();
+            let _addr = f.next();
+            f.next() == Some("T") && f.next() == Some(name)
+        })
+    };
+
+    // 正臂：区间包住显式 .a ⇒ 未被引用的 w2 也必须进 .dynsym。
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fPIC", "-shared", "-Wl,--whole-archive"])
+        .arg(&archive)
+        .arg("-Wl,--no-whole-archive")
+        .arg("-o")
+        .arg(&so_whole)
+        .output()
+        .expect("run dcc -shared");
+    assert!(
+        out.status.success(),
+        "`-shared --whole-archive lib*.a` 链接失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        defined_t(&so_whole, "w1_export"),
+        "示例符号 w1_export 不在 .dynsym"
+    );
+    assert!(
+        defined_t(&so_whole, "w2_export"),
+        "whole-archive 未生效：未被引用的成员 w2_export 没进 .dynsym"
+    );
+
+    // 反臂：不带区间标志时归档成员一个都不该被拉进来（没有未定义符号需要它们）。
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fPIC", "-shared"])
+        .arg(&archive)
+        .arg("-o")
+        .arg(&so_plain)
+        .output()
+        .expect("run dcc -shared");
+    assert!(
+        out.status.success(),
+        "普通静态归档链共享库失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !defined_t(&so_plain, "w1_export") && !defined_t(&so_plain, "w2_export"),
+        "反臂不成立：不包 whole-archive 也拉了归档成员（正臂通过就不能说明 flag 生效）"
+    );
+
+    for p in [&w1_src, &w2_src, &w1_obj, &w2_obj, &archive, &so_whole, &so_plain] {
+        let _ = fs::remove_file(p);
+    }
+}
+
 /// `-fbuiltin-linker -shared` 必须**硬错**，不能产出「dlopen 成功、dlsym 全空」的
 /// 静默坏产物。
 ///

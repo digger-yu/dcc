@@ -171,6 +171,12 @@ pub struct Config {
     pub link_libs: Vec<String>,
     /// --whole-archive 强制提取所有成员的静态库名
     pub whole_archive_libs: Vec<String>,
+    /// 位于 `--whole-archive` 区间内的**显式输入文件**（`.a` 路径）。
+    ///
+    /// `whole_archive_libs` 只能表达 `-lfoo` 形式；`ld --whole-archive libx.a`
+    /// 是按**位置**生效的，所以显式归档必须单独记下来，否则 host 链接路径把
+    /// flag 透传到所有对象之后，语义就丢了（未被引用的成员仍被丢弃）。
+    pub whole_archive_inputs: Vec<PathBuf>,
     /// 库搜索路径 (-L)
     pub lib_search_paths: Vec<PathBuf>,
     /// 未被内置链接器建模的 `-Wl,...` 原始选项，host-cc 链接时原样透传。
@@ -1549,6 +1555,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut gc_sections_root: Vec<String> = Vec::new();
     let mut link_libs: Vec<String> = Vec::new();
     let mut whole_archive_libs: Vec<String> = Vec::new();
+    let mut whole_archive_inputs: Vec<PathBuf> = Vec::new();
     let mut in_whole_archive = false;
     let mut lib_search_paths: Vec<PathBuf> = Vec::new();
     // 未被建模的 -Wl,... 原样保留，host-cc 链接时透传（-Wl,-E 等）。
@@ -3114,7 +3121,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             a if a.starts_with('-') => return Err(CliError::new(&format!("unknown flag: {}", a))),
             _ => {
-                inputs.push(PathBuf::from(a));
+                let p = PathBuf::from(a);
+                if in_whole_archive {
+                    whole_archive_inputs.push(p.clone());
+                }
+                inputs.push(p);
             }
         }
         i += 1;
@@ -3371,6 +3382,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             link_opts: all_link_opts,
             link_libs: link_libs.clone(),
             whole_archive_libs: whole_archive_libs.clone(),
+            whole_archive_inputs: whole_archive_inputs.clone(),
             lib_search_paths: lib_search_paths.clone(),
             host_link_args: host_link_args.clone(),
             gc_sections_root: gc_sections_root.clone(),
@@ -3509,6 +3521,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             link_libs: Vec::new(),
             host_link_args: Vec::new(),
             whole_archive_libs: Vec::new(),
+            whole_archive_inputs: Vec::new(),
             lib_search_paths: Vec::new(),
             gc_sections_root: Vec::new(),
             no_semantic_interposition: false,
