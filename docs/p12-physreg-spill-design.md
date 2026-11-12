@@ -46,7 +46,6 @@ IR 里最早出现的位置 ~ 最晚出现的位置」，跨分支、跨回边�
 - 延伸池 `AUTO_EXT_POOL`：默认 `{r8, r9}`。`rcx` 已否决（被
   `gen_expr_decay(r, 1)` 当二元运算右操作数的固定暂存号）。
 - `DCC_EXT_POOL` 环境变量可逐号裁剪；设为 `0` 即完全关池用于对比。
-- 审计入口：`.work_tmp/p12_base/audit_ext_pool.sh`。
 
 ## 2. 帧偏移守门人（frame-offset gatekeeper）
 

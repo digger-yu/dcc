@@ -1,7 +1,7 @@
 #!/bin/bash
-# count_fn_insns.sh <obj> <sym> — 函数体指令口径统计（报告 §6.6 的那一套）
+# count_fn_insns.sh <obj> <sym> — 函数体指令口径统计
 #
-# 口径（与 docs/dcc-lua-sqlite-build-verify-report.md §6.6 一致）：
+# 口径（本脚本即真源）：
 #   insn   = 函数体内的指令行数
 #   movrr  = mnemonic 为 mov* 且两个操作数都是裸寄存器（含 32 位形态与 movsxd/movzx 的 dst,dst）
 #   r13    = 含 `r13` 的行数（栈引用）

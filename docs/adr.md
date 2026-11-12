@@ -65,7 +65,7 @@
 | `miniz_oxide` | 在用 | `src/link/link_opts.rs::compress_to_vec_zlib` (zlib 档) — 0.7→0.8 于 `cd04ae4d` |
 | `anyhow` | 在用, 但只有 1 处 | `src/codegen/mips/codegen/expressions/mod.rs` 两个 `anyhow!` — 2026-09-23 `12bc4ffd`; 属遗留, 应换成本仓 `Diagnostic`/`CliError` 后移除 |
 | `elf` | **声明未用** | ELF 读写全在自写的 `src/codegen/shared/elf.rs`, 且该模块名遮蔽了同名 crate (`elf::STV_DEFAULT` 等均指内部模块); `Cargo.toml` 注释自己写着 "internal module" |
-| `serde` / `toml` | **声明未用** | 为 2026-09-22 `bbeff61d` 的 "TOML 指令规格系统" 引入, 该实验已回退: 树内无 `data/*.toml`, 只剩 `report/refactoring_20260923_083316/backup/data/`, 全仓零引用 |
+| `serde` / `toml` | **声明未用** | 为 2026-09-22 `bbeff61d` 的 "TOML 指令规格系统" 引入, 该实验已回退: 树内无 `data/*.toml`, 只在一次性备份里留有旧数据, 全仓零引用 |
 
 - **不变的边界**: 不引入 LLVM/Cranelift (ADR-002)、不引入 clap、不引入通用序列化/日志框架。
   ELF/COFF/PE 容器、序列化、参数解析仍全部自写 —— 这部分「零依赖」的精神没有被推翻。
