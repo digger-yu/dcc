@@ -208,10 +208,10 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | 指标 | 实测值 |
 |------|--------|
 | 主题子文件（`tests/integration/*.rs`） | 24 |
-| 主题子文件里的 `#[test]` | 1383 |
+| 主题子文件里的 `#[test]` | 1384 |
 | 顶层 target（`tests/*.rs`，含壳） | 8 |
 | 顶层 target 里的 `#[test]`（不含主题） | 102 |
-| 索引数据行合计 | 1485 |
+| 索引数据行合计 | 1486 |
 
 ### 判据分布
 
@@ -220,14 +220,14 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | compile | 867 |
 | cross-check | 265 |
 | report-only | 6 |
-| run | 338 |
+| run | 339 |
 | sanitize | 9 |
 
 ### Tier 分布（§9 权威表；T1/T2 是 CI job 划分，不是用例属性）
 
 | Tier | 用例数 |
 |------|--------|
-| T0 | 1475 |
+| T0 | 1476 |
 | T3 | 10 |
 
 ### C++ ABI 夹具族（磁盘真值 + 代码真值，与人工小节逐条对账）
@@ -254,7 +254,7 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 | 文件（相对 tests/） | 索引行数 | 一致 |
 |---------------------|----------|------|
 | integration/c_lang.rs | 195 | yes |
-| integration/c_asm.rs | 173 | yes |
+| integration/c_asm.rs | 174 | yes |
 | integration/c_kernel.rs | 95 | yes |
 | integration/c_attr_builtin.rs | 119 | yes |
 | integration/c_pp_c23.rs | 114 | yes |
@@ -525,6 +525,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_asm.rs` | `asm_clobber_guard_keeps_call_sites_aligned` | \`fixtures/asm/asm_clobber_guard_alignment.c\` | run | T0 |
 | `tests/integration/c_asm.rs` | `escaping_asm_goto_clobbering_a_held_register_is_an_error` | (inline) | run | T0 |
 | `tests/integration/c_asm.rs` | `reserved_frame_registers_are_rejected_not_silently_dropped` | (inline) | run | T0 |
+| `tests/integration/c_asm.rs` | `register_asm_binding_is_only_pinned_where_asm_can_observe_it` | (inline) | run | T0 |
 | `tests/integration/c_asm.rs` | `asm_operand_in_callee_saved_keeps_the_prologue_save` | \`fixtures/asm/asm_operand_callee_saved.c\` | cross-check | T0 |
 | `tests/integration/c_asm.rs` | `register_home_and_cleanup_survive_every_declaration_path` | \`fixtures/asm/asm_register_home_all_scopes.c\` | report-only | T3 · ignored |
 | `tests/integration/c_asm.rs` | `asm_register_binding_honors_declared_width` | \`fixtures/c/register_binding_width.c\` | cross-check | T0 |

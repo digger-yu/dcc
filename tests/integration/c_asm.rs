@@ -815,6 +815,89 @@ fn reserved_frame_registers_are_rejected_not_silently_dropped() {
     );
 }
 
+/// GNU C 的局部寄存器变量只在 **asm 操作数** 处是可观察约定（GCC 文档的 supported use）：
+/// 声明处有初值、又从不进 asm 操作数的绑定按普通局部变量处理。
+///
+/// 为什么必须如此：`gcc.c-torture/compile/asmgoto-5.c` 把 14 个 GPR 全声明成
+/// `register int vN asm("rXX") = aN`，一个也没进 asm 模板 —— GCC 在这里直接当普通变量
+/// （-O2 编译通过）。本后端以前把每个绑定都当永久家：`r13` 与帧基址冲突（E0318），
+/// 其余 13 个号把图占满 ⇒ Binop 暂存拿不到号（E1135）。
+///
+/// 两条反向判据必须同时钉住（否则「降级」会变成「静默丢 asm 约定」）：
+///   * 没有初值的只读别名照旧钉号（`current_stack_pointer asm("rsp")`，见上一个用例）；
+///   * 进了 asm 操作数的保留号绑定照旧报 E0318。
+#[test]
+fn register_asm_binding_is_only_pinned_where_asm_can_observe_it() {
+    // 1) 文件级 + 局部的 `r13` 绑定都有初值、asm 从不引用 ⇒ 按普通变量编译并运行。
+    let demoted = "register long g asm(\"r13\") = 5;\n\
+                   int main(void){ register long v asm(\"r13\") = 3; v += 4;\n\
+                   return (int)(v + g) - 12; }\n";
+    for flag in ["-O0", "-O2"] {
+        let (build, exe) = run_compile_and_run_flags("regasm-demoted", demoted, &[flag]);
+        assert!(
+            build.status.success(),
+            "{flag}: 不可观察的 register asm 绑定必须按普通变量编译（以前报 E0318）：{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let (rc, out, _) = run_exe_bounded(&exe);
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{flag}: 降级后的值语义必须与源一致：{}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    // 2) 有初值但进了 asm 操作数 ⇒ 保留号照旧拒绝。
+    let referenced = "register long v asm(\"r13\") = 1;\n\
+                      long f(void){ __asm__ volatile(\"\" : \"+r\"(v)); return v; }\n\
+                      int main(void){ return 0; }\n";
+    let (output, _obj) = run_object_test("regasm-r13-operand", referenced);
+    assert!(
+        !output.status.success(),
+        "asm 操作数要求 %r13 时不得静默通过（帧基址与操作数同号）"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("E0318") && stderr.contains("r13"),
+        "期望 E0318 并点名 r13，实得：{stderr}"
+    );
+
+    // 3) asmgoto-5 的缩微形态：14 个号全被有初值的绑定占着，asm goto 仍要一个 `=r` 输出。
+    //    没有降级时这就是 E1135（Binop 暂存取不到号）的现场。
+    let pressure = "int f(int a0, int a1, int a2) {\n\
+        register int v0 __asm__(\"rax\") = a0;\n\
+        register int v1 __asm__(\"rbx\") = a1;\n\
+        register int v2 __asm__(\"rcx\") = a2;\n\
+        register int v3 __asm__(\"rdx\") = a0;\n\
+        register int v4 __asm__(\"rsi\") = a1;\n\
+        register int v5 __asm__(\"rdi\") = a2;\n\
+        register int v6 __asm__(\"r8\") = a0;\n\
+        register int v7 __asm__(\"r9\") = a1;\n\
+        register int v8 __asm__(\"r10\") = a2;\n\
+        register int v9 __asm__(\"r11\") = a0;\n\
+        register int v10 __asm__(\"r12\") = a1;\n\
+        register int v11 __asm__(\"r13\") = a2;\n\
+        register int v12 __asm__(\"r14\") = a0;\n\
+        register int v13 __asm__(\"r15\") = a1;\n\
+        int x;\n\
+        v0 += a0; v1 += a1; v2 |= a2; v3 ^= a0; v4 &= a1; v5 -= a2;\n\
+        __asm__ goto (\"\" : \"=r\"(x) : : : lab);\n\
+        a0 |= a1;\n\
+      lab:\n\
+        return v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12 + v13 + x + a0;\n\
+    }\n";
+    for flag in ["-O2", "-O3"] {
+        let (output, obj) = run_object_test_flags(&format!("regasm-pressure{flag}"), pressure, &[flag]);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let _ = std::fs::remove_file(obj);
+        assert!(
+            output.status.success(),
+            "{flag}: 不可观察的满图绑定必须让出号（asmgoto-5 形态）：{stderr}"
+        );
+    }
+}
+
 /// 内联 asm 的操作数落进 callee-saved 号时，那个号必须登记回占用真源（Phase 6.1）：
 /// 否则序言那条保存会被 `patch_callee_saves` 改成 nop，本函数毁掉**调用者**存在 %rbx 里的
 /// 值（固定约束 `"b"` 这条通路）；而操作数多于九个 caller-saved 号时，旧实现会「复用已发出

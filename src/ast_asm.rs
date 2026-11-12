@@ -18,7 +18,7 @@
 // 遍历刻意不留宽松的 `_ => {}`：新增 `Stmt`/`Expr` 变体会直接编不过，而不是静默漏收一条
 // asm —— 漏收的代价是「本该让开的寄存器被当成临时值用掉」，那是静默错值那一类。
 
-use crate::ast::{Block, BlockItem, Case, Decl, Expr, InitItem, Stmt};
+use crate::ast::{Block, BlockItem, Case, Decl, Expr, InitItem, Program, Stmt};
 use std::collections::HashSet;
 
 /// 本函数里「能把控制流带出保存/恢复区间」的那些 asm 所 clobber 的寄存器名。
@@ -58,6 +58,15 @@ pub struct AsmFacts {
     /// 回退到 r12（旧行为）。为了让那条回退仍然被保存槽盖住，含 asm 的函数
     /// 至少把 r12 留在计划里。
     pub has_asm: bool,
+    /// 本函数里被**任何**内联汇编的操作数表达式引用到的名字（含嵌套函数体）。
+    ///
+    /// 消费方是 x86_64 的 `register asm("rN")` 绑定判据（`Codegen::resolve_asm_reg`）：
+    /// GNU C 的局部寄存器变量只在「asm 操作数引用它」时才是可观察的约定，
+    /// 其余形状按普通变量处理。判据只需名字，不需要号 —— 名字→号仍只有
+    /// `parse_reg_home` 一张表。
+    pub operand_names: HashSet<String>,
+    /// 仅遍历期使用：当前处在第几层 asm 操作数表达式里（`operand_names` 的开关）。
+    operand_depth: u32,
 }
 
 /// 收集 [`AsmFacts`]。刻意不拆成两次遍历：两张判据看的是同一棵 AST，分开走就会
@@ -194,7 +203,7 @@ fn walk_stmt(st: &Stmt, out: &mut AsmFacts) {
                 }
             }
             for e in outputs.iter().chain(inputs.iter()) {
-                walk_expr(e, out);
+                walk_asm_operand(e, out);
             }
         },
         Stmt::Invoke { call, .. } => walk_stmt(call, out),
@@ -232,8 +241,12 @@ fn walk_expr(e: &Expr, out: &mut AsmFacts) {
         | Expr::SizeofTy { .. }
         | Expr::AlignofTy { .. }
         | Expr::Offsetof { .. }
-        | Expr::LabelAddr { .. }
-        | Expr::Ident { .. } => {},
+        | Expr::LabelAddr { .. } => {},
+        Expr::Ident { name, .. } => {
+            if out.operand_depth > 0 {
+                out.operand_names.insert(name.name.clone());
+            }
+        },
         Expr::Unary { e: x, .. }
         | Expr::Cast { e: x, .. }
         | Expr::AddrOf { e: x, .. }
@@ -293,10 +306,37 @@ fn walk_expr(e: &Expr, out: &mut AsmFacts) {
             out.constraints.extend(output_constraints.iter().cloned());
             out.constraints.extend(input_constraints.iter().cloned());
             for x in outputs.iter().chain(inputs.iter()) {
-                walk_expr(x, out);
+                walk_asm_operand(x, out);
             }
         },
     }
+}
+
+/// 走一次 asm 操作数表达式：期间遇到的 `Ident` 名字进 `operand_names`。
+///
+/// 语句表达式里嵌的普通声明/语句也会被算进来（保守方向：多留一个绑定只会多钉一个号，
+/// 少留才会把「asm 约定」静默丢掉）。
+fn walk_asm_operand(e: &Expr, out: &mut AsmFacts) {
+    out.operand_depth += 1;
+    walk_expr(e, out);
+    out.operand_depth -= 1;
+}
+
+/// 全程序里被**任何**内联汇编的操作数表达式引用到的名字。
+///
+/// 为什么是程序级：file-scope 的 `register asm` 变量可以在任意函数里被 asm 引用，
+/// 而 file-scope 的家表在 `compile_rel` 里一次性定稿 —— 声明所在函数看不到那次引用。
+/// 嵌套函数体由本模块的遍历自己递归（`walk_decl` 的 `Decl::Func` 臂）。
+pub fn program_asm_operand_names(prog: &Program) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for d in &prog.decls {
+        if let Decl::Func(f) = d {
+            if let Some(b) = &f.body {
+                out.extend(collect_asm_facts(b).operand_names);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -374,5 +414,24 @@ mod tests {
         assert_eq!(normalize_clobber_name("%rbx"), "rbx");
         assert_eq!(normalize_clobber_name(" RBX "), "rbx");
         assert_eq!(normalize_clobber_name("memory"), "memory");
+    }
+
+    /// 操作数名字只收 asm 操作数里的 `Ident`：普通表达式里的名字、clobber 里的号都不算。
+    /// 三种落点（语句级 asm、语句表达式、嵌套函数体）都要收到 —— 漏一处就是
+    /// 「asm 约定的名字被当普通变量降级」，而那正是静默错值那一类。
+    #[test]
+    fn operand_names_are_collected_from_asm_operands_only() {
+        let src = "long f(long n){ long a=1, b=2;\n\
+                   __asm__ volatile(\"\" : \"+r\"(a) : \"r\"(b));\n\
+                   long g(long z){ __asm__ volatile(\"\" : : \"r\"(z)); return z; }\n\
+                   long t = ({ __asm__ volatile(\"\" : \"=r\"(a)); a; });\n\
+                   return t + n; }\n";
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        let names = program_asm_operand_names(m.source());
+        for want in ["a", "b", "z"] {
+            assert!(names.contains(want), "缺少 asm 操作数名字 '{}'：{:?}", want, names);
+        }
+        assert!(!names.contains("n"), "普通表达式里的名字不是 asm 操作数：{:?}", names);
     }
 }

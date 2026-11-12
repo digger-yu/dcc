@@ -104,7 +104,9 @@ if [[ -z "$total_line" ]]; then
     fail "没有读到 '=== Total:' 汇总行（脚本异常？退出码 $rc），见 $LOG"
 fi
 
-# 汇总行形如：=== Total: pass=3707  fail=0  skip=6 ===
+# 汇总行形如：=== Total: pass=3704  fail=0  skip=0  na=9 ===
+# （na = 用例的 dg-do target 条件指向非宿主架构，GCC testsuite 在 x86_64
+#   上同样不跑；它不进 total，也不进下面的「实测参与计数」。）
 read -r total_pass total_fail total_skip <<<"$(
     sed -E 's/.*pass=([0-9]+)[[:space:]]+fail=([0-9]+)[[:space:]]+skip=([0-9]+).*/\1 \2 \3/' <<<"$total_line")"
 [[ "$total_pass" =~ ^[0-9]+$ && "$total_fail" =~ ^[0-9]+$ && "$total_skip" =~ ^[0-9]+$ ]] \

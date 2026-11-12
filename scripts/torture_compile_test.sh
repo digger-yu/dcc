@@ -58,6 +58,26 @@ should_skip() {
     return 1
 }
 
+# 该用例的 dg-do target 条件在 x86_64 宿主上是否成立（与 torture_test.sh 同一判据）。
+# GCC testsuite 在 x86_64 上不跑 `{ target mips*-*-* }` 这类目标专属用例；
+# dcc 的驱动直接遍历目录，必须自己补这一步，否则会把「目标专属语料」
+# 误记成编译器失败。认不出的条件按「适用」处理。
+dg_target_applicable() {
+    local src="$1"
+    local expr
+    expr=$(grep -m1 -oP '\{ dg-do\s+\w+[^}]*\{ target\s+\K[^}]*' "$src" 2>/dev/null || true)
+    [[ -n "$expr" ]] || return 0
+    case "$expr" in
+        *x86_64*|*i\?86*|*ia32*|*int128*|*int32plus*|*ptr32plus*|*llp64*|*asm_goto_with_outputs*)
+            return 0 ;;
+    esac
+    case "$expr" in
+        *mips*|*powerpc*|*arm*|*aarch64*|*avr*|*s390*|*sparc*|*riscv*|*sh*-*-*|*alpha*|*hppa*|*ia64*|*loongarch*|*m68k*)
+            return 1 ;;
+    esac
+    return 0
+}
+
 # 测试可能 #include ../../gcc.dg/... 或 ../../gcc.target/... 这类
 # gcc.c-torture 之外的兄弟文件。文件缺失时 (套件子集/稀疏检出没带)
 # 自动跳过, 避免把「套件缺文件」算成编译器失败; 文件齐备时返回 1
@@ -115,13 +135,20 @@ run_compile_test() {
     extra_opts=$(extract_dg_options "$src")
 
     local rc=0
-    timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null || rc=$?
+    local errf="$TMPDIR_TORTURE/${name}.err"
+    timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>"$errf" || rc=$?
     if [[ $rc -eq 0 ]]; then
         rm -f "$out"
         echo "PASS" 
     elif [[ $rc -eq 124 ]]; then
         rm -f "$out"
         echo "TIMEOUT"
+    elif grep -q 'error\[E0311\]' "$errf" \
+        && timeout 30 "$DCC" -S -std=gnu11 $extra_opts -o "${out%.o}.s" "$src" 2>/dev/null; then
+        # GCC 的 `{ dg-do compile }` 判据是「生成汇编」而不是「gas 接受每条指令」：
+        # 虚构助记符（920521-1 的 `asm("f")`）在 gcc -c 那边也被 gas 拒。
+        rm -f "$out" "${out%.o}.s"
+        echo "PASS"
     else
         rm -f "$out"
         echo "FAIL"
@@ -145,7 +172,7 @@ if [[ ! -d "$dir" ]]; then
     exit 1
 fi
 
-pass=0 fail=0 skip=0 total=0
+pass=0 fail=0 skip=0 na=0 total=0
 declare -a failures=()
 
 # 收集 .c 文件 (仅顶层)
@@ -172,10 +199,16 @@ while IFS= read -r src; do
         || { [[ -n "${ext_include_tests[$src]:-}" ]] && sibling_include_missing "$src"; }; then
         skip=$((skip + 1))
         skipped_names+=("$name")
+    elif ! dg_target_applicable "$src"; then
+        # 目标条件不成立：GCC testsuite 在 x86_64 上同样不运行它，
+        # 从适用总数里扣掉，但不记成「跳过」（不是 dcc 的缺口）。
+        na=$((na + 1))
     else
         echo "$src" >> "$TMPDIR_TORTURE/run_list.txt"
     fi
 done < "$TMPDIR_TORTURE/file_list.txt"
+# `total` 是原始文件数；N/A 不属于本宿主上「应跑」的范围。
+total=$((total - na))
 
 run_count=0
 [[ -f "$TMPDIR_TORTURE/run_list.txt" ]] && run_count=$(wc -l < "$TMPDIR_TORTURE/run_list.txt")
@@ -217,7 +250,7 @@ done < "$TMPDIR_TORTURE/results.txt"
 # 汇总
 echo ""
 echo "=== Torture [compile] ==="
-echo "total=$total  pass=$pass  fail=$fail  skip=$skip"
+echo "total=$total  pass=$pass  fail=$fail  skip=$skip  na=$na"
 
 if [[ ${#failures[@]} -gt 0 ]]; then
     echo "Failures:"
@@ -234,7 +267,7 @@ if [[ ${#skipped_names[@]} -gt 0 ]]; then
 fi
 
 echo ""
-echo "=== Total: pass=$pass  fail=$fail  skip=$skip ==="
+echo "=== Total: pass=$pass  fail=$fail  skip=$skip  na=$na ==="
 
 # 有失败则退出非零
 if [[ ${#failures[@]} -gt 0 ]]; then

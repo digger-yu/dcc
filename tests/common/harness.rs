@@ -1767,9 +1767,13 @@ pub(crate) fn count_jmp_to_next(body: &str) -> usize {
 /// 故意让「源码序」与「地址序」不同序：`sink` 在**第 1 行**就有原型，而它在 `.text` 里排在
 /// `f` 之后。这正是 CU 区间取 `functions.first()/last()` 时会算错、取 min/max 时才对的形状
 /// （见 `src/debug.rs::normalize_cu`）。`v`/`t` 两个局部各自走寄存器家与栈槽家。
+///
+/// `v` 在声明**同一行**（行号不能变：行断点用例按 2/4/5 行钉住）多一句空 asm 操作数引用：
+/// GNU C 的 `register asm` 只在 asm 操作数处才是可观察约定（GCC 的 supported use），没有
+/// 引用的绑定按普通局部变量处理 —— 与 `gcc.c-torture/compile/asmgoto-5.c` 同一口径。
 pub(crate) const DWARF_GDB_SRC: &str = r#"int sink(int);
 int f(void) {
-    register int v asm("rbx") = 42;
+    register int v asm("rbx") = 42; __asm__ volatile("" : "+r"(v));
     int t = sink(0);
     return v + t;
 }

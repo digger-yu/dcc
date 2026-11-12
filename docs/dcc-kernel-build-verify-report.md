@@ -148,13 +148,13 @@ include build-generated headers (`generated/autoconf.h`, `generated/asm-offsets.
 
 ### 4.5 dcc's own test cases
 
-Both targets were re-run on the final compiler carrying §5.59 + §5.60 (2026-11-12):
+Both targets were re-run on the final compiler carrying §5.59 + §5.60 + §5.61 (2026-11-12):
 `cargo test --release --test integration -- --test-threads=2` logged
-**integration 1 375 passed, 0 failed** (6 ignored, 66.7 s), and
+**integration 1 376 passed, 0 failed** (6 ignored, 66.4 s), and
 `cargo test --release --lib -j2 -- --test-threads=2` logged
-**lib 2 612 passed, 0 failed** (2 ignored, 1.6 s, log `logs/cargo_test_lib_final.log`). The two
+**lib 2 613 passed, 0 failed** (2 ignored, 1.6 s, log `logs/cargo_test_lib_final.log`). The
 integration cases added since the previous full run are the §5.59 `offsetof` and §5.60
-nested-guard fixtures. The previous full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
+nested-guard fixtures plus the §5.61 register-asm observability case. The previous full run (2026-11-07, compiler of §5.18, log `logs/cargo_test_ssa_width.log`) logged
 **4 054 passed, 8 ignored, 1 failed** — lib 2 607/0 (two ignored), integration 1 332/0 (six
 ignored), `errors` 26/0, `disasm_snapshot` 1/0, `g10_snapshot_baseline` 1/0. The single failure
 is the pre-existing `cpp_abi_eh_group` (six C++ zero-cost-EH fixtures die with a signal;
@@ -166,9 +166,17 @@ snapshots under `tests/disasm_snapshots_x86_64/` and the five `tests/fixtures/g1
 baselines. With numbers and padding normalised away, all 34 instruction streams hash identical
 to their previous content, so only frame sizes moved (§5.12).
 
-`scripts/torture_test.sh all` (the pre-commit test-case script): **3 707 passed, 0 failed,
-6 skipped** (`logs/torture_bracefix.log`, 2026-11-07 09:04 — i.e. the compiler before
-§5.17/§5.18).
+`scripts/torture_test.sh all` (the pre-commit test-case script): **3 704 passed, 0 failed,
+0 skipped** (`logs/torture_full_2026-11-12.log`, 2026-11-12 — the compiler carrying
+§5.59 + §5.60 + §5.61).
+This is the first full run with an empty `tests/skip/torture_skip.txt`: `920521-1` is judged
+the way `{ dg-do compile }` is (assembly generation with `-S`, not gas acceptance; gcc's own
+`-c` is rejected by gas for the same fictitious mnemonics), `mipscop-1..4` carry
+`{ target mips*-*-* }` so they are `na` on x86_64 exactly as in GCC's testsuite, and
+`asmgoto-5` passes now that unobservable `register asm("rN")` bindings are ordinary locals
+(§5.61). Nine target-specific compile cases in total are `na` and are outside the total
+(`s390x`/`vms`, `mips` ×4, `ia64`, `powerpc` ×2, `arm`/`aarch64`); the earlier 3 707/0/6 line
+(2026-11-07) came from the skip list.
 
 On the compiler carrying §5.48–§5.50 the lib suite is green again (**2 610 passed, 0 failed**)
 and the three new cases (`statement_expression_has_its_own_scope`,
@@ -703,7 +711,7 @@ over-reserving costs 32 B, under-reserving writes out of the band.
 Regression case `bitfield_init_list_uses_rmw_band`
 (`tests/fixtures/c/bitfield_init_list_slots.c`) checks both container words and both read
 paths at `-O0`/`-O2`; `scripts/torture_test.sh all` is back to **0 failures**
-(3 707 pass, 6 skip).
+(3 704 pass, 0 skip, 9 N/A).
 
 ### 5.52 An inline temp's member access read an object address as its value
 
@@ -1027,6 +1035,39 @@ stress panel and byte-identical to gcc (§4.3). Regression case
 (`nested_guard_same_name_slots_distinct_matches_gcc`, `-O0`…`-O3`, exit codes 1/2/4/8 name the
 failing shape).
 
+### 5.61 A `register asm("rN")` declaration was treated as a permanent home
+
+`gcc.c-torture/compile/asmgoto-5.c` declares fourteen locals as
+`register int vN asm("rXX") = aN` and never mentions any of them in an asm template — the only
+asm in the function is `asm goto ("" : "=r"(x) : : : lab)`. GCC compiles it at `-O2` (its own
+testsuite skips `-O0` for this file). dcc pinned every declaration to its named register for the
+whole function: `v11` asked for `%r13`, this backend's frame base, and the other thirteen held
+every GPR a computed operand could use, so the function died with `E0318` and then `E1135` (no
+Binop stage register).
+
+Fix: a user-written binding is now honoured only where GNU C makes it observable.
+`resolve_asm_reg` consults a program-wide set of identifiers referenced by asm operand
+expressions (`ast_asm::program_asm_operand_names`, collected before `compile_rel` and by every
+parallel worker). A declaration with an initialiser that never appears in an asm operand is
+compiled as an ordinary local (its value comes from the initialiser and later assignments, so
+its storage is not observable); a declaration **without** an initialiser keeps its home,
+because the first read may observe the register's incoming value — the kernel's
+`register unsigned long current_stack_pointer asm("rsp")` read-only alias. A reserved register
+that *is* named by an asm operand still fails closed with `E0318`, and an unknown register name
+still fails with `E0316`.
+
+Evidence: `asmgoto-5.c` compiles at `-O0/-O1/-O2/-O3`; the full suite is green with an empty
+skip list (§4.5). Regression case
+`register_asm_binding_is_only_pinned_where_asm_can_observe_it` in `tests/integration/c_asm.rs`
+(file-scope + local `r13` demotion at `-O0`/`-O2`, the asm-referenced `r13` still `E0318`, and a
+14-binding asm-goto pressure shape at `-O2`/`-O3`).
+
+One existing fixture needed the same correction: `DWARF_GDB_SRC` in
+`tests/common/harness.rs` pins `v` to `%rbx` to exercise the `DW_OP_reg3` path, so its
+declaration now carries an empty asm operand reference on the same source line (the
+line-breakpoint case pins lines 2/4/5). Without it the binding is demoted — correctly — and
+the `set $rbx` reverse control would read a stack copy.
+
 ## 6. Reproduce
 
 ```bash
@@ -1129,16 +1170,17 @@ Per-defect reproducers are the suite's own cases; `scripts/opt_pass_audit.sh` an
   here with `saturating_*`), `container_bits - bit_o - bw` underflowing to a ≥ 64 shift in the
   `reverse_sso` bitfield store (`bitfield-1.c`, `bitfield-endian-1/2.c`), shift-count overflow in
   SCCP's `eval_binop` (`920702-1.c`, `dic.c`, `pr103314-1.c`, `pr105247.c`, `pr111059-*.c`),
-  plus `mipscop-1..4` (E0316), `920521-1` (E0311), `asmgoto-5` (E0318/E1135) and `20090907-1`
-  (E1136). None is on the kernel path; each deserves its own reduction.
+  plus `20090907-1` (E1136). None is on the kernel path; each deserves its own reduction.
+  The three torture cases that used to be listed here (`mipscop-1..4`, `920521-1`,
+  `asmgoto-5`) are resolved or target-gated in §4.5/§5.61.
 * **Silent mis-binding is guarded, but only for the statically decidable shape**: E0321 compares
   a memory operand's resolved address against another output's write destination. Two outputs
   whose address is parked in a callee-saved register (`"=r"(a[i])`) can still alias at run time.
 * **Pipeline audit is corpus-bound** (§5.13): the 0-hit rates are measured on 60 small torture
   units; kernel-sized TUs with IPA-shaped calls will move `ipa_modref` and `cross_*_dce`.
 * **Both `cargo test` targets and `scripts/torture_test.sh all` were re-run on the final
-  compiler** carrying §5.59 + §5.60 (`2026-11-12`: lib 2 612 passed / 0 failed / 2 ignored,
-  integration 1 375 passed / 0 failed / 6 ignored; torture 3 707 passed / 0 failed / 6 skipped,
-  which is also the pre-commit gate of the two commits). Both §5.59 and §5.60 pass at
-  `-O0/-O1/-O2/-O3`. One exception is unchanged: `cpp_abi_eh_group` predates this cycle and is
-  not on the kernel path (§4.5).
+  compiler** carrying §5.59 + §5.60 + §5.61 (`2026-11-12`: lib 2 613 passed / 0 failed / 2
+  ignored, integration 1 376 passed / 0 failed / 6 ignored; torture 3 704 passed / 0 failed /
+  0 skipped plus 9 target-`na` cases, which is also the pre-commit test-case baseline).
+  §5.59, §5.60 and §5.61 pass at `-O0/-O1/-O2/-O3`. One exception is unchanged:
+  `cpp_abi_eh_group` predates this cycle and is not on the kernel path (§4.5).

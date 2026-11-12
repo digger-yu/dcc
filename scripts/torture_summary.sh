@@ -21,21 +21,22 @@ fi
 parse_stats() {
     local log="$1"
     if [[ ! -f "$log" ]]; then
-        echo "0 0 0 0"
+        echo "0 0 0 0 0"
         return
     fi
     local line
     line=$(grep -E '^[[:space:]]*total=' "$log" | tail -1)
     if [[ -z "$line" ]]; then
-        echo "0 0 0 0"
+        echo "0 0 0 0 0"
         return
     fi
-    local total pass fail skip
+    local total pass fail skip na
     total=$(echo "$line" | sed -n 's/.*total=\([0-9]*\).*/\1/p')
     pass=$(echo "$line" | sed -n 's/.*pass=\([0-9]*\).*/\1/p')
     fail=$(echo "$line" | sed -n 's/.*fail=\([0-9]*\).*/\1/p')
     skip=$(echo "$line" | sed -n 's/.*skip=\([0-9]*\).*/\1/p')
-    echo "${total:-0} ${pass:-0} ${fail:-0} ${skip:-0}"
+    na=$(echo "$line" | sed -n 's/.*na=\([0-9]*\).*/\1/p')
+    echo "${total:-0} ${pass:-0} ${fail:-0} ${skip:-0} ${na:-0}"
 }
 
 # ── 从日志中提取失败列表 ──
@@ -83,13 +84,14 @@ repo_blob_url() {
 }
 
 # ── 解析两组日志 ──
-read -r c_total c_pass c_fail c_skip <<< "$(parse_stats "$COMPILE_LOG")"
-read -r e_total e_pass e_fail e_skip <<< "$(parse_stats "$EXECUTE_LOG")"
+read -r c_total c_pass c_fail c_skip c_na <<< "$(parse_stats "$COMPILE_LOG")"
+read -r e_total e_pass e_fail e_skip e_na <<< "$(parse_stats "$EXECUTE_LOG")"
 
 g_total=$((c_total + e_total))
 g_pass=$((c_pass + e_pass))
 g_fail=$((c_fail + e_fail))
 g_skip=$((c_skip + e_skip))
+g_na=$((c_na + e_na))
 
 c_rate=$(calc_rate "$c_total" "$c_pass")
 e_rate=$(calc_rate "$e_total" "$e_pass")
@@ -106,12 +108,14 @@ echo "# GCC Torture Test Results"
 echo ""
 echo "## Summary"
 echo ""
-echo "| Category | Total | Pass | Fail | Skip | Pass Rate |"
-echo "|----------|------:|-----:|-----:|-----:|----------:|"
-echo "| Compile  | $c_total | $c_pass | $c_fail | $c_skip | $c_rate |"
-echo "| Execute  | $e_total | $e_pass | $e_fail | $e_skip | $e_rate |"
-echo "| **Total**| **$g_total** | **$g_pass** | **$g_fail** | **$g_skip** | **$g_rate** |"
+echo "| Category | Total | Pass | Fail | Skip | N/A | Pass Rate |"
+echo "|----------|------:|-----:|-----:|-----:|----:|----------:|"
+echo "| Compile  | $c_total | $c_pass | $c_fail | $c_skip | $c_na | $c_rate |"
+echo "| Execute  | $e_total | $e_pass | $e_fail | $e_skip | $e_na | $e_rate |"
+echo "| **Total**| **$g_total** | **$g_pass** | **$g_fail** | **$g_skip** | **$g_na** | **$g_rate** |"
 echo ""
+echo "N/A = the case's \`{ dg-do ... { target ... } }\` names a non-host family (mips/arm/...);"
+echo "GCC's own testsuite does not run it on x86_64 either, so it is outside Total."
 
 # ── 失败列表 ──
 if [[ -n "$compile_failures" || -n "$execute_failures" ]]; then

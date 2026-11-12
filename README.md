@@ -21,7 +21,7 @@ freestanding code, toolchain test suites — where a fast, reviewable compiler b
 Status: **alpha**. Proven so far: whole-tree dcc build on Linux 7.1 x86_64 → `vmlinux`
 and a QEMU boot reaching `/init` (PVH entry; `bzImage` needs the 16-bit C backend dcc does
 not have yet, see `docs/kernel_build_guide.md` §8); self-hosting `dcc0 → dcc1 → dcc2`; GCC
-torture suite 99.92 % pass (§Testing).
+torture suite 100 % pass on x86_64 (§Testing).
 
 | | |
 |---|---|
@@ -220,8 +220,8 @@ behind each entry) and [`docs/backend_feature_matrix.md`](./docs/backend_feature
 ## Testing
 
 ```bash
-cargo test --lib                      # 2471 unit tests (2 ignored)
-cargo test --release                  # all top-level targets: integration 1094, errors 26,
+cargo test --lib                      # 2613 unit tests (2 ignored)
+cargo test --release                  # all top-level targets: integration 1376, errors 26,
                                       # profile 53, reproducibility 8, cpp ABI cross-check 9, …
 make test                             # Tier-0: cargo build --tests, cargo test --release,
                                       # fixture gate + the gate's own self-test
@@ -229,23 +229,28 @@ make test-all                         # Tier-0 plus test_all.sh, -O equivalence,
                                       # pipe structure, disasm coverage, cross golden files
 ```
 
-GCC `gcc.c-torture`, measured 2026-10-16 at `efd8e894`:
+GCC `gcc.c-torture`, measured 2026-11-12:
 
-| Suite | Total | Pass | Fail | Skip | Rate |
-|---|---|---|---|---|---|
-| compile | 2016 | 2010 | 0 | 6 | 99.70 % |
-| execute | 1697 | 1697 | 0 | 0 | 100 % |
-| **all** | **3713** | **3707** | **0** | **6** | **99.84 %** |
+| Suite | Total | Pass | Fail | Skip | N/A | Rate |
+|---|---|---|---|---|---|---|
+| compile | 2007 | 2007 | 0 | 0 | 9 | 100 % |
+| execute | 1697 | 1697 | 0 | 0 | 0 | 100 % |
+| **all** | **3704** | **3704** | **0** | **0** | **9** | **100 %** |
 
-The six remaining compile skips (`920521-1`, `mipscop-1..4`,
-`asmgoto-5`) are tests that genuinely cannot run on x86_64.
+The skip list (`tests/skip/torture_skip.txt`) is empty. Nine compile cases are
+`N/A`, not skipped: their `{ dg-do ... { target ... } }` names a non-host family
+(mips, s390x, ia64, powerpc, arm), so GCC's own testsuite does not run them on
+x86_64 either. `920521-1` is judged the way `dg-do compile` is (assembly
+generation, `-S` — gas rejects the fictitious mnemonics on the gcc side too), and
+`asmgoto-5` passes under GCC's local-register-variable semantics (an unobservable
+`register asm("rN")` binding is an ordinary local).
 Tests that `#include` siblings from `gcc.dg/` are skipped only
 when that directory is unavailable: `scripts/setup_torture.sh`
 auto-links `tests/gcc-dg` into the suite when present, so they
-run and pass (which is why the execute skip count is now 0).
+run and pass (which is why the execute skip count is 0).
 
-No tests fail at runtime on x86_64; the remaining compile skips cover
-tests that cannot run on this backend. `scripts/torture_gate.sh`
+No test in the suite fails or is skipped on x86_64; the nine `N/A` cases carry a
+non-host `{ target ... }` condition and are outside the total. `scripts/torture_gate.sh`
 compares against `tests/skip/torture_known_fail_*.txt` and only
 allows that set to shrink.
 

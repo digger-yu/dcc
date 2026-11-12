@@ -656,6 +656,17 @@ impl Codegen {
     pub(crate) fn resolve_asm_reg(&mut self, v: &VarDecl) -> Option<crate::location::Location> {
         let text = v.register_name.as_deref()?;
         if let Some(loc) = Self::parse_reg_home(text) {
+            // GNU C 的局部寄存器变量只在「asm 操作数引用它」时才是可观察的约定
+            // （GCC 文档的 supported use）；声明处有初值、又从不进 asm 操作数的绑定
+            // 只剩普通局部变量的值语义，按普通变量处理（不钉号，保留号也不再是错误）。
+            // `asmgoto-5.c` 的 14 个 `register int vN asm("rXX") = aN` 就是这个形状：
+            // 14 个号把 GPR 占满，而 GCC 在这里根本不把它当回事（-O2 直接通过）。
+            //
+            // `v.home.is_none()` 把**分配器写回的** register_name（`apply_bindings`
+            // 给自动绑定补的文本）排除在外：那一位只是家表的中间通道，不是用户请求。
+            if v.home.is_none() && !self.asm_binding_is_observable(v) {
+                return None;
+            }
             // 名字认得，但这个号是本端自己的帧基座：拿它当家会让所有 `%r13+disp` 寻址
             // 一起失效。而今天它不报错：实测同一个 `register long v asm("r13")` 在 -O0
             // 真发出 `mov %rax,%r13`，在 -O2 则被静默降级成栈槽（`mov %rax,-0x48(%r13)`）
@@ -675,6 +686,20 @@ impl Codegen {
             source_line: None,
         });
         None
+    }
+
+    /// 用户写的 `register asm("...")` 绑定是否有可观察的语义（`resolve_asm_reg` 的降级开关）。
+    ///
+    /// 两个来源，任一成立就必须钉号：
+    ///   1. 名字出现在某条内联汇编的操作数里 —— GCC 保证这个操作数就落在指定的号；
+    ///   2. 声明处没有初值 —— 首次读可能早于任何赋值，读的是那个号里的现值
+    ///      （只读别名形态：`register unsigned long current_stack_pointer asm("rsp")`）。
+    ///
+    /// 其余形状按普通变量处理：值全部来自初始化式或后续赋值，住处不可观察。
+    /// 判据只需要「名字在不在 asm 操作数集合里」，集合由 `collect_asm_operand_names`
+    /// 在发射开始前收齐（并行 worker 也能自己收）。
+    fn asm_binding_is_observable(&self, v: &VarDecl) -> bool {
+        v.init.is_none() || self.asm_operand_names.contains(&v.name.name)
     }
 
     /// 保留号（栈指针 / 帧基址 / 帧指针）不得当变量之家：诊断码也只定在这里一处

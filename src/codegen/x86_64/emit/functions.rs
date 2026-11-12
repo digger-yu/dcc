@@ -159,6 +159,24 @@ impl Codegen {
         !self.addr_escaped.contains(name)
     }
 
+    /// 汇总全程序里「被内联汇编操作数引用」的对象根名，一个 Codegen 实例只算一次。
+    ///
+    /// 消费方是 `func_setup::resolve_asm_reg`：GNU C 的 `register T v asm("rN")` 只在
+    /// asm 操作数里是可观察约定（GCC 文档的 supported use），未被引用、又在声明处有
+    /// 初值的声明按普通变量处理 —— `asmgoto-5.c` 的 14 个 `register int vN asm("rXX") = aN`
+    /// 就是这个形状（它们一个也没进 asm 模板，GCC 直接当普通局部变量）。
+    ///
+    /// 为什么程序级：file-scope 的绑定可以在**另一个**函数里被 asm 引用，而
+    /// `compile_rel` 要在任何函数体发射之前给定它的家。判据单源在
+    /// `ast_asm::program_asm_operand_names`（穷举遍历，含嵌套函数体）。
+    pub(crate) fn collect_asm_operand_names(&mut self, prog: &Program) {
+        if self.asm_operand_names_done {
+            return;
+        }
+        self.asm_operand_names_done = true;
+        self.asm_operand_names = crate::ast_asm::program_asm_operand_names(prog);
+    }
+
     /// 递归收集块内（含嵌套语句）的全部局部变量声明。
     ///
     /// 只取声明、不取表达式：本函数只用来统计「这个名字在函数里被声明了几次」。
@@ -473,6 +491,10 @@ impl Codegen {
         self.homes.clear();
         // file-scope 绑定也要过同一道逸出判据：地址被取走的对象必须留在内存里。
         self.collect_addr_escaped(prog);
+        // 并行 worker 不复用主 Codegen 的扫描结果（`compile_func` 拿到的是完整
+        // `prog`，判据又只需一次 AST 遍历），所以这里也要收；主 Codegen 在
+        // `compile_module` 已收过，`done` 位让它成为空操作。
+        self.collect_asm_operand_names(prog);
         for (n, b) in self.global_homes.clone() {
             if !self.register_binding_allowed(&n) {
                 continue;

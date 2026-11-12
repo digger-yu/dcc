@@ -59,6 +59,29 @@ should_skip() {
     return 1
 }
 
+# 该用例的 dg-do target 条件在 x86_64 宿主上是否成立。
+#
+# GCC testsuite 只运行 target 条件成立的用例：`{ target mips*-*-* }` 在 x86_64
+# 上根本不参与，而 `{ target { { i?86-*-* x86_64-*-* } && { ! ia32 } } }` 参与。
+# dcc 的 torture 驱动直接遍历整个目录，必须自己补这一步，否则会把「目标专属
+# 语料」误记成跳过（mipscop-1..4）。判据只认三元组族与几个宿主特性名；认不出
+# 的条件按「适用」处理（保持原有覆盖），所以排除只会来自明确写出的非宿主目标。
+dg_target_applicable() {
+    local src="$1"
+    local expr
+    expr=$(grep -m1 -oP '\{ dg-do\s+\w+[^}]*\{ target\s+\K[^}]*' "$src" 2>/dev/null || true)
+    [[ -n "$expr" ]] || return 0
+    case "$expr" in
+        *x86_64*|*i\?86*|*ia32*|*int128*|*int32plus*|*ptr32plus*|*llp64*|*asm_goto_with_outputs*)
+            return 0 ;;
+    esac
+    case "$expr" in
+        *mips*|*powerpc*|*arm*|*aarch64*|*avr*|*s390*|*sparc*|*riscv*|*sh*-*-*|*alpha*|*hppa*|*ia64*|*loongarch*|*m68k*)
+            return 1 ;;
+    esac
+    return 0
+}
+
 # 测试可能 #include ../../gcc.dg/... 或 ../../gcc.target/... 这类
 # gcc.c-torture 之外的兄弟文件。文件缺失时 (套件子集/稀疏检出没带)
 # 自动跳过, 避免把「套件缺文件」算成编译器失败; 文件齐备时返回 1
@@ -121,13 +144,22 @@ run_compile_test() {
     extra_opts=$(extract_dg_options "$src")
 
     local rc=0
-    timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null || rc=$?
+    local errf="$TMPDIR_TORTURE/${name}.err"
+    timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>"$errf" || rc=$?
     if [[ $rc -eq 0 ]]; then
         rm -f "$out"
         echo "PASS" 
     elif [[ $rc -eq 124 ]]; then
         rm -f "$out"
         echo "TIMEOUT"
+    elif grep -q 'error\[E0311\]' "$errf" \
+        && timeout 30 "$DCC" -S -std=gnu11 $extra_opts -o "${out%.o}.s" "$src" 2>/dev/null; then
+        # GCC 的 `dg-do compile` 判据是「生成汇编」, 不要求汇编器接受模板
+        # （920521-1 的 `asm("f")` 连 gas 也拒绝）。dcc 的 -c 要自编码, E0311
+        # 说明指令表里没有这条; 而 -S 能把原文写进 GAS 文本 —— 与 GCC 的
+        # compile 判据一致, 不放宽其它任何失败。
+        rm -f "$out" "${out%.o}.s"
+        echo "PASS"
     else
         rm -f "$out"
         echo "FAIL"
@@ -179,7 +211,7 @@ run_suite() {
         return
     fi
 
-    local pass=0 fail=0 skip=0 total=0
+    local pass=0 fail=0 skip=0 na=0 total=0
     local -a failures=()
     local tmpfiles_list="$TMPDIR_TORTURE/${category}_list.txt"
     local tmpfiles_results="$TMPDIR_TORTURE/${category}_results.txt"
@@ -208,10 +240,15 @@ run_suite() {
         if should_skip "$name" \
             || { [[ -n "${ext_include_tests[$src]:-}" ]] && sibling_include_missing "$src"; }; then
             skip=$((skip + 1))
+        elif ! dg_target_applicable "$src"; then
+            # 目标条件不成立：GCC testsuite 在 x86_64 上同样不运行它，
+            # 从适用总数里扣掉，但不记成「跳过」（不是 dcc 的缺口）。
+            na=$((na + 1))
         else
             echo "$src" >> "$run_list"
         fi
     done < "$tmpfiles_list"
+    total=$((total - na))
 
     local run_count=0
     [[ -f "$run_list" ]] && run_count=$(wc -l < "$run_list")
@@ -268,7 +305,7 @@ run_suite() {
     # 汇总
     echo ""
     echo "  === Torture [$category] ==="
-    echo "  total=$total  pass=$pass  fail=$fail  skip=$skip"
+    echo "  total=$total  pass=$pass  fail=$fail  skip=$skip  na=$na"
 
     if [[ ${#failures[@]} -gt 0 ]]; then
         echo "  Failures:"
@@ -278,7 +315,7 @@ run_suite() {
     fi
 
     # 写入全局结果
-    echo "$category pass=$pass fail=$fail skip=$skip" >> "$RESULT_DIR/summary.txt"
+    echo "$category pass=$pass fail=$fail skip=$skip na=$na" >> "$RESULT_DIR/summary.txt"
     if [[ ${#failures[@]} -gt 0 ]]; then
         echo "1" >> "$RESULT_DIR/has_failures"
     fi
@@ -313,14 +350,15 @@ echo ""
 
 # ── 总汇总 ──
 if [[ -f "$RESULT_DIR/summary.txt" ]]; then
-    total_pass=0 total_fail=0 total_skip=0
+    total_pass=0 total_fail=0 total_skip=0 total_na=0
     while read -r _ parts; do
         eval "$parts"
         total_pass=$((total_pass + pass))
         total_fail=$((total_fail + fail))
         total_skip=$((total_skip + skip))
+        total_na=$((total_na + ${na:-0}))
     done < "$RESULT_DIR/summary.txt"
-    echo "=== Total: pass=$total_pass  fail=$total_fail  skip=$total_skip ==="
+    echo "=== Total: pass=$total_pass  fail=$total_fail  skip=$total_skip  na=$total_na ==="
 fi
 
 # 有失败则退出非零

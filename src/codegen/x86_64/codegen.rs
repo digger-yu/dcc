@@ -576,6 +576,11 @@ pub struct Codegen {
     /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ast_gvn::addr_escaped_names`。
     pub addr_escaped: std::collections::HashSet<String>,
     pub addr_escaped_done: bool,
+    /// 全程序里被**内联汇编操作数**引用过的名字。消费方是 `resolve_asm_reg`：
+    /// `register asm("rN")` 的绑定只在 asm 操作数处是可观察约定（GCC 的 supported use），
+    /// 未被引用、又有初值的声明按普通变量处理。判据在 `ast_asm::program_asm_operand_names`。
+    pub asm_operand_names: std::collections::HashSet<String>,
+    pub asm_operand_names_done: bool,
     // data 节 64 位符号引用重定位：(data_section_offset, symbol_name)
     /// (data_off, symbol, custom_sec, rel_type, addend) — addend 用于 &arr[i] 等
     pub pending_data64_rels: Vec<(u64, String, Option<usize>, u32, i64)>,
@@ -1324,6 +1329,8 @@ impl Codegen {
             homes: HashMap::new(),
             addr_escaped: std::collections::HashSet::new(),
             addr_escaped_done: false,
+            asm_operand_names: std::collections::HashSet::new(),
+            asm_operand_names_done: false,
             global_homes: HashMap::new(),
             pending_data64_rels: vec![],
             pending_data_textlabel_rels: vec![],
@@ -1566,6 +1573,9 @@ impl Codegen {
                 _ => {},
             }
         }
+        // `register asm` 的绑定判据要读这张表，而 `compile_rel` 里就要给定 file-scope
+        // 的家 —— 必须早于它收齐（并行 worker 由 `compile_func` 自己补收）。
+        self.collect_asm_operand_names(prog);
         if self.relocatable {
             self.compile_rel(prog);
         } else {
