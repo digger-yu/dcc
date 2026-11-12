@@ -800,3 +800,49 @@ __attribute__((noinline)) int f(void)
          （§5.29 回归）:\n{asm}"
     );
 }
+
+/// `switch` 的 case 体必须参与 `max_expr_depth` 扫描。
+///
+/// 红法：删掉 `max_expr_depth_stmt_inner` 的 `Stmt::Switch` 臂 ⇒ `temp_slots`
+/// 只剩最小值 2，case 内第 3 层溅出槽（`-(16+8*2)`）正好落到变量区首槽。
+/// 实测 SQLite `SIX_BYTE_INT`：参数 `buf` 的槽被常量 256 覆盖，
+/// `sqlite3VdbeSerialGet` 在 `-O0…-O3` 全部读 `[0x100]` 段错误。
+/// 帧布局四档共用，所以四档都要跑；判据是 gcc 对拍的退出码，不是「能编译」。
+#[test]
+fn switch_case_expression_depth_fits_temp_slots() {
+    const SRC: &str = r#"
+typedef long long i64;
+typedef signed char i8;
+typedef unsigned char u8;
+typedef unsigned int u32;
+typedef struct Mem Mem;
+struct Mem { i64 u; int flags; };
+#define TWO_BYTE_INT(x)    (256*(i8)((x)[0])|(x)[1])
+#define FOUR_BYTE_UINT(x)  (((u8*)(x))[0]<<24 | ((u8*)(x))[1]<<16 | ((u8*)(x))[2]<<8 | ((u8*)(x))[3])
+#define SIX_BYTE_INT(x)    (FOUR_BYTE_UINT((x)+2)+4294967296LL*TWO_BYTE_INT(x))
+static void decode(const unsigned char *buf, u32 serial_type, Mem *pMem){
+  switch( serial_type ){
+    case 4: { pMem->u = FOUR_BYTE_UINT(buf); pMem->flags = 1; break; }
+    case 5: { pMem->u = SIX_BYTE_INT(buf);  pMem->flags = 1; break; }
+    default:{ pMem->u = 0; pMem->flags = 0; break; }
+  }
+}
+int main(void){
+  unsigned char b[8] = {1,2,3,4,5,6,7,8};
+  Mem a = {0,0}, c = {0,0};
+  decode(b, 5, &a);
+  decode(b, 4, &c);
+  if( a.u != 0x00010203040506LL || a.flags != 1 ) return 1;
+  if( c.u != 0x01020304LL || c.flags != 1 ) return 2;
+  return 0;
+}
+"#;
+    for flags in [&["-O0"][..], &["-O1"][..], &["-O2"][..], &["-O3"][..]] {
+        let code = run_gcc_cross_check_opt("switch-case-deep-expr", SRC, flags);
+        assert_eq!(
+            code, 0,
+            "switch-case-deep-expr [{}]: case 体里的深表达式结果错（scratch 槽压到了参数）",
+            flags.join(" ")
+        );
+    }
+}

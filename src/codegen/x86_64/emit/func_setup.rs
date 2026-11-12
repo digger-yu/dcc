@@ -1064,6 +1064,7 @@ impl Codegen {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
                 Self::max_expr_depth_expr(e)
             },
+            Stmt::Return { val: None, .. } => 0,
             Stmt::If {
                 cond, then_, else_, ..
             } => {
@@ -1077,12 +1078,65 @@ impl Codegen {
             Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
                 Self::max_expr_depth_expr(cond).max(Self::max_expr_depth_stmt_inner(body))
             },
-            Stmt::For { cond, body, .. } => cond
-                .as_ref()
-                .map_or(0, Self::max_expr_depth_expr)
+            // `init`/`step` 里的表达式同样会占溅出槽（`for (i = f(); …; i += g())`）。
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => init
+                .iter()
+                .map(|s| Self::max_expr_depth_stmt_inner(s))
+                .chain(cond.iter().map(Self::max_expr_depth_expr))
+                .chain(step.iter().map(Self::max_expr_depth_expr))
+                .max()
+                .unwrap_or(0)
                 .max(Self::max_expr_depth_stmt_inner(body)),
             Stmt::Block { b, .. } => Self::max_expr_depth_stmt(&b.items),
-            _ => 0,
+            // `switch` 的选择子、`prelude` 与每个 case 体都在同一帧里发射。
+            // 漏掉 case 体时 `temp_slots` 只剩最小值 2，而 case 内深表达式会用
+            // 到更深的溅出槽 —— 槽 d 的偏移在变量区上方重叠，参数槽被常量
+            // 覆盖（实测 SQLite `SIX_BYTE_INT`：`buf` 被写成 256，`-O0…-O3`
+            // 全部在 `sqlite3VdbeSerialGet` 读 `[0x100]` 段错误）。
+            Stmt::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => {
+                let mut d = Self::max_expr_depth_expr(expr)
+                    .max(Self::max_expr_depth_stmt(prelude));
+                for c in cases {
+                    if let Some(v) = &c.val {
+                        d = d.max(Self::max_expr_depth_expr(v));
+                    }
+                    if let Some(v) = &c.range_end {
+                        d = d.max(Self::max_expr_depth_expr(v));
+                    }
+                    d = d.max(Self::max_expr_depth_stmt(&c.body.items));
+                }
+                d
+            },
+            Stmt::GotoIndirect { expr, .. } => Self::max_expr_depth_expr(expr),
+            // `goto` 指到的语句也在本帧里。
+            Stmt::Label { stmt, .. } => Self::max_expr_depth_stmt_inner(stmt),
+            Stmt::AsmGoto {
+                outputs, inputs, ..
+            } => outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(Self::max_expr_depth_expr)
+                .max()
+                .unwrap_or(0),
+            Stmt::Invoke { call, .. } => Self::max_expr_depth_stmt_inner(call),
+            Stmt::EhLandingPad {
+                object, selector, ..
+            } => Self::max_expr_depth_expr(object).max(Self::max_expr_depth_expr(selector)),
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Fallthrough { .. }
+            | Stmt::Goto { .. } => 0,
         }
     }
 
@@ -1112,7 +1166,11 @@ impl Codegen {
             | Expr::PostInc { e, .. }
             | Expr::PostDec { e, .. }
             | Expr::PreInc { e, .. }
-            | Expr::PreDec { e, .. } => Self::max_expr_depth_expr(e),
+            | Expr::PreDec { e, .. }
+            | Expr::Real { e, .. }
+            | Expr::Imag { e, .. }
+            | Expr::SizeofExpr { e, .. }
+            | Expr::AlignofExpr { e, .. } => Self::max_expr_depth_expr(e),
             Expr::Index { arr, idx, .. } => {
                 Self::max_expr_depth_expr(arr).max(Self::max_expr_depth_expr(idx))
             },
@@ -1122,8 +1180,50 @@ impl Codegen {
             } => Self::max_expr_depth_expr(cond)
                 .max(Self::max_expr_depth_expr(then_))
                 .max(Self::max_expr_depth_expr(else_)),
-            _ => 0,
+            // 语句表达式里的 binop 也吃同一批溅出槽。
+            Expr::StmtExpr { block, .. } => Self::max_expr_depth_stmt(&block.items),
+            Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+                Self::max_expr_depth_inits(inits)
+            },
+            Expr::AsmExpr {
+                outputs, inputs, ..
+            } => outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(Self::max_expr_depth_expr)
+                .max()
+                .unwrap_or(0),
+            Expr::VaArg { ap, .. } => Self::max_expr_depth_expr(ap),
+            Expr::Offsetof { indices, .. } => indices
+                .iter()
+                .map(|e| Self::max_expr_depth_expr(e))
+                .max()
+                .unwrap_or(0),
+            // 叶子：不嵌套表达式，也不占溅出槽。
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::ComplexLit { .. }
+            | Expr::ComplexIntLit { .. }
+            | Expr::String { .. }
+            | Expr::Char { .. }
+            | Expr::Ident { .. }
+            | Expr::SizeofTy { .. }
+            | Expr::AlignofTy { .. }
+            | Expr::LabelAddr { .. }
+            | Expr::VaArgPack { .. } => 0,
         }
+    }
+
+    /// 初始化列表（复合字面量 / `InitList`）里的表达式深度。
+    fn max_expr_depth_inits(inits: &[InitItem]) -> u32 {
+        inits
+            .iter()
+            .map(|it| match it {
+                InitItem::Expr(e) => Self::max_expr_depth_expr(e),
+                InitItem::Designated { value, .. } => Self::max_expr_depth_expr(value),
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     // ========================================================================
