@@ -500,6 +500,96 @@ Criteria and readings:
   demand, and the session fixture recompiled its four TUs per level.
 * Wall-clock in that log is not a benchmark; §5 is.
 
+### 4.6 All 1 183 executable test files
+
+§4.5 compares nineteen files. The remaining 1 177 were covered only by `quick.test`'s
+failing-name set (§4.4). `scripts/check_sqlite_allfiles.sh` closes that gap: every
+`test/*.test` except the 13 runner files (`all`, `quick`, `veryquick`, `full`,
+`extraquick`, `permutations`, `memleak`, `soak`, `fts3`, `mallocAll`, `rtree`, `session`,
+`rbu` — the same exclusion table `alltests` uses) runs as **its own process** against the
+gcc `-O2` fixture and the matching dcc fixture, with §4.5's criterion applied per file:
+`rc=0`, `0 errors out of N tests` on both sides with the same `N`, and identical result
+lines.
+
+Nothing is compared raw. Four rules were each forced by a measured case:
+
+* a passing case prints `name... Ok`, a failing one prints `name...` and puts the detail
+  on a following `!` line, and a few timed cases print `name... (9 ms - want less than
+  1000.0)  Ok` ⇒ lines are reduced to `name Ok|FAIL|FAILED|ERROR`;
+* `walsetlk*` put the process id into the case name (`...-1.3.(504266) Ok`), which no two
+  processes can share ⇒ `.(<digits>)` is stripped;
+* `thread002` finishes its cases in a different order on every run, gcc included, and its
+  three threads write to one stdout, so a name prefix is occasionally lost ⇒ lines are
+  sorted, and a lost prefix still shows up as a missing name;
+* a file that stops at `ifcapable` still prints `0 errors out of 1 tests`, because
+  `finish_test` counts itself ⇒ those files are **NO-CAP**, not passes. The first version
+  of the script would have reported 174 files green without executing one assertion.
+
+Readings (`sha256(dcc) = c8b7bc…ee00a`, the §4.5 binary; the `-O2` sweep takes 2 893 s):
+
+| sweep | files | ran real cases | summed `N` | identical | unstable (both sides) | not judgeable | no case |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `-O2`, official recipe | 1 183 | 1 000 | 977 757 | 998 | 2 | 9 | 174 |
+| `-O3`, official recipe | 1 183 | 1 000 | 977 769 | 998 | 2 | 9 | 174 |
+| `-O2`, wide-feature build | 163 | 121 | 349 988 | 121 | 0 | 0 | 42 |
+
+* The two unstable files are `crash.test` (the suite picks random sync points: four
+  consecutive gcc runs of the same binary reported 885, 897, 900 and 927 cases) and
+  `thread002` (above). Both end `0 errors out of N tests` on both sides and the
+  instability reproduces with gcc against itself, so the script records `UNSTABLE`, not
+  `DCC-DIFF`.
+* Two more files first looked different and are not: `walsetlk_recover`/`walsetlk_snapshot`
+  differ only in the `.(<pid>)` inside the name, and `avtrans` names its cases
+  `avtrans-9.$i.1-$cnt`, where `$cnt` is the database signature and therefore
+  data-dependent by construction. After stripping that suffix the 314 lines of the `-O3`
+  pair match exactly. `walsetlk_snapshot` is also the one `UNSTABLE` row still recorded in
+  the wide sweep's `results.tsv`: it ran before the pid rule existed, and a re-run with the
+  rule in place compares six lines and passes — that re-run is the 121st file in the table.
+* The 9 not-judgeable files are not judgeable under gcc either. Eight never reach a
+  summary line at the per-file timeout: `alias`, `qrf04`, the five `win32*` (Win32-only)
+  and `writecrash` — the last is slow, not broken: with `FILE_TIMEOUT=900` gcc needs
+  365.16 s and dcc 364.70 s, both close with `0 errors out of 989 tests` and identical
+  lines. The ninth, `zipfile`, fails 1 of 146 cases under gcc as well (the zlib case in
+  §7).
+* The 174 no-case files are the real hole: 95 `fts*` (the official recipe defines no
+  `SQLITE_ENABLE_FTS3`), 11 `shell*` (no `sqlite3` shell is built in that tree; the wide
+  sweep skips these), and 68 that need `stat4`, `snapshot`, `unlock_notify`, `scanstatus`,
+  `rtree`, `memorymanage`, `atomicwrite`, `sqllog`, `icu` or `update_delete_limit`. The
+  `win32*` files are not in this set: they never reach a summary line on any platform, so
+  they are counted among the 9 not judgeable.
+  `scripts/build_sqlite_wide_fixture.sh` recovers most of them without a second full
+  build: a capability macro only reaches the TUs whose text mentions it — 10 of the 88
+  (`sqlite3.c`, `test1.c`, `test_config.c`, `test_tclsh.c`, `test_thread.c`,
+  `ext/fts3/fts3_term.c`, `ext/fts3/fts3_test.c`, `ext/rtree/test_rtreedoc.c`,
+  `src/test_rtree.c`, `tclsqlite-ex.c`) — so those are recompiled with
+  `-DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4
+  -DSQLITE_ENABLE_STAT4 -DSQLITE_ENABLE_SNAPSHOT -DSQLITE_ENABLE_RTREE
+  -DSQLITE_ENABLE_UNLOCK_NOTIFY` on top of the captured recipe and linked against the
+  untouched objects. The script asks the resulting binary (`PRAGMA compile_options`), not
+  its own command line, before using it. Recompiling `sqlite3.c` alone is not enough:
+  `ext/fts3/fts3_term.c` compiles to an empty object without FTS3 and the link dies on
+  `undefined reference to sqlite3Fts3InitTerm`.
+* 121 of the 163 candidates then execute real cases — the whole `fts3aa..am` / `fts4*`
+  corpus plus `analyze*`, `snapshot*` and friends — with identical lines, `0 errors` and
+  the same `N` per file (349 988 counted tests). Nothing dcc-specific.
+* The 42 that still execute nothing are properties of the tests: they run only when a
+  feature is **absent** (`ifcapable !wal`, `!vtab`, `!crashtest`, `!update_delete_limit`,
+  `!scanstatus`, `!8_3_names`, `!memorymanage`, …), or need ICU (headers not installed
+  here) or `SQLITE_ENABLE_STMT_SCANSTATUS` (`scanstatus1/2`).
+* Totals at `-O2` for `test/*.test`: **1 121 of 1 183 files** (94.7 %) execute at least one
+  real assertion under a dcc-built fixture and produce gcc's result lines — **1 327 745**
+  counted tests. The 62 without assertions are the 53 feature-off files plus the 9 not
+  judgeable. `ext/session` adds its own 44-file family with the session fixture: 42
+  execute real cases (17 973 tests), all identical; `changesetfuzz1` and `sessiondiff`
+  stop at `ifcapable`.
+* Cost, for the record: with FTS5 in the set, dcc's `-O2` compile of `sqlite3.c` reached
+  6.8 GB RSS and the OOM killer took it (`anon-rss 6822920kB`), so FTS5 is not in the wide
+  set — none of the 95 `fts*` files needs it. With FTS3/FTS4 the same TU peaks at 3.05 GB
+  (gcc: 0.37 GB).
+* `-O3` reproduces `-O2` file for file. `-O0`/`-O1` are not covered at tree scale: an
+  `-O0` pass was stopped after 186 files (166 identical, 19 feature-off, 1 no-tests) to
+  free the machine for the wide-feature build.
+
 ## 5. Performance (current build)
 
 Clean rebuild per level on an otherwise idle 4-core host, `bash`'s `EPOCHREALTIME`.
@@ -604,6 +694,20 @@ LEVELS="0 1 2 3" bash ~/dcc/scripts/check_sqlite_verify.sh
 #     expect RESULT: PASS (30 checks); a missing musl toolchain is a SKIP, not a pass.
 bash ~/dcc/scripts/check_shared_object.sh
 
+# 4d. SQLite: every executable test file, one process per file (§4.6)
+#     1 183 files, ~48 min at -O2; expect RESULT: PASS, and NO-CAP only for files whose
+#     ifcapable gate is off (listed by verdict in results.tsv, not counted as passes).
+LEVELS="2" bash ~/dcc/scripts/check_sqlite_allfiles.sh
+
+# 4e. §4.6's wide-feature fixture: recovers the ifcapable-off files (FTS3/4, STAT4, …)
+#     Recompiles the 10 of 88 TUs whose text mentions a capability macro, then reruns
+#     the NO-CAP list from 4d against the new pair of fixtures.
+OUT=/tmp/sqlite_wide bash ~/dcc/scripts/build_sqlite_wide_fixture.sh
+FILES=$(awk -F'\t' '$5=="NO-CAP"{printf "%s ", $2}' /tmp/sqlite_allfiles/results.tsv |
+        tr ' ' '\n' | grep -v -E 'test/(win32|shell)' | tr '\n' ' ')
+SQ_RUN=/tmp/sqlite_wide/run OUT=/tmp/sqlite_allfiles_wide FILES="$FILES" \
+    FILE_TIMEOUT=300 bash ~/dcc/scripts/check_sqlite_allfiles.sh
+
 # 5. Performance (§5)
 ITERATIONS=5 bash ~/dcc/scripts/bench_lua_sqlite.sh
 ```
@@ -611,14 +715,17 @@ ITERATIONS=5 bash ~/dcc/scripts/bench_lua_sqlite.sh
 ## 7. What is not verified
 
 The list below is a boundary of **coverage** or of *evidence scope*, not a known break;
-§4.4 and §4.5 give the evidence for everything that *has* run. The final bullets record
-defects these runs did find — all fixed and pinned by regression cases.
+§4.4, §4.5 and §4.6 give the evidence for everything that *has* run. The final bullets
+record defects these runs did find — all fixed and pinned by regression cases.
 
-- 19 of the tree's 1 196 `.test` files are executed as complete files with byte-identical
-  result lines (§4.5) — `select1..5` (470 tests), twelve `mmap`/`wal`/`where`/`join`/
-  `index` samples (1 606) and `session1`/`session3` (226) — **2 302 tests** in total. The
-  remaining 1 177 files are covered only by `quick.test`'s failing-name set (§4.4), not
-  file by file.
+- **1 121 of the tree's 1 183 executable `test/*.test` files** (all but the 13 runners) are
+  executed as complete files at `-O2` with gcc's result lines (§4.6): 1 000 under the
+  official recipe — 998 identical, 2 unstable with gcc against itself — and 121 more under
+  a wide-feature fixture that turns `fts*`/`analyze*`/`snapshot*` on. That is 1 327 745
+  counted tests, plus `ext/session`'s 42 files (17 973). The 62 that remain are 53
+  feature-off files (`ifcapable` stops them before the first assertion) and 9 that stop
+  without a summary line under gcc as well; §4.6 names both sets and the reason for each.
+  §4.5's nineteen-file, 2 302-test block stays as the four-level byte-for-byte subset.
 - `quick.test` is **not** a blanket exclusion of the family tests: its
   `permutations.test` list `allquicktests` *includes* `mmap1..3`, `wal2`, `wal3` and
   `wal9` (they are inside the 618 691 count), and §4.5 runs all six end to end. What it
@@ -628,8 +735,9 @@ defects these runs did find — all fixed and pinned by regression cases.
   `SQLITE_ENABLE_SESSION`/`SQLITE_ENABLE_PREUPDATE_HOOK` (`main.mk` gives those only to
   the shell's `SHELL_OPT`), so `session1..9` stop at `ifcapable !session` without
   executing a case — under gcc as well. §4.5 rebuilds the four TUs that carry the switch
-  and runs two of the nine as complete files; the other seven and the heavy variants are
-  not run.
+  and runs two of the nine as complete files at four levels; §4.6 later runs all 44
+  `ext/session/*.test` files with that fixture: 42 execute real cases (17 973 tests,
+  identical lines), `changesetfuzz1`/`sessiondiff` stop at `ifcapable`.
 - `speedtest1`'s `rtree`/`json`/`star` testsets carry only the weaker §4.5 criterion
   (identical step sequence, identical final-database `.dump` hash, `integrity_check =
   ok`, `--size 10`). `--verify` cannot score them: `json`/`star` print the empty hash and
@@ -644,8 +752,9 @@ defects these runs did find — all fixed and pinned by regression cases.
   linker still cannot emit a loadable `.so` (`-fbuiltin-linker -shared` is `E0320`).
 - The SQLite `-O0…-O3` row in §4 is a *smoke query* on the amalgamation shell: identical
   output on one query is not a correctness claim. SQLite correctness rests on §4.4
-  (complete `quick.test`, failing-name sets) plus §4.5 (2 302 complete-file tests, one
-  workload hash, three non-`--verify` testsets).
+  (complete `quick.test`, failing-name sets) plus §4.5 (2 302 complete-file tests at four
+  levels, one workload hash, three non-`--verify` testsets) and §4.6 (1 121 of 1 183 files
+  at `-O2`, reproduced at `-O3`).
 - `test/evidence/` and `sqllogictest` do not exist in this workflow: the former is absent
   from the 3.54.0 release and the latter is a separate project. Nothing in §4.5 stands in
   for them beyond the files above.
@@ -676,7 +785,8 @@ defects these runs did find — all fixed and pinned by regression cases.
 - The `recoverfault` OOM cases fail under the reference compiler too, so they say nothing
   about dcc; `zipfile-25.0` is a host zlib behaviour difference.
 - Deep-corpus evidence: paths A/B/B-full cover the Lua official suite; the SQLite side is
-  the complete `quick.test` above (all four levels), the 2 302 complete-file tests of
-  §4.5, and the upstream `speedtest1` workload in four configurations
-  (`main,cte,orm,fp` under `--verify`, plus `rtree`/`json`/`star` without it), whose
-  timing is the §5 SQLite row.
+  the complete `quick.test` above (all four levels), the complete-file sweeps of §4.5 and
+  §4.6 (1 121 of 1 183 files at `-O2`, reproduced file for file at `-O3`, plus `ext/session`
+  and the 19 four-level files), and the upstream `speedtest1` workload in four
+  configurations (`main,cte,orm,fp` under `--verify`, plus `rtree`/`json`/`star` without
+  it), whose timing is the §5 SQLite row.
