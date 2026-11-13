@@ -881,21 +881,40 @@ impl X86_64Opcode {
                         None => return None,
                     };
                     let is_b64 = matches!(width, Width::B64);
-                    let is_b32 = matches!(width, Width::B32);
-                    if !is_b64 && !is_b32 {
+                    let is_b16 = matches!(width, Width::B16);
+                    let is_b8 = matches!(width, Width::B8);
+                    if !is_b64 && !matches!(width, Width::B32) && !is_b16 && !is_b8 {
                         return None;
                     }
-                    // opcode: reg <- r/m 形态 (03/0B/23/2B/33/3B).
-                    let opcode: u8 = match op {
-                        AluOp::Add => 0x03,
-                        AluOp::Or => 0x0B,
-                        AluOp::Adc => 0x13,
-                        AluOp::Sbb => 0x1B,
-                        AluOp::And => 0x23,
-                        AluOp::Sub => 0x2B,
-                        AluOp::Xor => 0x33,
-                        AluOp::Cmp => 0x3B,
-                        AluOp::Test => unreachable!(),
+                    // opcode: reg <- r/m 形态 (B8: 02/0A/12/1A/22/2A/32/3A,
+                    // 其余宽度: 03/0B/13/1B/23/2B/33/3B).
+                    // B16/B8 曾被直接拒绝 → 调用点落回旧兜底, `add ax,[rsp+4]`
+                    // 被错编成 `mov ax,[rsp]`（_Complex short 的 `y + 1` 实部
+                    // 恒原值, struct-by-value-11..13 abort）。
+                    let opcode: u8 = if is_b8 {
+                        match op {
+                            AluOp::Add => 0x02,
+                            AluOp::Or => 0x0A,
+                            AluOp::Adc => 0x12,
+                            AluOp::Sbb => 0x1A,
+                            AluOp::And => 0x22,
+                            AluOp::Sub => 0x2A,
+                            AluOp::Xor => 0x32,
+                            AluOp::Cmp => 0x3A,
+                            AluOp::Test => unreachable!(),
+                        }
+                    } else {
+                        match op {
+                            AluOp::Add => 0x03,
+                            AluOp::Or => 0x0B,
+                            AluOp::Adc => 0x13,
+                            AluOp::Sbb => 0x1B,
+                            AluOp::And => 0x23,
+                            AluOp::Sub => 0x2B,
+                            AluOp::Xor => 0x33,
+                            AluOp::Cmp => 0x3B,
+                            AluOp::Test => unreachable!(),
+                        }
                     };
                     let mut rex: u8 = 0x40;
                     if is_b64 {
@@ -907,7 +926,9 @@ impl X86_64Opcode {
                     if base >= 8 {
                         rex |= 0x01;
                     }
-                    let need_rex = is_b64 || *dst_idx >= 8 || base >= 8;
+                    let need_high_byte = is_b8 && (*dst_idx >= 4 || base >= 4);
+                    let need_rex =
+                        is_b64 || *dst_idx >= 8 || base >= 8 || need_high_byte;
                     // disp 长度: base=rbp(5)/r13(13) mod=00 → rip-relative, 需 disp=0 时走 mod=01.
                     // base=rsp(4) 在本分支不产 SIB (rm=100 在 mod=00 是 SIB 标记) ⇒ 同样要 disp.
                     let disp = mem.disp;
@@ -922,6 +943,9 @@ impl X86_64Opcode {
                     let rm_field = base & 7;
                     let modrm = (modrm_mod << 6) | ((*dst_idx & 7) << 3) | rm_field;
                     let mut out = Vec::with_capacity(12);
+                    if is_b16 {
+                        out.push(0x66);
+                    }
                     if need_rex {
                         out.push(rex);
                     }
@@ -5624,13 +5648,28 @@ mod tests {
 
     #[test]
     fn cvttss2si_r8d_xmm0_b32_highreg() {
-        // cvttss2si r8d, xmm0: F3 41 0F 2C C0 (REX.B for r/m=r8)
+        // cvttss2si r8d, xmm0: F3 44 0F 2C C0.
+        // 0F 2C 的 ModRM.reg 是 GPR 目的操作数 ⇒ 扩展比特是 REX.R（0x44）；
+        // 旧期望写的是 REX.B（0x41），那实际编出 `cvttss2si %xmm8,%eax`。
         let o = X86_64Opcode::Cvt2Sd {
             to_xmm: false,
             width: SimdWidth::SS,
             gpr_64: false,
             dst: reg(8, Width::B32),
             src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x44, 0x0F, 0x2C, 0xC0]));
+    }
+
+    #[test]
+    fn cvttss2si_eax_xmm8_b32_highsrc() {
+        // cvttss2si eax, xmm8: F3 41 0F 2C C0（r/m 侧扩展 ⇒ REX.B）
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: false,
+            width: SimdWidth::SS,
+            gpr_64: false,
+            dst: reg(0, Width::B32),
+            src: xmm(8),
         };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x41, 0x0F, 0x2C, 0xC0]));
     }

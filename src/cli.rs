@@ -1441,6 +1441,12 @@ fn is_known_f_option(opt: &str) -> bool {
         // `-fplan9-extensions`：Plan 9 的嵌套 struct/匿名字段写法，内核仅在
         // `tools/` 一处用（且那一处并不依赖该旗标才能解析），接受不实现不报警。
         "-fplan9-extensions",
+        // `-finline-stringops[=memcpy|memcmp|memmove|memset|strlen...]`：要求把
+        // 指定 stringop 内联展开（消除对库函数的调用）。dcc 不实现 stringop 内联，
+        // 正确性不受影响（库调用本就对），只影响 gcc.dg inline-mem-* 的 dg-final
+        // `scan-assembler-not` 断言。它是已知选项而非未知旗标，不该每编译一个
+        // 用例就刷两条 "unknown -f option ignored"。
+        "-finline-stringops",
     ];
     known_prefixes
         .iter()
@@ -2690,6 +2696,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-pie"
             | "-no-pie"
             | "-pthread" => {}
+            // `-save-temps[=obj|cwd]`：gcc 驱动的“保留中间文件”开关。dcc 的中间
+            // 产物由驱动按需在临时目录生成, 不落构建目录, 没有对应语义; 但 gcc.dg
+            // 的 inline-mem-* 系列在 dg-options 里普遍携带它 (为配合 dg-final 的
+            // scan-assembler 检查), 构建系统也常见。按“已知但无效果”接受, 不当作
+            // 未知旗标报错——以前直接 unknown flag, inline-mem-cpy/cmp/cpy-cmp 三个
+            // 用例在编译阶段就被拒, 根本没机会跑它们真正的运行期主体。
+            "-save-temps" | "-save-temps=obj" | "-save-temps=cwd" => {}
             // ftrace instrumentation flags
             "-pg" => ftrace_mode = FtraceMode::MCount,
             "-mfentry" => ftrace_mode = FtraceMode::FEntry,

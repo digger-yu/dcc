@@ -6705,8 +6705,19 @@ impl Codegen {
             "__builtin_unwind_init" => true,
             // __builtin_printf / __builtin_fprintf / __builtin_sprintf / __builtin_snprintf:
             // 转发到 libc (同 __builtin_strcpy 等模式)
-            "__builtin_printf" | "__builtin_fprintf" | "__builtin_sprintf"
-            | "__builtin_snprintf" => {
+            //
+            // v 家族（vprintf/vfprintf/vsprintf/vsnprintf）同路：`va_list` 在 x86_64
+            // 上是 `__va_list_tag[1]`，按参数退化为指针传递，与 libc 原型一致。
+            // gcc.dg 的 `tree-ssa/builtin-sprintf.c` 直接用 `__builtin_vsprintf`
+            // 走一遍格式化核心，缺这一族就是 E0018。
+            "__builtin_printf"
+            | "__builtin_fprintf"
+            | "__builtin_sprintf"
+            | "__builtin_snprintf"
+            | "__builtin_vprintf"
+            | "__builtin_vfprintf"
+            | "__builtin_vsprintf"
+            | "__builtin_vsnprintf" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 // 通过 emit_sysv_call 转发: 内含参数暂存 (staging) 与 16 字节
                 // 栈对齐, 避免后续参数求值破坏已就位的寄存器参数 (如

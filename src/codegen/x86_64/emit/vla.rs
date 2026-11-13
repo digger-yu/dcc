@@ -261,6 +261,28 @@ impl Codegen {
         // 对齐 rsp 到 16 字节 (已经是 16 对齐的, 因为 rax 是 16 对齐的)
     }
     pub(crate) fn gen_vm_member_offset(&mut self, ty: &Type, field_name: &str, dst: u8) -> bool {
+        // 诊断（`DCC_TRACE_VM=<字段名子串>`，空值 = 全部）：记录 VM struct
+        // 成员访问究竟走了运行时偏移还是退回静态偏移，以及退回的原因。
+        // 只写 stderr、不进产物；未设置环境变量时零副作用。
+        let trace = std::env::var("DCC_TRACE_VM").ok().filter(|p| {
+            p.is_empty() || field_name.contains(p.as_str())
+        });
+        if let Some(p) = &trace {
+            let tag = match ty {
+                Type::Struct(t, _, _, packed) | Type::Union(t, _, _, packed) => {
+                    format!("{t} packed={packed}")
+                },
+                _ => "<非记录类型>".to_string(),
+            };
+            eprintln!(
+                "[VM] field={} ty={} slot={:?} has_vla={}",
+                field_name,
+                tag,
+                self.vm_size_slot(ty),
+                ty.has_vla()
+            );
+            let _ = p;
+        }
         let fields = match ty {
             Type::Struct(_, fields, _, false) => fields,
             _ => return false,
@@ -278,15 +300,33 @@ impl Codegen {
             // 目标在首个 VLA 字段之前: 静态前缀编译期正确
             return false;
         }
+        // 目标若是位域, 与它同 `offset` 的前驱位域共享一个存储单元:
+        // 偏移只能算到**单元起点**, 不能越过。`char d[n]; int a:3, b:17,
+        // c:12;` 里 a/b/c 静态布局的 offset 相同 (同一 4 字节单元), 访问 b
+        // 时若按字段逐个 +sizeof(int) 累加, 得到的是单元末尾的下一个单元
+        // (n=8 时 12 而非 8)。anchor = 该单元的第一个位域。
+        let mut anchor = tf_idx;
+        while anchor > fv_idx
+            && fields[anchor].bit_width.is_some()
+            && fields[anchor - 1].bit_width.is_some()
+            && fields[anchor - 1].offset == fields[anchor].offset
+        {
+            anchor -= 1;
+        }
         // 累计器避开 dst (dst 持基址, 最后 add dst, acc 不能自加)
         let acc: u8 = if dst == 10 { 9 } else { 10 };
-        // 阶段 1: 按声明顺序求值 [fv, tf) 内各 VLA 字段 sizeof 到栈槽
+        // 阶段 1: 按声明顺序求值 [fv, anchor) 内各 VLA 字段 sizeof 到 scratch 槽
         let mut slots: Vec<i64> = Vec::new();
-        for f in fields.iter().take(tf_idx).skip(fv_idx) {
+        let mut slot_idx = 0usize;
+        for f in fields.iter().take(anchor).skip(fv_idx) {
             if !f.ty.has_vla() {
                 continue;
             }
-            let slot = self.alloc_sret_slot(8);
+            // 按序号复用真正局部变量（晚分配带, 帧内持久）:
+            // 旧实现每个站点 `alloc_sret_slot(8)`，而 sret 水位在语句边界
+            // 会 restore —— 同一表达式树里十几次成员访问就撑爆预算（E1128）。
+            let slot = self.vm_off_slot(slot_idx);
+            slot_idx += 1;
             self.gen_sizeof_runtime(&f.ty, 11);
             self.store_stack(11, slot);
             slots.push(slot);
@@ -296,7 +336,7 @@ impl Codegen {
         let fa0 = fv.field_align.unwrap_or(fv.ty.align()).max(1);
         self.mov_imm(acc, ((fv.offset + fa0 - 1) & !(fa0 - 1)) as i128);
         let mut slot_iter = slots.iter();
-        if tf_idx != fv_idx {
+        if anchor != fv_idx {
             let s0 = *slot_iter.next().unwrap();
             self.load_stack(11, s0);
             // add acc, r11: AluRm reg,reg (r/m=acc, reg=r11) 走 encode 分支 B
@@ -310,7 +350,7 @@ impl Codegen {
         for f in fields
             .iter()
             .skip(fv_idx + 1)
-            .take(tf_idx.saturating_sub(fv_idx + 1))
+            .take(anchor.saturating_sub(fv_idx + 1))
         {
             let fa = f.field_align.unwrap_or(f.ty.align()).max(1);
             if fa > 1 {
@@ -318,6 +358,14 @@ impl Codegen {
                 // add acc, imm32 / and acc, ~imm32: 走 alu_rm_reg_imm32_b64 (恒 0x81 id)
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, acc, m as i64));
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, acc, (!m as u64) as i64));
+            }
+            // 与目标位域同存储单元的成员: 单元整体由目标处的 align_up 定位,
+            // 不再计入自己的容器大小 (否则同一个 4 字节单元被算多次)。
+            if f.bit_width.is_some()
+                && fields[anchor].bit_width.is_some()
+                && f.offset == fields[anchor].offset
+            {
+                continue;
             }
             if f.ty.has_vla() {
                 let s = *slot_iter.next().unwrap();
@@ -333,10 +381,10 @@ impl Codegen {
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, acc, sz));
             }
         }
-        // 目标字段偏移 = align_up(acc, tf 对齐)
-        let tfa = fields[tf_idx]
+        // 目标字段偏移 = align_up(acc, 单元首字段对齐)
+        let tfa = fields[anchor]
             .field_align
-            .unwrap_or(fields[tf_idx].ty.align())
+            .unwrap_or(fields[anchor].ty.align())
             .max(1);
         if tfa > 1 {
             let m = (tfa - 1) as i128;
@@ -351,6 +399,20 @@ impl Codegen {
             acc,
         ));
         true
+    }
+    /// VM 成员偏移阶段 1 的 scratch 槽（按序号复用, 名字 `__vmoff_<i>`）。
+    ///
+    /// 不用 `alloc_sret_slot`：sret 水位在语句边界会 restore，跨语句复用会
+    /// 被后续分配覆盖；作为真正的局部变量登记进晚分配带后，槽在本函数内持久，
+    /// 且全函数只占 `i` 个（与成员访问次数无关）。晚分配带的预算由
+    /// `func_setup::LateNeed::vm_off_slots` 提供。
+    fn vm_off_slot(&mut self, idx: usize) -> i64 {
+        while self.vm_off_scratch.len() <= idx {
+            let name = format!("__vmoff_{}", self.vm_off_scratch.len());
+            let slot = self.register_var(&name, &Type::Long);
+            self.vm_off_scratch.push(slot);
+        }
+        self.vm_off_scratch[idx]
     }
     pub(crate) fn gen_vm_struct_bind(&mut self, sd: &StructDef, is_union: bool) {
         // struct 尾部对齐: packed 布局时字段 align 全为 1, 推导值

@@ -7284,7 +7284,15 @@ impl<'a> Parser<'a> {
         }
         // pre_signed: 第一个 loop 中看到了 signed, 若后面不是类型关键字
         // (如 `signed x`), 则 signed 等价于 int, 立即返回.
-        if pre_signed && !self.is_peek_type_start_after_unsigned() {
+        //
+        // `base.is_none()`: 第一个 loop 已经从类型关键字本身确定过基类型时
+        // （`signed _BitInt(1)` 的 `_BitInt` 臂把 base 设成 `Char`），signed 并不是
+        // “单独出现”，不能把基类型改写成 int。漏了这个判据的实测现场是
+        // `torture/bitint-96.c`：形参 `signed _BitInt(1) b[21]` 的元素类型变成
+        // 4 字节 int（步长 4、`movsxd` 4 字节装载），而 `_BitInt(1)` / `const
+        // _BitInt(1)` 是 1 字节 `Char`，同一个数组的三种拼写走出两种布局，bar()
+        // 的结果全错。C23 里 `signed _BitInt(N)` 与 `_BitInt(N)` 是同一个类型。
+        if pre_signed && base.is_none() && !self.is_peek_type_start_after_unsigned() {
             base = Some(Type::Int); // signed alone = signed int
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
@@ -13195,6 +13203,12 @@ impl<'a> Parser<'a> {
                                     | "__builtin_fprintf"
                                     | "__builtin_snprintf"
                                     | "__builtin_vsnprintf"
+                                    // v 家族（`va_list` 版）：实现在
+                                    // `codegen::x86_64::special::builtins`，全部转发 libc。
+                                    // 返回 int 的格式化输出长度，与上面非 v 版本同型。
+                                    | "__builtin_vprintf"
+                                    | "__builtin_vfprintf"
+                                    | "__builtin_vsprintf"
                                     | "__builtin_abs"
                                     | "__builtin_labs"
                                     | "__builtin_llabs"

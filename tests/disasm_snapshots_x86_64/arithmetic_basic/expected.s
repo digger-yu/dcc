@@ -68,20 +68,17 @@ ret
 arith_unsigned:
 push %r13
 mov %rsp,%r13
-sub $0x60,%rsp
-mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x48(%r13)
-mov %rsi,-0x50(%r13)
+sub $0x40,%rsp
+mov %rdi,-0x28(%r13)
+mov %rsi,-0x30(%r13)
 mov %edi,%eax
 shl $0x4,%rax
-mov %rax,%rbx
+mov %eax,%eax
+mov %rax,-0x10(%r13)
 mov %esi,%r8d
 shr $0x4,%r8
-or %r8d,%ebx
-mov %rbx,%rax
+or %r8d,%eax
 mov %eax,%eax
-mov -0x10(%r13),%rbx
-add $0x60,%rsp
+add $0x40,%rsp
 pop %r13
 ret

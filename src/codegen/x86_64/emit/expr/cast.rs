@@ -193,18 +193,19 @@ impl Codegen {
         // 动作与下面 `_Complex → _Complex` 同源: 按目标复数类型赋值一次
         // (标量源的虚部补 +0 由 `gen_aggregate_assign_to` 承担, 与 `=` 共用),
         // 再按 complex rvalue 约定交付 (rax = 复数结果带地址)。
-        if let Type::Complex(ref dst_c) = ty {
-            // 只接管浮点内型的目标: 整数内型 `_Complex int` 的 rvalue 交付走
-            // 既有的 GP 双字约定 (`rax` 即值对), 与复数结果带不是同一条轴。
+        if let Type::Complex(ref _dst_c) = ty {
+            // 标量 → 复数对所有内型同一条轴（含整数内型 `_Complex short/int`）：
+            // 值语义都是「实部 = 转换后的标量、虚部 = +0」，交付都是同一份
+            // complex rvalue 约定（`result_off` + rax = 带地址，见 aggregate.rs
+            // 的整数内型分支）。旧写法只接管浮点内型，整数内型落到
+            // `gen_same_size_bitcast`：它只是把标量的字节抄进临时槽再按 2×inner
+            // 宽读回 —— 虚部是槽里的残值（`(_Complex short)1` 实部 1、虚部垃圾），
+            // 且该路径要向量临时带，在没有向量类型的函数里直接 panic
+            // （compat/struct-by-value-12_x 的 `init(&g, (_Complex short)1)` 即此）。
             let src_is_scalar = (Self::is_integer_type(&src_ty)
                 && !matches!(src_ty, Type::Int128 | Type::UInt128))
                 || matches!(src_ty, Type::Float | Type::Double | Type::LongDouble);
-            if src_is_scalar
-                && matches!(
-                    dst_c.base,
-                    Type::Float | Type::Double | Type::LongDouble
-                )
-            {
+            if src_is_scalar {
                 // 目标直接就是帧底的**复数结果带** (`complex_result_off`): 它本来
                 // 就是本函数内 complex rvalue 的交付位置 (binop/字面量/Call 返回
                 // 都写这里), 不需要再申请一个临时槽再搬一次。
@@ -246,6 +247,15 @@ impl Codegen {
                 _ => None,
             };
             if let Some(si) = src_inner {
+                if si == dst_c.base {
+                    // 同一内型: 无需任何转换, 直接按 complex rvalue 约定交付
+                    // (gen_expr 已把分量写到 result_off、rax = 带地址)。
+                    // 旧写法落到 `gen_same_size_bitcast`: 那里拿**向量临时带**
+                    // 当重铸槽, 在没有向量类型的函数里直接触发 `vec_temp`
+                    // 断言 (实测 `(CI)(6+8i)` 编译期 panic)。
+                    self.gen_expr(e, dst);
+                    return;
+                }
                 if si != dst_c.base {
                     let slot = self.alloc_sret_slot(ty.size().max(16));
                     let cdst = AggDst::Local {

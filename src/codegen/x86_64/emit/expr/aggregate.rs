@@ -154,6 +154,31 @@ impl Codegen {
         !matches!(lv, Expr::Ident { .. }) && Self::assign_needs_whole_copy(ty, rhs)
     }
 
+    /// 整数内型 `_Complex`（`_Complex short/int/long` 等，非浮点内型）的 **rvalue**：
+    /// `gen_expr` 交付的是帧底复数带的**地址**（值在 `[rax]`），而不是值对。
+    ///
+    /// 这是 complex 值模型与聚合值模型的交叉点：浮点内型复数走 xmm0/xmm1 值通道，
+    /// 整数内型复数没有 SSE 通道，而两个 GP 分量又无法用一条标量 store 承载，
+    /// 统一落到 `complex_result_off()` 的帧带（见本文件整数内型 Complex 分支与
+    /// `finish_complex_assign_value`）。消费侧（传参 / 聚合赋值源 / 返回）必须
+    /// 按「内存交付」读值；当成 rax=值对使用会拿到带地址本身
+    /// （compat/struct-by-value-12 的 `check(g, (_Complex short)1)` 即此）。
+    ///
+    /// lvalue 形态（Ident/Member/Index/Deref）不在此列：调用点的 lvalue 分支
+    /// 直接按变量槽取地址，不经过复数带。
+    pub(crate) fn is_int_complex_rvalue(e: &Expr) -> bool {
+        let e = Self::skip_noop_casts(e);
+        matches!(e.ty(), Type::Complex(ref c)
+            if !matches!(c.base, Type::Float | Type::Double | Type::LongDouble | Type::Float128))
+            && !matches!(
+                e,
+                Expr::Ident { .. }
+                    | Expr::Member { .. }
+                    | Expr::Index { .. }
+                    | Expr::Deref { .. }
+            )
+    }
+
     /// 这条聚合赋值是否必须走「整块拷贝」通道（而不是把 rax 低 8 字节标量 store 进目标）。
     ///
     /// 两条轴只要有一条成立就必须整块搬:
@@ -522,6 +547,36 @@ impl Codegen {
         }
         // 1. 获取源地址到 rsi (复数分量转换判据见函数开头的
         // `complex_needs_component_convert`, 与上方 Call 快路径同源)
+        let trace_agg = std::env::var_os("DCC_TRACE_AGG").is_some();
+        if trace_agg {
+            let dst_desc = match dst {
+                AggDst::Local { off, .. } => format!("Local({off})"),
+                AggDst::Global(n) => format!("Global({n})"),
+                AggDst::Indirect { addr_slot } => format!("Indirect({addr_slot})"),
+            };
+            let r_name = match r {
+                Expr::Ident { name, .. } => format!(" name={}", name.name),
+                Expr::Member { field, .. } => format!(" field={}", field.name),
+                _ => String::new(),
+            };
+            eprintln!(
+                "[agg] dst={} dst_ty={:?} sz={} r_disc={:?} r_ty={:?}{} ident={} deref={} index={} member={} assign={} stmt={} cond={} call={}",
+                dst_desc,
+                dst_ty,
+                sz,
+                std::mem::discriminant(r),
+                r.ty(),
+                r_name,
+                matches!(r, Expr::Ident { .. }),
+                matches!(r, Expr::Deref { .. }),
+                matches!(r, Expr::Index { .. }),
+                matches!(r, Expr::Member { .. }),
+                matches!(r, Expr::Assign { .. }),
+                matches!(r, Expr::StmtExpr { .. }),
+                matches!(r, Expr::Cond { .. }),
+                matches!(r, Expr::Call { .. }),
+            );
+        }
         let got_src = if call_sret_handled {
             true
         } else if complex_needs_component_convert {
@@ -558,7 +613,17 @@ impl Codegen {
                 Expr::Index { .. } | Expr::Member { .. } => self.gen_lvalue_addr(r, 6),
                 // 链式聚合赋值 / 语句表达式块值: gen_expr 约定返回聚合
                 // 目标地址, 直接作源 (20070919-1: a = ({ ...; p[3] = b; }))
-                Expr::Assign { .. } | Expr::StmtExpr { .. } => {
+                //
+                // 向量目标不走本臂: 向量的值交付约定是「值物化在向量临时槽 0」,
+                // 不是 `rax = 缓冲地址`。`gen_expr` 对向量求值后 rax 只是逐元素
+                // 装载残留的**最后一个元素值** (gen_vector_load_into_slot 的
+                // Ident 分支末尾不设 rax), 把残值当源地址会拿它当指针 rep movsq
+                // —— torture pr94482: 内联后的 `v = ({ ...; z.j; })` 即此形状,
+                // rsi 取到末元素 1729 当地址, SIGSEGV。落到下方 `!got_src` 的
+                // Vector 分支, 由那里统一按「gen_expr + 槽 0」取源。
+                Expr::Assign { .. } | Expr::StmtExpr { .. }
+                    if !matches!(dst_ty, Type::Vector(_, _)) =>
+                {
                     self.gen_expr(r, Self::EVAL_BASE);
                     self.mov(6, 0); // rsi = rax (聚合源地址)
                     true
@@ -567,7 +632,11 @@ impl Codegen {
                 // 把选中支整块物化进帧内临时槽, rax = 槽地址, 直接当源拷贝。
                 // 落到下面通用物化分支只会拷到 rax:rdx 的前 16 字节 (其中
                 // rdx 从未装载), sqlite3 的 `tok = (a.n==0 ? a : b);` 即此。
-                Expr::Cond { .. } if Self::rvalue_is_buffer_addr(r) => {
+                // 向量目标同上一臂, 一律交给 `!got_src` 的 Vector 分支。
+                Expr::Cond { .. }
+                    if !matches!(dst_ty, Type::Vector(_, _))
+                        && Self::rvalue_is_buffer_addr(r) =>
+                {
                     self.gen_expr(r, Self::EVAL_BASE);
                     self.mov(6, 0); // rsi = rax (临时槽地址)
                     true
@@ -575,6 +644,9 @@ impl Codegen {
                 _ => false,
             }
         };
+        if trace_agg {
+            eprintln!("[agg] got_src={}", got_src);
+        }
         if !got_src {
             if matches!(dst_ty, Type::Vector(_, _)) {
                 self.gen_expr(r, Self::EVAL_BASE);
@@ -2279,7 +2351,19 @@ impl Codegen {
         {
             return false;
         }
-        let slot_off = self.vector_temp_base(2, src_ty.size().max(to.size()));
+        // 重铸中转槽: 向量参与时走向量临时带; 纯 complex 参与时走帧底复数
+        // 物化带 (CX_FRAME_BAND)。complex 类型不进 `LateNeed::max_vec_bytes`,
+        // 拿向量带当复合体 scratch 会触发 `vec_temp` 的 fail-closed 断言 ——
+        // 实测 `(_Complex int)some_complex` 在无向量函数里编译期 panic。
+        let involves_vector = matches!(src_ty, Type::Vector(_, _))
+            || matches!(to, Type::Vector(_, _));
+        let slot_off = if involves_vector {
+            self.vector_temp_base(2, src_ty.size().max(to.size()))
+        } else {
+            // 帧底复数带起点: 复杂 rvalue 单次物化 32B < 48B 带宽, 一次
+            // 位重铸只用一个槽, 不与 binop 工作区重叠。
+            self.complex_result_off()
+        };
         self.materialize_bits_to_slot(from, slot_off);
         self.load_bits_from_slot(to, slot_off, dst);
         // 向量 bitcast 后, 结果在 slot 0 (temp slot), 需返回地址给 rax —
@@ -2328,10 +2412,23 @@ impl Codegen {
                 // 改用 r10, 否则 add dst,scratch 变自加 (r11+=r11)
                 let tmp: u8 = if dst == 11 { 10 } else { 11 };
                 let mut acc_open = false;
+                // 声明序上前一字段: 位域共享存储单元的判据 (见 shares_unit)。
+                // 同单元的连续位域 (如 `int a:3, b:17, c:12`) 只占一个容器,
+                // 按字段逐个 +sizeof(int) 会把 4 字节的单元算成 12 字节
+                // (loop-interchange-15: sizeof(struct S) 得 20 而 gcc 得 12,
+                // n=1 时得 16 而 gcc 得 8)。
+                let mut prev: Option<&crate::ast::Field> = None;
                 for f in fields.iter() {
                     let fa = f.field_align.unwrap_or(f.ty.align()).max(1);
+                    // 位域与前一字段同存储单元 (静态布局已把同单元位域归到
+                    // 同一个 `offset`/容器): 本字段不再推进动态偏移。
+                    let shares_unit = f.bit_width.is_some()
+                        && prev.is_some_and(|p: &crate::ast::Field| {
+                            p.bit_width.is_some() && p.offset == f.offset
+                        });
                     if !acc_open {
                         if !f.ty.has_vla() {
+                            prev = Some(f);
                             continue; // 静态前缀: f.offset 编译期正确
                         }
                         // 首个 VLA 字段: dst = f.offset + sizeof(f)
@@ -2345,7 +2442,7 @@ impl Codegen {
                             tmp,
                         ));
                         acc_open = true;
-                    } else {
+                    } else if !shares_unit {
                         // 动态区: dst = align_up(dst, fa) + sizeof(f)
                         if fa > 1 {
                             // add dst, (fa-1); and dst, ~(fa-1): AluRm r64, imm32
@@ -2366,6 +2463,7 @@ impl Codegen {
                             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, dst, f.ty.size() as i64));
                         }
                     }
+                    prev = Some(f);
                 }
                 if !acc_open {
                     // 无 VLA 字段 (不应发生, has_vla 才进来): 静态大小
@@ -2511,6 +2609,52 @@ impl Codegen {
         }
     }
     fn zero_mem(&mut self, off: i64, size: usize) {
+        use crate::codegen::shared::asm_operand::Width as W;
+        use crate::codegen::x86_64::opcode::{NoArgOp, Operand, StackOp, X86_64Opcode};
+        // 大块零填充必须批量。`struct big { int i[0x10000]; } b = {};`
+        // （pr28982b）逐 8B store 是 32768 条指令、目标文件 696KB，gcc 只有
+        // 5.2KB（398 条指令）。`rep stosq` + 尾字节 `rep stosb` 把同一块压成
+        // 两条。阈值 128B（旧实现下 16 条 store）以上才划算。
+        //
+        // `rep stos*` 吃 rax/rcx/rdi：此处可能位于表达式求值中间，三者都压栈
+        // 保护而**不**恢复成 0 以外的假设值；期间不发 rsp 相对寻址（目标一律
+        // r13 相对），push/pop 成对不影响栈上临时值。DF 由 SysV ABI 保证为 0
+        // （与既有 `rep movsb` 同口径，不另发 cld）。
+        const REP_STOS_MIN: usize = 128;
+        if size >= REP_STOS_MIN {
+            let qwords = size / 8;
+            let tail = size - qwords * 8;
+            for r in [0u8, 1, 7] {
+                self.emit_insn(&Insn::new(
+                    X86_64Opcode::Stack {
+                        op: StackOp::Push,
+                        width: W::B64,
+                        dst: Operand::Reg(r, W::B64),
+                    },
+                    &[],
+                ));
+            }
+            self.mov_imm(0, 0i128);
+            self.mov_imm(1, qwords as i128);
+            self.emit_lea_r13(7, off);
+            self.emit_insn(&Insn::noarg(NoArgOp::RepStosq));
+            if tail > 0 {
+                // rdi 已由 rep stosq 前进到块尾；al=0，按字节补齐尾数。
+                self.mov_imm(1, tail as i128);
+                self.emit_insn(&Insn::noarg(NoArgOp::RepStosb));
+            }
+            for r in [7u8, 1, 0] {
+                self.emit_insn(&Insn::new(
+                    X86_64Opcode::Stack {
+                        op: StackOp::Pop,
+                        width: W::B64,
+                        dst: Operand::Reg(r, W::B64),
+                    },
+                    &[],
+                ));
+            }
+            return;
+        }
         let mut o = off;
         let mut rem = size;
         while rem >= 8 {

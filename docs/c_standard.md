@@ -51,7 +51,13 @@ DCC 默认 `-std=gnu11`（与 Linux 7.1 内核一致，见 Documentation/process
 - 枚举底层类型 `enum E : type` — ✅ 已实装 (枚举常量类型=底层类型)
 - 省略 `=` 的大括号初始化 `int x{5}` — ✅ 已实装 (标量/数组/结构体/嵌套)
 - `[[attributes]]` — ✅ 已实装 (解析器静默跳过 `[[deprecated]]`, `[[maybe_unused]]`, `[[nodiscard]]`; 语义处理 `[[unsequenced]]`, `[[reproducible]]` 映射到 always_inline)
-- `_BitInt(N)` — ✅ 已实装 (按宽度映射到标准整数类型 8/16/32/64)
+- `_BitInt(N)` — ⚠️ 部分实装 (按宽度映射到标准整数类型 8/16/32/64)。
+  已知限制: 没有 N 位的截断/回绕 (赋值与 `++`/`--` 按宿主宽度回绕),
+  `__builtin_*_overflow` 也按宿主宽度判溢出; C2Y N3747 的精度传播
+  (如 `0wb + 1wb` 的类型为 `_BitInt(2)`) 未实现。实测
+  `gcc.dg/torture/bitint-97.c`、`pr116135.c` 因此列入
+  `tests/skip/gcc_dg_skip.txt`; 布局/初值/运算类用例 (`bitint-96.c`)
+  正常通过。真支持需要位精确整型表示 (`Type` 携带宽度)。
 - `_BitInt` 字面量后缀 `wb` / `uwb` — ✅ 已实装 (C23 位精确整型常量后缀,
   词法层整串识别, `parse_int_lit` / 预处理器 `#if` 取值均剥离该后缀; 当前
   不区分标准版本, 与 GCC 14 行为一致, GCC 13 及更早不支持)

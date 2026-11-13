@@ -1,18 +1,15 @@
 foo:
 push %r13
 mov %rsp,%r13
-sub $0x60,%rsp
-mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x48(%r13)
+sub $0x40,%rsp
+mov %rdi,-0x30(%r13)
 lea 0x0(%rip),%rax
-mov %rax,%rbx
+mov %rax,-0x10(%r13)
 movslq %edi,%rcx
 lea 0x0(%rip),%r11
 movslq (%r11,%rcx,4),%r8
-add %r8,%rbx
-mov %rbx,%rax
-mov %rax,-0x40(%r13)
+add %r8,%rax
+mov %rax,-0x28(%r13)
 jmp *%rax
 mov $0x2,%eax
 movslq 0x0(%rip),%r8
@@ -33,17 +30,14 @@ pop %rdx
 mov %rcx,%rax
 .Ll_foo_lab0:
 mov $0x0,%eax
-mov -0x10(%r13),%rbx
-<nop padding>
-add $0x60,%rsp
+add $0x40,%rsp
 pop %r13
 ret
 <nop padding>
 main:
 push %r13
 mov %rsp,%r13
-sub $0x50,%rsp
-<nop padding>
+sub $0x30,%rsp
 sub $0x20,%rsp
 mov $0x0,%eax
 mov %rax,0x10(%rsp)
@@ -67,7 +61,6 @@ je <main>
 call <main>
 jmp <main>
 mov $0x0,%eax
-<nop padding>
-add $0x50,%rsp
+add $0x30,%rsp
 pop %r13
 ret

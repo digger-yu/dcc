@@ -10229,9 +10229,18 @@ fn type_has_vla_dim(t: &crate::ast::Type) -> bool {
         // 就是定长。把定长误判成 VLA 的代价是体被判「不可整体搬移」——宿主工具链里
         // sanitizer 注入的 `unsigned int guards[16]` 正是这一臂（见 sanitizer.rs 的
         // `guard_array_decl`），曾经把 `__always_inline` 助手的内联全灭。
-        crate::ast::Type::Array(_, sz) => match sz {
-            ArraySize::Var(e) => !dim_is_const_foldable(e),
-            _ => false,
+        //
+        // **元素类型必须递归**：`struct S { char d[n]; }; struct S A[2];` 的外层
+        // 维度是常量 2，但元素里的 VLA 字段让整个对象仍是变长的（静态 size() 会把
+        // `char d[n]` 退化成 8）。旧写法在 `Const` 臂直接 `=> false`，于是这种数组
+        // 被当定长搬进 caller —— 内联后 `sizeof(struct S)` 被 SSA 折成「只剩位域
+        // 容器」的 4，实测 -O2 的 `loop-interchange-15` 简化版输出 `sizeof=4`
+        // （正确 8/12），同一文件的 `A[j][i].b` 读写偏移也跟着错。
+        crate::ast::Type::Array(elem, sz) => match sz {
+            ArraySize::Var(e) => !dim_is_const_foldable(e) || type_has_vla_dim(&elem.base),
+            // 元素侧用 `has_vla()` 预筛：普通数组（`int tab[100]`）的元素没有
+            // Var 维度时立即返回，不做深递归（内核 TU 的声明数以千计）。
+            _ => elem.base.has_vla() && type_has_vla_dim(&elem.base),
         },
         crate::ast::Type::Ptr(p) => type_has_vla_dim(&p.base),
         crate::ast::Type::Struct(_, fields, _, _) | crate::ast::Type::Union(_, fields, _, _) => {
@@ -15486,10 +15495,17 @@ mod tests {
         };
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 1);
-        let main_body = match &module.source().decls[1] {
-            Decl::Func(f) => f.body.as_ref().unwrap(),
-            _ => panic!("expected main"),
-        };
+        // 内联后 `sq`（static && always_inline）已无引用，DCE 会把它整个删掉，
+        // 因此 `main` 不再固定在下标 1。按名字查找，不假设声明顺序。
+        let main_body = module
+            .source()
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Func(f) if f.name.name == "main" => f.body.as_ref(),
+                _ => None,
+            })
+            .expect("main not found after inlining");
         match &main_body.items[0] {
             BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Int { v: 25, .. }),

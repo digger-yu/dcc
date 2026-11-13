@@ -379,6 +379,13 @@ pub struct LateNeed {
     ap_names: Vec<String>,
     /// 聚合成员赋值的一般 RHS 暂存（固定名，全函数共用一槽）。
     agg_tmp: bool,
+    /// VM struct 成员偏移的运行时 scratch 槽池深度（`__vmoff_<i>` 的最大 `i+1`）。
+    ///
+    /// 发射侧 `gen_vm_member_offset` 阶段 1 要把前置 VLA 字段的 `sizeof` 暂存到帧里，
+    /// 槽按序号复用（`Codegen::vm_off_scratch`），全函数只占这个深度。
+    /// 旧实现每站点 `alloc_sret_slot(8)`，同一表达式树里十几次成员访问就撑爆
+    /// 预算（E1128）—— 那一笔在 sret 带里，而这里登记的是晚分配带的槽。
+    vm_off_slots: i64,
     /// 本函数里出现过的**最大向量字节数**（不是晚分配带的输入，是向量临时槽带的）。
     ///
     /// `vector_temp_base(slot, vec_size)` 把槽按 `slot * round8(vec_size)` 摆放，所以
@@ -1456,9 +1463,11 @@ impl Codegen {
                     + Self::sret_bytes_expr(arr).max(Self::sret_bytes_expr(idx))
             },
             Expr::Member { expr, .. } => {
-                // 含 VLA 字段的聚合成员访问需要若干运行时 `sizeof` 槽（`emit/vla.rs`
-                // 对每个前置 VLA 字段一次 `alloc_sret_slot(8)`）；以前这一笔没人登记，
-                // 靠帧底的无条件预留吸掉（实测 `pr82210.c` 的 `foo`：预算 0B、实际 32B）。
+                // 含 VLA 字段的聚合成员访问的 sret 侧预算。发射侧现在改用了
+                // **晚分配带**的按序号 scratch 池（`Codegen::vm_off_scratch` /
+                // `LateNeed::vm_off_slots`），这里不再有 `alloc_sret_slot` 站点；
+                // 这笔预算保留为过近似（多留不会坏，少留就是 E1128），
+                // 历史依据见 `pr82210.c` 的 `foo`：预算 0B、实际曾要 32B。
                 Self::vla_offset_scratch(&expr.ty()) + Self::sret_bytes_expr(expr)
             },
             Expr::Cond {
@@ -1501,6 +1510,16 @@ impl Codegen {
                         .max()
                         .unwrap_or(0)
             },
+            // 初始化列表 / 复合字面量：`gen_expr_compound_lit` 与声明初值都把
+            // 内容交给 `gen_init_list_at` 展开，那里的分配口径住在
+            // [`Self::sret_bytes_inits`]。漏了这一臂时整棵初始化子树都不进预算
+            // （实测 `torture/builtin-shufflevector-pr123156.c` 的 `func_1`：
+            // 计划 `sret=0`，发射期实际 272B —— 槽落在 sret 区之外，正好压进
+            // 向量带的顶层格，`addr_slot` 被 shufflevector 的 256 字节结果逐字节
+            // 覆盖，`rep movsq` 读到垃圾地址 SIGSEGV）。
+            Expr::CompoundLit { ty, inits, .. } | Expr::InitList { ty, inits, .. } => {
+                Self::sret_bytes_inits(ty, inits)
+            },
             _ => 0,
         };
         // 叶子形态的 `_Complex long double` rvalue 在消费端同样落 32B 物化槽
@@ -1520,6 +1539,92 @@ impl Codegen {
             _ => Self::complex_ld_slot(&e.ty()) + Self::complex_f128_leaf_slot(&e.ty()),
         };
         own + leaf_slot
+    }
+
+    /// 初始化列表（`{…}` 声明初值 / `(T){…}` 复合字面量）在
+    /// `emit/expr/aggregate.rs::gen_init_list_at` 里新增的 sret/物化字节。
+    ///
+    /// 与发射侧逐形对应：
+    /// * struct/union 成员命中「向量字段 / 整块拷贝」那一形时，发射侧先把成员地址
+    ///   存进一个 8B 帧槽（步长 16B）再走 `AggDst::Indirect`；
+    /// * `Indirect` 是 staged 目标，寄存器交付 / 通用 `rax:rdx` 物化的小聚合源
+    ///   还要一个目标宽度的临时槽（`gen_aggregate_assign_to` 的 465 / 1087 两处）；
+    /// * 每个初始化项的值表达式自身（Call / va_arg / 嵌套复合字面量 …）；
+    /// * 嵌套花括号（`InitList`）不走成员地址槽，递归到内层逐项记；
+    /// * 列表内**不回收**（发射侧只在语句 / block-item 边界 save/restore），逐项求和。
+    ///
+    /// 成员/元素类型按值表达式**自己的类型**取，不重走 `field_idx` + designator
+    /// 解析：合法 C 里初始化器与目标成员类型兼容，重写那份解析就是同一事实的第二个
+    /// 出处；形状判据全部复用发射侧真源（`is_aggregate_shape` /
+    /// `value_is_whole_copy` / `rvalue_is_buffer_addr`）。多算只花帧字节，少算是槽重叠。
+    fn sret_bytes_inits(ty: &Type, inits: &[InitItem]) -> i64 {
+        // 标量目标只有第一条初始化项会被求值（`gen_init_list` / `gen_expr_init_list`
+        // 的「首个元素就是要赋的值」），其余项没有发射站点。
+        let aggregate_list = matches!(
+            ty,
+            Type::Array(..) | Type::Vector(..) | Type::Struct(..) | Type::Union(..)
+        );
+        let mut total = 0i64;
+        for (i, item) in inits.iter().enumerate() {
+            if !aggregate_list && i > 0 {
+                break;
+            }
+            let value = match item {
+                InitItem::Expr(e) => e,
+                InitItem::Designated { value, .. } => value,
+            };
+            // 嵌套花括号: `gen_init_list_at` 直接递归展开, 不经过成员地址槽。
+            if let Expr::InitList { inits: nested, .. } = value {
+                total = total.saturating_add(Self::sret_bytes_inits(&value.ty(), nested));
+                continue;
+            }
+            let mut own = Self::sret_bytes_expr(value);
+            if matches!(ty, Type::Struct(..) | Type::Union(..)) {
+                let vty = value.ty();
+                if Self::is_aggregate_shape(&vty)
+                    && (matches!(vty, Type::Vector(_, _))
+                        || Self::value_is_whole_copy(&vty)
+                        || Self::rvalue_is_buffer_addr(value))
+                {
+                    // 成员地址槽 (8B, 步长 16B)。
+                    own = own.saturating_add(Self::sret_slot_bytes(8));
+                    // staged 目标的源物化槽: 内存交付 / 左值形态 / 向量（走向量
+                    // 临时槽, 与 sret 区无关）都不占; 其余（寄存器返回的 Call、
+                    // 通用 `rax:rdx` 物化）各占一个目标宽度的槽。
+                    if !Self::rvalue_is_buffer_addr(value)
+                        && !matches!(
+                            value,
+                            Expr::Ident { .. }
+                                | Expr::Member { .. }
+                                | Expr::Index { .. }
+                                | Expr::Deref { .. }
+                        )
+                        && !matches!(vty, Type::Vector(_, _))
+                    {
+                        own = own.saturating_add(Self::sret_slot_bytes(vty.size() as i64));
+                    }
+                }
+            }
+            // GNU 范围设计符 `[f ... l] = v`：发射侧对范围内**每个**元素各求值
+            // 一次（`gen_init_list_at` 的数组臂），槽不回收 ⇒ 按次数乘。
+            let reps = match item {
+                InitItem::Designated {
+                    designator: Designator::Range(first, last),
+                    ..
+                } if matches!(ty, Type::Array(..)) => match (
+                    crate::const_eval::eval(first),
+                    crate::const_eval::eval(last),
+                ) {
+                    (Ok(f), Ok(l)) if l >= f && f >= 0 => {
+                        i64::try_from(l - f + 1).unwrap_or(i64::MAX).min(1 << 20)
+                    },
+                    _ => 1,
+                },
+                _ => 1,
+            };
+            total = total.saturating_add(own.saturating_mul(reps));
+        }
+        total
     }
 
     /// 含 VLA 字段的聚合类型做一次成员/下标访问要多少帧内偏移暂存。
@@ -2165,11 +2270,19 @@ impl Codegen {
             | E::SizeofExpr { e: x, .. }
             | E::AlignofExpr { e: x, .. }
             | E::VaArg { ap: x, .. }
-            | E::Member { expr: x, .. }
             | E::PostInc { e: x, .. }
             | E::PostDec { e: x, .. }
             | E::PreInc { e: x, .. }
             | E::PreDec { e: x, .. } => Self::late_need_expr(x, need),
+            E::Member { expr: x, field, is_arrow, .. } => {
+                // VM 记录的成员访问要一个运行时槽暂存前置 VLA 字段的 sizeof;
+                // 槽数口径与发射点 `gen_vm_member_offset` 的阶段 1 同源。
+                let n = Self::vm_off_slots_for(x.ty(), *is_arrow, &field.name);
+                if n > need.vm_off_slots {
+                    need.vm_off_slots = n;
+                }
+                Self::late_need_expr(x, need)
+            },
             E::Binop { l, r, .. } | E::Comma { l, r, .. } | E::Index { arr: l, idx: r, .. } => {
                 Self::late_need_expr(l, need);
                 Self::late_need_expr(r, need);
@@ -2298,6 +2411,33 @@ impl Codegen {
         }
     }
 
+    /// VM 记录类型成员访问在发射期要几个 scratch 槽（`__vmoff_<i>`）。
+    ///
+    /// 口径与 `emit/vla.rs::gen_vm_member_offset` 阶段 1 一致：目标字段在首个 VLA
+    /// 字段之前时静态偏移就是对的（不分配槽）；否则要算 `[首个 VLA 字段, 目标字段)
+    /// 内 VLA 字段的 `sizeof`（每个一槽。取 `..tf_idx` 作上界：anchor ≤ tf_idx，
+    /// 过近似安全）。与 `vla_offset_scratch` 的求和不同，这里是**全函数取最大**：
+    /// 发射侧槽按序号复用（`Codegen::vm_off_scratch`），与成员访问次数无关。
+    pub fn vm_off_slots_for(expr_ty: Type, is_arrow: bool, field_name: &str) -> i64 {
+        let target_ty = Self::member_target_ty(expr_ty, is_arrow);
+        let Type::Struct(_, fields, _, false) = &target_ty else {
+            return 0;
+        };
+        if !Self::vm_record_needs_size_slot(&target_ty) {
+            return 0;
+        }
+        let Some(tf_idx) = fields.iter().position(|f| f.name == field_name) else {
+            return 0;
+        };
+        let Some(fv_idx) = fields.iter().position(|f| f.ty.has_vla()) else {
+            return 0;
+        };
+        if fields[tf_idx].offset < fields[fv_idx].offset {
+            return 0;
+        }
+        fields[..tf_idx].iter().filter(|f| f.ty.has_vla()).count() as i64
+    }
+
     /// 诊断（`DCC_FRAME_DUMP=<函数名子串>`）：打印一帧的组成，用来回答「这个函数
     /// 的帧到底被哪条带吃掉了」。内核侧 `perf_event_task_tick` 12KB 帧打穿 IRQ 栈
     /// 就是这么定位的。只写 stderr、不进产物；未设置环境变量时零副作用。
@@ -2391,6 +2531,8 @@ impl Codegen {
         if need.agg_tmp {
             slots += Self::var_alloc_slots(&Type::Int128);
         }
+        // VM 成员偏移 scratch 池：每个序号一份 `Type::Long`（发射点是 `register_var(_, &Type::Long)`）。
+        slots += need.vm_off_slots.max(0);
         // 形参类型树也喂给同一个扫面：向量形参的尺寸同样是向量带的需求。放在 `slots`
         // 算完之后，所以这里只会多填 `max_vec_bytes`，不会改变晚分配带口径。
         for p in params {
@@ -2650,6 +2792,16 @@ impl Codegen {
         for item in items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
+                    // 声明类型里的 VLA 维度同样是运行期引用：`struct S { char d[n]; };
+                    // struct S A[2];` 的 `n` 只出现在类型树里（字节码/初始化式里一次
+                    // 都不出现），不扫就会在发射期走 `var_offset` 兜底 —— 内联进
+                    // `main` 的 VM struct 局部队列因此报 `E1134`（实测 -O2 的
+                    // `loop-interchange-15` 简化版：`LATE func=main name=n ty=Int`）。
+                    // 只在类型真带 VLA 时下探：普通声明的类型树不必扫（内核对
+                    // 类型图是 DAG，深扫是纯浪费）。
+                    if v.ty.has_vla() {
+                        Self::collect_free_idents_type(&v.ty, out);
+                    }
                     if let Some(init) = &v.init {
                         Self::collect_free_idents_expr(init, out);
                     }

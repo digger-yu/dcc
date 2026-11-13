@@ -201,49 +201,61 @@ parse_dg_directives() {
         do_type="compile"
     fi
 
-    local req_target
-    req_target=$(grep -oP '\{ dg-require-effective-target \K[^}]+' "$src" 2>/dev/null | head -1 || true)
-    if [[ -n "$req_target" ]]; then
-        # 修剪 (grep 可能带出尾随空白)
-        req_target="${req_target//[[:space:]]/}"
-        # 仅 x86 家族 / 显式 "any"/"always" 视为本平台可用;
-        # 其余 effective-target (float16_runtime / bfloat16_runtime / dfp /
-        # fenv_exceptions / trapping / int128 / __float128 等) 一律视为非本
-        # 平台, 自动跳过.
-        # 注意: 原先列表含一个裸 '*' glob, 会匹配任意 effective-target 名,
-        # 导致本该跳过的用例被当成"支持"而运行并虚假 FAIL. 这里移除该 '*'.
-        #
-        # 白名单里另外两个不是"平台三元组"而是"能力名", 它们对本目标恒真。
-        # 放回的依据：把这两个名单门住的 71 个用例（另 4 个走 -fgimple）连
-        # 同所在目录的兄弟头文件按原目录结构复制成夹具，走 harness 本身跑：
-        #   compile 类 pass=33 fail=0；run 类 pass=8 fail=0（其余由别的
-        #   名单 / dg-skip-if / 非本类别正常排除）。夹具必须保留目录结构，
-        #   拍平会让 analyzer/ 的 `#include "analyzer-decls.h"` 找不到文件，
-        #   制造出 4 个假 FAIL。
-        # 其余同样看似"本平台应恒真"的名字暂不放回: 每个名单底下还门着一个
-        # 真实缺陷, 放回要么让测试用例集变红, 要么得把缺陷写进 skip 清单变成假绿。
-        #   size32plus     vec-cvt-1.c 已实测 -O0/-O1/-O2 全绿（原先的「运行错值」
-        #                 已不再复现）；该名字还门住其他未逐个复核的用例，整名放回
-        #                 会把未验证的用例一起拉进 gate，暂保持跳过。
-        #   stdint_types   未实现 __builtin_bswap128
-        #   label_values   缺 analyzer 兄弟头文件; malloc-1.c
-        #   nonlocal_goto  pr97986-1.c 要嵌套函数跳 `__label__`
-        #   int32plus      多个 crc-builtin-* 与 C23 位域用例
-        #   vect_* / lto / analyzer / fpic 等本就与 dcc 无关或明确不支持
-        # 注：多个 dg-require-effective-target 共存时本函数只看第一个（head -1），
-        # 所以如 pr127166-2.c (int32 && vect_int) 仍靠 vect_int 这一条被排除。
-        #
-        # 白名单里的 `tls` / `pthread` 是 dcc 已具备的能力名（不是平台三元组）：
-        # __thread 现已完整（ET_REL 一律 local-exec，`%fs:` + TPOFF32，聚合 TLS
-        # 对象在 .tdata 有真初值），宿主 glibc 提供 pthread，dg-options 的
-        # `-pthread` 也已放行 ⇒ torture/tls/tls-test.c 可真跑。
-        case "$req_target" in
-            x86_64|x86|i?86|any|always|indirect_jumps|int32|tls|pthread) ;;
-            *)
-                echo "skip target:$req_target"
-                return
-                ;;
-        esac
+    local req_targets
+    req_targets=$(grep -oP '\{ dg-require-effective-target \K[^}]+' "$src" 2>/dev/null || true)
+    if [[ -n "$req_targets" ]]; then
+        # 多个 `dg-require-effective-target` 是 AND 语义：任一不满足就跳过。
+        # 旧实现只取第一行（head -1），于是 `int32plus && dfp` 这类用例会因为
+        # 第一个名字通过而被误跑（pr105231 需要 dfp，pr57584 需要 label_values）。
+        while IFS= read -r req_target; do
+            # 修剪 (grep 可能带出尾随空白)
+            req_target="${req_target//[[:space:]]/}"
+            [[ -z "$req_target" ]] && continue
+            # 仅 x86 家族 / 显式 "any"/"always" 视为本平台可用;
+            # 其余 effective-target (float16_runtime / bfloat16_runtime / dfp /
+            # fenv_exceptions / trapping / int128 / __float128 等) 一律视为非本
+            # 平台, 自动跳过.
+            # 注意: 原先列表含一个裸 '*' glob, 会匹配任意 effective-target 名,
+            # 导致本该跳过的用例被当成"支持"而运行并虚假 FAIL. 这里移除该 '*'.
+            #
+            # 白名单里另外两个不是"平台三元组"而是"能力名", 它们对本目标恒真。
+            # 放回的依据：把这两个名单门住的 71 个用例（另 4 个走 -fgimple）连
+            # 同所在目录的兄弟头文件按原目录结构复制成夹具，走 harness 本身跑：
+            #   compile 类 pass=33 fail=0；run 类 pass=8 fail=0（其余由别的
+            #   名单 / dg-skip-if / 非本类别正常排除）。夹具必须保留目录结构，
+            #   拍平会让 analyzer/ 的 `#include "analyzer-decls.h"` 找不到文件，
+            #   制造出 4 个假 FAIL。
+            # 其余同样看似"本平台应恒真"的名字暂不放回: 每个名单底下还门着一个
+            # 真实缺陷, 放回要么让测试用例集变红, 要么得把缺陷写进 skip 清单变成假绿。
+            #   stdint_types   未实现 __builtin_bswap128
+            #   label_values   缺 analyzer 兄弟头文件; malloc-1.c
+            #   nonlocal_goto  pr97986-1.c 要嵌套函数跳 `__label__`
+            #   vect_* / lto / analyzer / fpic 等本就与 dcc 无关或明确不支持
+            #
+            # 五个 x86_64 上恒真的名字本轮逐个复核后放回（审计方法：在 torture/
+            # tree-ssa 副本里删掉这些 require 行真跑一遍，并把每一轮新 FAIL 定位到
+            # 根因——已修掉 `-save-temps` 解析、VM struct 位域布局与内联 VLA 类型
+            # 判定三族缺陷，剩余的 bitint 用例与依赖 analyzer 头文件的用例已在本
+            # 清单/各用例自身 dg-skip-if 里）。
+            #   int32plus     int/long 均 ≥ 32 位（x86_64 恒真）
+            #   size32plus    size_t ≥ 32 位（x86_64 恒真）
+            #   lp64          LP64 数据模型（x86_64 Linux 恒真）
+            #   ptr32plus     指针 ≥ 32 位（x86_64 恒真）
+            #   sse2_runtime  基线 SSE2（x86_64 恒真）
+            #
+            # 白名单里的 `tls` / `pthread` 是 dcc 已具备的能力名（不是平台三元组）：
+            # __thread 现已完整（ET_REL 一律 local-exec，`%fs:` + TPOFF32，聚合 TLS
+            # 对象在 .tdata 有真初值），宿主 glibc 提供 pthread，dg-options 的
+            # `-pthread` 也已放行 ⇒ torture/tls/tls-test.c 可真跑。
+            case "$req_target" in
+                x86_64|x86|i?86|any|always|indirect_jumps|int32|tls|pthread) ;;
+                int32plus|size32plus|lp64|ptr32plus|sse2_runtime) ;;
+                *)
+                    echo "skip target:$req_target"
+                    return
+                    ;;
+            esac
+        done <<< "$req_targets"
     fi
 
     if grep -qP '\{ dg-skip-if' "$src" 2>/dev/null; then

@@ -1,17 +1,16 @@
 u128_eq:
 push %r13
 mov %rsp,%r13
-sub $0x70,%rsp
-<nop padding>
-mov %rdi,-0x48(%r13)
-mov %rsi,-0x40(%r13)
-mov %rdx,-0x58(%r13)
-mov %rcx,-0x50(%r13)
+sub $0x50,%rsp
+mov %rdi,-0x28(%r13)
+mov %rsi,-0x20(%r13)
+mov %rdx,-0x38(%r13)
+mov %rcx,-0x30(%r13)
 mov %rdi,%rax
 mov %rsi,%rdx
 push %rax
 push %rdx
-mov -0x58(%r13),%rax
+mov -0x38(%r13),%rax
 mov %rcx,%rdx
 push %rax
 push %rdx
@@ -31,7 +30,6 @@ xor %rdx,%rdx
 pop %r15
 pop %r14
 movslq %eax,%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

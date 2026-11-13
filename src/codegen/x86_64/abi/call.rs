@@ -699,6 +699,27 @@ impl Codegen {
                     }
                     // 取址失败则回退到下方逐 chunk 路径。
                 }
+                // 整数内型 `_Complex` 实参的**逐分量转换**: 源表达式可能是标量
+                // (虚部 +0)、不同内型的复数、或宽窄不一的整数复数。直接按 8B
+                // chunk 从源 rvalue 带读会把源布局当成形参布局 —— `_Complex long`
+                // 形参收到 `_Complex int` 字面量 `1+2i` 时第二 chunk 读到带外垃圾
+                // (compat/scalar-by-value-3 的 init(&g, CINT(1,2)): 实参只落了
+                // 8B (1,2 打包)，被调方按 16B 读 → `g` 得到 0x200000004, 0x804)。
+                // 转换唯一真源是 materialize_value_slot (与 `=` 共用
+                // gen_aggregate_assign_to)；这里的浮动内型有各自的 SSE 转换路，不重复。
+                let int_complex_param = matches!(&effective_ty, Type::Complex(inner)
+                    if !matches!(
+                        &inner.base,
+                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                    ));
+                if int_complex_param
+                    && Self::complex_src_needs_convert(&effective_ty, arg.ty())
+                {
+                    let slot = self.materialize_value_slot(&effective_ty, arg);
+                    self.emit_lea_r13(1, slot);
+                    self.stage_agg_chunks_from_mem(arg_locs, &mut staged, &mut stage);
+                    continue;
+                }
                 // _Complex long double: 两个 16 字节 tbyte 栈槽, 必须走 x87
                 // fldt/fstpt, 不能进下方任何 GP movq / SSE movsd 子路径
                 // (movq 会破坏 10 字节 tbyte, 读侧只能拿到尾数低 8 字节,
@@ -860,6 +881,18 @@ impl Codegen {
                             },
                         }
                     }
+                } else if Self::is_int_complex_rvalue(arg) {
+                    // 整数内型 `_Complex`（_Complex short/int/long）的 rvalue：
+                    // 值物化在帧底复数带，`gen_expr` 交付的是**带地址**
+                    // （aggregate.rs 的整数内型 Complex 分支末尾 `lea rax, result_off`）。
+                    // SysV 把这类实参归为 INTEGER 一个 eightbyte，被调方按
+                    // 4/8 字节从寄存器/栈槽读值；把 rax（地址）直接当值对存槽，
+                    // 被调方读到的就是指针字节（compat/struct-by-value-12 的
+                    // `check(g, (_Complex short)1)` 全挂）。按 8B chunk 从带里装载，
+                    // 与 CompoundLit / sret 的内存交付同一轴。
+                    self.gen_expr(arg, Self::EVAL_BASE);
+                    self.mov(1, 0); // rcx = rax (复数带地址)
+                    self.stage_agg_chunks_from_mem(arg_locs, &mut staged, &mut stage);
                 } else if matches!(arg, Expr::CompoundLit { .. })
                     || Self::rvalue_is_buffer_addr(arg)
                 {

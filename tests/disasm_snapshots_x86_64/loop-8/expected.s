@@ -1,11 +1,9 @@
 bar:
 push %r13
 mov %rsp,%r13
-sub $0x60,%rsp
-mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x48(%r13)
-mov %rsi,-0x50(%r13)
+sub $0x40,%rsp
+mov %rdi,-0x28(%r13)
+mov %rsi,-0x30(%r13)
 movslq %edi,%rax
 test %eax,%eax
 jne <bar>
@@ -19,8 +17,8 @@ movsd (%rsp),%xmm0
 add $0x8,%rsp
 ucomisd %xmm1,%xmm0
 setne %al
-setp %bl
-or %bl,%al
+setp %cl
+or %cl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <bar>
@@ -29,17 +27,14 @@ mov $0x0,%al
 call <bar>
 add $0x10,%rsp
 jmp <bar>
-mov -0x10(%r13),%rbx
-<nop padding>
-add $0x60,%rsp
+add $0x40,%rsp
 pop %r13
 ret
 main:
 push %r13
 mov %rsp,%r13
-sub $0x60,%rsp
+sub $0x40,%rsp
 mov %rbx,-0x10(%r13)
-<nop padding>
 mov $0x0,%eax
 mov %eax,%ebx
 movslq %ebx,%rax
@@ -48,15 +43,15 @@ jge <main>
 movslq %ebx,%rcx
 lea 0x0(%rip),%r11
 movsd (%r11,%rcx,8),%xmm0
-movsd %xmm0,-0x40(%r13)
-movsd -0x40(%r13),%xmm0
+movsd %xmm0,-0x28(%r13)
+movsd -0x28(%r13),%xmm0
 sub $0x8,%rsp
 movsd %xmm0,(%rsp)
 movsd 0x0(%rip),%xmm0
 movapd %xmm0,%xmm1
 movsd (%rsp),%xmm0
 add $0x8,%rsp
-ucomisd %xmm1,%xmm0
+comisd %xmm1,%xmm0
 seta %al
 setnp %cl
 and %cl,%al
@@ -74,7 +69,7 @@ jmp <main>
 sub $0x20,%rsp
 mov $0x1,%eax
 mov %rax,0x10(%rsp)
-lea -0x40(%r13),%rax
+lea -0x28(%r13),%rax
 mov %rax,0x18(%rsp)
 mov 0x10(%rsp),%rdi
 mov 0x18(%rsp),%rsi
@@ -89,7 +84,7 @@ add $0x20,%rsp
 sub $0x20,%rsp
 mov $0x0,%eax
 mov %rax,0x10(%rsp)
-lea -0x40(%r13),%rax
+lea -0x28(%r13),%rax
 mov %rax,0x18(%rsp)
 mov 0x10(%rsp),%rdi
 mov 0x18(%rsp),%rsi
@@ -103,7 +98,6 @@ call <main>
 add $0x20,%rsp
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
-<nop padding>
-add $0x60,%rsp
+add $0x40,%rsp
 pop %r13
 ret

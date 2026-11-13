@@ -3284,6 +3284,17 @@ impl Codegen {
             .push((cur, size, loc.file(), loc.line()));
         self.sret_watermark = cur + padded;
         let off = self.sret_region_base - cur - padded;
+        if std::env::var_os("DCC_TRACE_SRET").is_some() {
+            eprintln!(
+                "[sret] off={} size={} water={}->{} at {}:{}",
+                off,
+                size,
+                cur,
+                cur + padded,
+                loc.file(),
+                loc.line()
+            );
+        }
         // 同一条判据的反方向：sret/物化带的最低字节也不得越过帧底。这里的 `off`
         // 本身就是本槽的底（槽向下生长），所以不需要再加变量区的用量。
         self.check_frame_budget(off, "<sret>");
@@ -3398,6 +3409,9 @@ impl Codegen {
     }
 
     pub fn restore_sret_watermark(&mut self, mark: i64) {
+        if std::env::var_os("DCC_TRACE_SRET").is_some() && mark != self.sret_watermark {
+            eprintln!("[sret] restore {} -> {}", self.sret_watermark, mark);
+        }
         self.sret_watermark = mark;
     }
 
@@ -3995,6 +4009,13 @@ impl Codegen {
     }
 
     pub fn vector_temp_base(&self, slot: usize, vec_size: usize) -> i64 {
+        if std::env::var_os("DCC_TRACE_AGG").is_some() {
+            eprintln!(
+                "[vec] func={} slot={} size={} vec_reserve={} frame={}",
+                self.current_func_name, slot, vec_size, self.frame_layout.vec_reserve,
+                self.frame_layout.frame_size
+            );
+        }
         self.frame_layout.vec_temp(slot as i64, vec_size)
     }
 

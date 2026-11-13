@@ -1,11 +1,10 @@
 atomic_add:
 push %r13
 mov %rsp,%r13
-sub $0x70,%rsp
+sub $0x50,%rsp
 mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x50(%r13)
-mov %rsi,-0x58(%r13)
+mov %rdi,-0x38(%r13)
+mov %rsi,-0x40(%r13)
 mov %rdi,%rax
 movslq (%rax),%rax
 mov %eax,%ebx
@@ -18,19 +17,17 @@ mov %rdi,%rcx
 mov %eax,(%rcx)
 movslq %ebx,%rax
 mov -0x10(%r13),%rbx
-<nop padding>
-add $0x70,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 <nop padding>
 atomic_swap:
 push %r13
 mov %rsp,%r13
-sub $0x60,%rsp
+sub $0x50,%rsp
 mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x48(%r13)
-mov %rsi,-0x50(%r13)
+mov %rdi,-0x30(%r13)
+mov %rsi,-0x38(%r13)
 mov %rdi,%rax
 mov (%rax),%rax
 mov %rax,%rbx
@@ -40,7 +37,6 @@ mov %rsi,%rax
 mov %rax,(%rcx)
 mov %rbx,%rax
 mov -0x10(%r13),%rbx
-<nop padding>
-add $0x60,%rsp
+add $0x50,%rsp
 pop %r13
 ret

@@ -328,6 +328,15 @@ pub struct Codegen {
     /// 声明后 n++ 不影响 sizeof(struct s))。循环内重复声明同名类型
     /// 每次迭代重写槽 (重新绑定)。
     pub vm_struct_size_slots: HashMap<String, i64>,
+    /// VM struct 成员偏移的运行时 scratch 槽池（`__vmoff_<i>`），按序号复用。
+    ///
+    /// `gen_vm_member_offset` 阶段 1 要把前置 VLA 字段的 `sizeof` 暂存到帧里
+    /// （`gen_sizeof_runtime` 会破坏寄存器, 不能直接累加）。旧实现每个成员访问都
+    /// `alloc_sret_slot(8)`，同一表达式树里十几次成员访问就把 sret 带撑爆 ——
+    /// 而 sret 水位在语句边界会 restore，槽不能在语句之间复用。这里改成按序号
+    /// 懒注册的**真正局部变量**（走晚分配带，帧内持久），全函数最多 `i` 个槽，
+    /// 与成员访问次数无关。`i` 的上界由 `func_setup::LateNeed::vm_off_slots` 扫描。
+    pub vm_off_scratch: Vec<i64>,
     // 当前函数体含 VLA 声明：goto/break/continue 跳转前需恢复动态栈基，
     // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
     pub cur_func_has_vla: bool,
@@ -1247,6 +1256,7 @@ impl Codegen {
             vla_offsets: HashMap::new(),
             vla_total_size: 0,
             vm_struct_size_slots: HashMap::new(),
+            vm_off_scratch: Vec::new(),
             cur_func_has_vla: false,
             disptab_base_reg_sym: None,
             cur_func_is_naked: false,

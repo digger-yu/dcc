@@ -1,10 +1,9 @@
 scalar_only:
 push %r13
 mov %rsp,%r13
-sub $0x60,%rsp
+sub $0x50,%rsp
 mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x50(%r13)
+mov %rdi,-0x38(%r13)
 movslq %edi,%rax
 add $0x1,%rax
 movslq %eax,%rax
@@ -14,31 +13,30 @@ mov $0x3,%r8d
 imul %r8,%rax
 movslq %eax,%rax
 mov -0x10(%r13),%rbx
-add $0x60,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 <nop padding>
 with_array:
 push %r13
 mov %rsp,%r13
-sub $0x80,%rsp
+sub $0x70,%rsp
 mov %gs:0x0(%rip),%rax
 mov %rax,-0x8(%r13)
 mov %rbx,-0x10(%r13)
-<nop padding>
-mov %rdi,-0x70(%r13)
+mov %rdi,-0x58(%r13)
 mov $0x0,%eax
 mov %eax,%ebx
 mov $0x1,%eax
 test %eax,%eax
 je <with_array>
-lea -0x60(%r13),%rax
+lea -0x48(%r13),%rax
 push %rax
 movslq %ebx,%rcx
 pop %rax
 add %rcx,%rax
 push %rax
-movslq -0x70(%r13),%rax
+movslq -0x58(%r13),%rax
 movslq %ebx,%r8
 add %r8,%rax
 movsbq %al,%rax
@@ -59,9 +57,9 @@ jge <with_array>
 jmp <with_array>
 jmp <with_array>
 jmp <with_array>
-lea -0x60(%r13),%rax
+lea -0x48(%r13),%rax
 push %rax
-movslq -0x70(%r13),%rcx
+movslq -0x58(%r13),%rcx
 and $0xf,%rcx
 pop %rax
 add %rcx,%rax
@@ -71,24 +69,21 @@ xor %gs:0x0(%rip),%r11
 je <with_array>
 call <with_array>
 mov -0x10(%r13),%rbx
-<nop padding>
-add $0x80,%rsp
+add $0x70,%rsp
 pop %r13
 ret
 <nop padding>
 with_addr:
 push %r13
 mov %rsp,%r13
-sub $0x70,%rsp
+sub $0x50,%rsp
 mov %gs:0x0(%rip),%rax
 mov %rax,-0x8(%r13)
 mov %rbx,-0x10(%r13)
-mov %r12,-0x18(%r13)
-<nop padding>
-mov %rdi,-0x58(%r13)
+mov %rdi,-0x40(%r13)
 movslq 0x0(%rip),%rax
-mov %eax,-0x48(%r13)
-lea -0x48(%r13),%rax
+mov %eax,-0x30(%r13)
+lea -0x30(%r13),%rax
 mov %rax,%rbx
 push %rax
 mov %rbx,%rax
@@ -97,31 +92,28 @@ add $0x1,%rax
 movslq %eax,%rax
 pop %rcx
 mov %eax,(%rcx)
-movslq -0x48(%r13),%rax
-mov %rax,%r12
-mov -0x58(%r13),%rax
+movslq -0x30(%r13),%rax
+mov %rax,-0x18(%r13)
+mov -0x40(%r13),%rax
 movslq (%rax),%rax
 mov %rax,%r8
-add %r8,%r12
-mov %r12,%rax
+mov -0x18(%r13),%rax
+add %r8,%rax
 movslq %eax,%rax
 mov -0x8(%r13),%r11
 xor %gs:0x0(%rip),%r11
 je <with_addr>
 call <with_addr>
 mov -0x10(%r13),%rbx
-mov -0x18(%r13),%r12
-<nop padding>
-add $0x70,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 <nop padding>
 plain:
 push %r13
 mov %rsp,%r13
-sub $0x50,%rsp
-<nop padding>
+sub $0x30,%rsp
 movslq 0x0(%rip),%rax
-add $0x50,%rsp
+add $0x30,%rsp
 pop %r13
 ret

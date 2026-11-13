@@ -676,9 +676,8 @@ ret
 main:
 push %r13
 mov %rsp,%r13
-sub $0x70,%rsp
+sub $0x50,%rsp
 mov %rbx,-0x10(%r13)
-<nop padding>
 mov $0x0,%eax
 mov %eax,%ebx
 mov $0x1,%eax
@@ -788,8 +787,7 @@ test %eax,%eax
 je <main>
 mov $0x1,%eax
 mov -0x10(%r13),%rbx
-<nop padding>
-add $0x70,%rsp
+add $0x50,%rsp
 pop %r13
 ret
 movslq %ebx,%rax
@@ -808,7 +806,6 @@ jmp <main>
 jmp <main>
 mov $0x0,%eax
 mov -0x10(%r13),%rbx
-<nop padding>
-add $0x70,%rsp
+add $0x50,%rsp
 pop %r13
 ret

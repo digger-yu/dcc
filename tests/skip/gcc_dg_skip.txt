@@ -68,6 +68,21 @@ torture/dfp-default-init-3.c
 # 被 parse_int_lit 截成 0, 取模即除零 SIGFPE。真支持需要任意精度整数表示,
 # 与 TImode 同属"超 64 位宽整数"设计缺口, 暂跳过。
 torture/bitint-107.c
+# _BitInt(N) 的 N 位截断/回绕与溢出判定 — 同一个宽度映射垫片的第二后果:
+# 存储用 8/16/32-bit 宿主类型, 赋值与 ++/-- 只按宿主宽度回绕, 不回绕到 N 位;
+# __builtin_*_overflow 也按宿主宽度判溢出。实测:
+#   torture/bitint-97.c   e = {-2,1,1,1,0,-2,-1,1}, 期望 {0,-1,-1,-1,0,0,-1,-1}
+#                         (0-(-1)=1、-1/-1=1、++(-1)=1 都应截成 -1;
+#                          --(-1)=-2、(-1)-(-1)=0 截成 0)
+#   torture/pr116135.c    mul31(1<<30, 2) 在 unsigned _BitInt(31) 下应溢出
+#                         (ovf=1,res=0), dcc 按 32-bit 无符号得 ovf=0,res=2^31
+# 真支持需要位精确整型表示 + C2Y 精度传播 (N3747 Integer Sets, 如
+# `0wb + 1wb` 的类型是 _BitInt(2)), 与 bitint-107 同属类型表示层设计缺口。
+# 注意: bitint-96.c 三个形参拼写 (_BitInt(1) / signed _BitInt(1) /
+# const _BitInt(1)) 的布局一致性问题已修 (parser 的 signed 回退不再覆盖
+# _BitInt 定下的基类型), 该用例留在 run 集里继续把关。
+torture/bitint-97.c
+torture/pr116135.c
 # __hardbool — dcc 静默接受 `__attribute__((hardbool(...)))` (无诊断) 但按
 # 普通 `_Bool` 处理: 表示值不变成声明的 1/42 对, 比较/转换全部按 0/1 算,
 # 运行到断言就 abort (rc=134). 属于类型表示层设计缺口。
@@ -87,15 +102,16 @@ torture/hardbool-s.c
 torture/hardbool-us.c
 torture/hardbool-vi.c
 
-# inline-mem-move-1 — 依赖另一个套件 gcc.c-torture 的文件
-# (../../gcc.c-torture/execute/builtins/memmove.c, lib/main.c)。在完整 GCC 树
-# 布局下这些文件能解析到、程序也能跑通 (rc=0), 但 dg 的编译期断言
-# `scan-assembler-not {\mmemmove\M}` 要求 `-finline-stringops=memmove` 把
-# memmove 内联掉 —— dcc 不实现 stringop 内联, 仍发 5 个 PLT32 memmove 调用,
-# 该项必失败。属“可选优化未实现”, 非运行期代码缺陷。
+# inline-mem-move-1 — 已恢复。它依赖另一个套件 gcc.c-torture 的文件
+# (../../gcc.c-torture/execute/builtins/memmove.c, lib/main.c), 完整 GCC 树布局下
+# 都能解析; 旧版卡在 dg-options 里的 `-save-temps` 被报 unknown flag, 编译阶段
+# 就死 (同样卡住的还有 inline-mem-cpy/cmp/cpy-cmp)。`-save-temps[=obj|cwd]` 已
+# 按“已知但无效果”接受 (dcc 的中间产物本来就不落构建目录), 四个用例均
+# 编译+运行通过 (rc=0)。dg-final 的 `scan-assembler-not {memmove}` 要的是
+# stringop 内联 (dcc 未实现该可选优化), 但 harness 不执行 scan-assembler 类
+# 断言, 同批 cmp/cpy/cpy-cmp 也一样, 故不再单列。
 # (`__builtin_bcopy`/`__builtin_bzero` 原先不在 parser 的已知内建名单里, 会误发
 # W1015 "assuming int"; 二者实现本就在 special/builtins, 已补入名单止噪。)
-torture/inline-mem-move-1.c
 
 # __GIMPLE — GCC 内部 GIMPLE IR 测试语法 (`-fgimple` 下 `__GIMPLE()` 函数体
 # 直接用 GIMPLE 伪指令书写), dcc 解析器不支持, 非标准 C, 设计不支持。
@@ -179,6 +195,38 @@ tree-ssa/ssa-ccp-12.c
 # 位运算值域推理. dcc 的 CCP 只折叠具体整数常量, 不做"未知但受约束值"的位级/
 # 值域推理, link_error 残留. 属位级 CCP 能力缺口.
 tree-ssa/ssa-ccp-32.c
+
+# ── pr128080 的期望值依赖 dcc 没有的 permute 合并优化 ──
+
+# pr128080 — 256 字节 signed char 向量的 __builtin_shuffle(x, c, m),
+# m = {0, -1}, 期望 r[1] == c[255]（拼接向量 {x,c} 的下标 511）。这个期望
+# 成立要经过两步 GCC 特有的转换:
+#   1) match.pd 的两跳 vec_perm 合并 (PR 128080 的修复, 2026-10-24) 把外层
+#      掩码元素重建成 **ssizetype**（有符号）, 于是常量掩码 -1 走
+#      vec-perm-indices.h::clamp 的“负值从尾部数”分支: -1 + 2N = 511;
+#   2) 运行期掩码 lowering (tree-vect-generic.cc::lower_vec_perm) 用的是
+#      掩码元素类型的 **unsigned 变体** (2026-11-05 PR 128451 的修复):
+#      index = u, 低下标 index & (N-1), 源选择 (index & N) ? vec1 : vec0
+#      —— 等价于 u & (2N-1), 对 -1 得 x[255] 而不是 c[255]。
+# dcc 的 shuffle 实现把掩码物化后逐元素运行期装载, 对应的是路径 2), 没有
+# match.pd 那一步合并优化, 因此得 r[1] = x[255] = 1。GCC 自己也在 -O0 跳过
+# 本用例 (ChangeLog 2026-10-27: pr128080.c: Skip at -O0), 同一期望在 -O0 下
+# 就不成立 —— 属优化能力缺口而非 codegen 缺陷。对照: 同一运行期语义的
+# pr128451.c (掩码 -1 -> x[255], -128 -> x[128]) 在 run 集里通过。
+torture/pr128080.c
+
+# ── 依赖 -fprintf-return-value 常量折叠 ──
+
+# tree-ssa/builtin-sprintf.c — 该用例的断言形式是: 在 -O2 下每个失败的
+# `__builtin_sprintf` 检查都引用一个**未定义符号** `failure_on_line_<行号>`，
+# 只有 GCC 的 `-fprintf-return-value` 把格式化结果的返回长度折成常量、
+# 从而把 `if (sprintf(...) != N) failure_on_line_N()` 整支消除，链接才成立。
+# dcc 没有这项折叠（也不识别 `-fprintf-return-value`），`failure_on_line_*`
+# 原样留在产物里 ⇒ ld undefined reference。这是优化能力缺口，不是误编译：
+# dcc 侧 `__builtin_vsprintf` 已实现（转发 libc，本轮补上，同族的
+# `__builtin_vprintf/vfprintf/vsnprintf` 一并）。GCC 自己也在 -O0 跳过本用例
+# （`#if __OPTIMIZE__` 分支只在优化下用未定义符号当断言）。
+tree-ssa/builtin-sprintf.c
 
 # ── 示例格式 (按需取消注释) ──
 # c/pr12345.c

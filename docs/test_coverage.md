@@ -538,9 +538,9 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_asm.rs` | `asm_goto_output_writeback` | \`fixtures/asm/asm_goto_outputs.c\` | run | T0 |
 | `tests/integration/c_asm.rs` | `s_output_disassembles_movd_without_desync` | \`fixtures/c/vec_small_return.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `s_output_roundtrips_through_gas_for_small_vector` | \`fixtures/c/vec_small_return.c\` | compile | T0 |
-| `tests/integration/c_asm.rs` | `descriptor_and_fsgsbase_register_forms_match_gas_encoding` | \`fixtures/asm/desc_reg_operand.c\` | compile | T0 |
-| `tests/integration/c_asm.rs` | `cmpxchg16b_double_is_rexw_and_avoids_fixed_regs` | \`fixtures/asm/cmpxchg16b_double.c\` | compile | T0 |
-| `tests/integration/c_asm.rs` | `cmpxchg16b_double_runtime_matches_gcc` | \`fixtures/asm/cmpxchg16b_double.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `descriptor_and_fsgsbase_register_forms_match_gas_encoding` | \`fixtures/asm/asm_desc_reg_operand.c\` | compile | T0 |
+| `tests/integration/c_asm.rs` | `cmpxchg16b_double_is_rexw_and_avoids_fixed_regs` | \`fixtures/asm/asm_cmpxchg16b_double.c\` | compile | T0 |
+| `tests/integration/c_asm.rs` | `cmpxchg16b_double_runtime_matches_gcc` | \`fixtures/asm/asm_cmpxchg16b_double.c\` | cross-check | T0 |
 | `tests/integration/c_asm.rs` | `asm_mem_scratch_borrows_when_pool_exhausted` | \`fixtures/asm/asm_mem_scratch_borrow.c\` | cross-check | T0 |
 | `tests/integration/c_asm.rs` | `asm_mem_scratch_pool_exhaustion_fails_closed` | \`fixtures/asm/asm_mem_scratch_exhausted.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_cmpxchg_mem_compiles` | \`fixtures/asm/asm_cmpxchg.c\` | compile | T0 |

@@ -311,6 +311,30 @@ fn stmt_expr_trailing_call_compiles() {
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// VM struct 的尺寸/成员偏移/数组 stride（含连续位域与二维数组）。
+///
+/// 三档优化都跑：-O0/-O1 走 AST 通道，-O2 额外覆盖内联把「含 VLA 字段的
+/// struct 数组」当定长搬进 caller 的路径（`opt::type_has_vla_dim` 只看最外层
+/// 维度时，sizeof 被 SSA 折成 4）。参考 gcc.dg 的 `loop-interchange-15`。
+#[test]
+fn vm_struct_bitfield_layout_runs() {
+    let source = include_str!("../fixtures/c/vm_struct_bitfield.c");
+    for flags in [&["-O0"][..], &["-O1"][..], &["-O2"][..]] {
+        let (output, exe) = run_compile_and_run_flags("vm-struct-bitfield", source, flags);
+        assert!(
+            output.status.success(),
+            "compile {flags:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let code = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(
+            code, 0,
+            "{flags:?}: VM struct layout check failed (exit code = first failing probe)"
+        );
+    }
+}
+
 /// 逗号分隔位域: u16 a:8, b:4, c:1（desc_struct 模式）
 #[test]
 fn bitfield_comma_separated_compiles() {

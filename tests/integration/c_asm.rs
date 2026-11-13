@@ -1283,7 +1283,7 @@ fn s_output_roundtrips_through_gas_for_small_vector() {
 /// 但会让 objdump 把助记符写成 `rex ltr %eax`，与 GAS 产物对不上。
 #[test]
 fn descriptor_and_fsgsbase_register_forms_match_gas_encoding() {
-    let source = include_str!("../fixtures/asm/desc_reg_operand.c");
+    let source = include_str!("../fixtures/asm/asm_desc_reg_operand.c");
     let dir = std::env::temp_dir();
     let tag = std::process::id();
     let source_path = dir.join(format!("dcc-desc-reg-{tag}.c"));
@@ -1393,7 +1393,7 @@ fn descriptor_and_fsgsbase_register_forms_match_gas_encoding() {
 /// cmpxchg 一组，帧布局与寄存器家不参与判据。
 #[test]
 fn cmpxchg16b_double_is_rexw_and_avoids_fixed_regs() {
-    let source = include_str!("../fixtures/asm/cmpxchg16b_double.c");
+    let source = include_str!("../fixtures/asm/asm_cmpxchg16b_double.c");
     let dir = std::env::temp_dir();
     let tag = std::process::id();
     let source_path = dir.join(format!("dcc-cx16b-{tag}.c"));
@@ -1490,7 +1490,7 @@ fn cmpxchg16b_double_is_rexw_and_avoids_fixed_regs() {
 /// 地址 scratch 撞号则连成功路径都走不到。四档对 gcc 全量对照（CPU 有 cx16）。
 #[test]
 fn cmpxchg16b_double_runtime_matches_gcc() {
-    let source = include_str!("../fixtures/asm/cmpxchg16b_double.c");
+    let source = include_str!("../fixtures/asm/asm_cmpxchg16b_double.c");
     harness::assert_all_levels_match_gcc(
         "cmpxchg16b-double",
         source,

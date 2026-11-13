@@ -1079,16 +1079,44 @@ impl Codegen {
                 // 会把单个元素位模式覆盖整个向量槽,
                 // pr23135: res.v = i 后 i2[0] 变 i2[1] 的值)
                 let assign_l_ty = lv.ty();
+                if std::env::var_os("DCC_TRACE_AGG").is_some() {
+                    eprintln!(
+                        "[assign] lv_is_member={} l_ty={:?} r_is_ident={} r_is_cond={} r_is_assign={} r_is_call={}",
+                        matches!(lv, Expr::Member { .. }),
+                        assign_l_ty,
+                        matches!(&**r, Expr::Ident { .. }),
+                        matches!(&**r, Expr::Cond { .. }),
+                        matches!(&**r, Expr::Assign { .. }),
+                        matches!(&**r, Expr::Call { .. }),
+                    );
+                }
                 if matches!(assign_l_ty, Type::Vector(_, _)) && !matches!(lv, Expr::Ident { .. }) {
-                    // 交付约定轴: va_arg 聚合的 rvalue 不物化到「向量临时槽 0」, 而是
-                    // rax = 缓冲区地址 (`gen_expr_va_arg` 写 `alloc_sret_slot` 的槽,
-                    // 与向量临时槽基址不是一个地方)。无条件按向量临时槽读源会把
-                    // 装载器填好的值用错误源整体覆盖, 故先按约定把真源压栈,
-                    // 取完 LHS 地址 (会覆写 rax) 再弹出作 rsi。
-                    let rax_is_agg_addr = match **r {
-                        Expr::VaArg { ref ty, .. } => Self::va_arg_result_in_memory(ty),
-                        _ => false,
-                    };
+                    if std::env::var_os("DCC_TRACE_AGG").is_some() {
+                        let lv_desc = match lv {
+                            Expr::Ident { name, .. } => format!("Ident({})", name.name),
+                            Expr::Member { expr, field, .. } => format!(
+                                "Member({:?}.{})",
+                                std::mem::discriminant(expr.as_ref()),
+                                field.name
+                            ),
+                            other => format!("{:?}", std::mem::discriminant(other)),
+                        };
+                        let r_desc = match &**r {
+                            Expr::Ident { name, .. } => format!("Ident({})", name.name),
+                            other => format!("{:?}", std::mem::discriminant(other)),
+                        };
+                        eprintln!("[assign] -> vector fast path lv={} r={}", lv_desc, r_desc);
+                    }
+                    // 交付约定轴: 并非所有向量 rvalue 都物化到「向量临时槽 0」——
+                    // va_arg 聚合写在 `alloc_sret_slot` 的槽, sret 返回的 Call
+                    // (32 B 向量无 AVX 时分类是 Memory) 的 rax 是调用方缓冲区
+                    // **地址**。无条件按向量临时槽读源会把装载器填好的值用错误源
+                    // 整体覆盖 (vector-1: `u.v = ret()` 得到栈垃圾, 而
+                    // `v32qi w = ret()` 走整块拷贝路径正常)。判据只问
+                    // [`Self::rvalue_is_buffer_addr`] 这个交付真源, 不在此重写
+                    // 形态队集; 先按约定把真源压栈, 取完 LHS 地址 (会覆写 rax)
+                    // 再弹出作 rsi。
+                    let rax_is_agg_addr = Self::rvalue_is_buffer_addr(r);
                     self.gen_expr(r, Self::EVAL_BASE); // RHS → 向量临时槽 0 (或 rax = 聚合缓冲区地址)
                     if rax_is_agg_addr {
                         self.push(0);
@@ -1146,6 +1174,9 @@ impl Codegen {
                 if Self::assign_needs_addr_slot(lv, &assign_l_ty, r)
                     && self.gen_lvalue_addr(lv, Self::EVAL_BASE)
                 {
+                    if std::env::var_os("DCC_TRACE_AGG").is_some() {
+                        eprintln!("[assign] -> agg addr slot path");
+                    }
                     let addr_slot = self.alloc_sret_slot(8);
                     self.store_stack(0, addr_slot); // [slot] = 目标地址
                     let agg_dst = AggDst::Indirect { addr_slot };
@@ -1857,18 +1888,30 @@ impl Codegen {
                     }
                     // 3. 加上字段偏移 (超过 disp32 的超大结构体字段偏移走
                     //    add_reg_byte_offset 的 movabs+add 路径, 见 instructions.rs)
-                    if let Some(ref f) = field_info {
-                        let field_off = f.offset as i64;
-                        if field_off != 0 {
-                            if Self::fits_disp32(field_off) {
-                                let gas = format!("add ${}, %rax", field_off);
-                                self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(
-                                    0x05,
-                                    field_off as i32,
-                                    &gas,
-                                ));
-                            } else {
-                                self.add_reg_byte_offset(0, field_off);
+                    //
+                    // VM struct (含 VLA 字段): 目标字段在首 VLA 字段之后时,
+                    // 静态 `f.offset` 是按 sizeof(VLA)=8 的退化值算的, 不是真实
+                    // 运行时偏移。读路径（`gen_expr_member_rvalue` /
+                    // `gen_lvalue_addr`）早已走 `gen_vm_member_offset`; 写路径
+                    // 此前漏了 —— `A[0].b = 5` 写到静态偏移、`A[1].b` 读到运行时
+                    // 偏移, 同一字段读写不一致 (tree-ssa/loop-interchange-15 的
+                    // 位域镜像)。位域仍用 `f.bit_offset` 定位到单元内, 不受影响。
+                    let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _, _))
+                        && self.gen_vm_member_offset(&target_ty, &field.name, 0);
+                    if !vm_off_done {
+                        if let Some(ref f) = field_info {
+                            let field_off = f.offset as i64;
+                            if field_off != 0 {
+                                if Self::fits_disp32(field_off) {
+                                    let gas = format!("add ${}, %rax", field_off);
+                                    self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(
+                                        0x05,
+                                        field_off as i32,
+                                        &gas,
+                                    ));
+                                } else {
+                                    self.add_reg_byte_offset(0, field_off);
+                                }
                             }
                         }
                     }
@@ -3849,15 +3892,15 @@ impl Codegen {
                     // &struct.field: 基址 + 字段偏移 (不加载值)
                     if *is_arrow {
                         self.gen_expr(expr, dst);
-                    } else if let Expr::Ident { name, .. } = expr.as_ref() {
-                        if self.is_global_not_local(&name.name) {
-                            self.emit_global_addr(dst, &name.name);
-                        } else {
-                            let off = self.var_offset(&name.name);
-                            // 同一件事的第三份手抄本（另两份在 lvalue.rs / mem/addr.rs）：
-                            // dst>=8 缺 REX.R 会把 lea 的目的编成低 8 号。单源入口。
-                            self.emit_lea_r13(dst, off);
-                        }
+                    } else if matches!(expr.as_ref(), Expr::Ident { .. }) {
+                        // 基址标识符统一走 gen_lvalue_addr 单一入口: global 取符号地址、
+                        // VLA/VM struct 二次加载数据基址 ([槽] 内容)、普通局部 lea 槽地址。
+                        // 旧写法在此硬写 `lea r13+var_offset`, 对 VLA struct 给出的是
+                        // **元数据槽**地址 —— `&s.s` 让被调方写进元数据槽, 把 [槽]
+                        // 里的数据基址覆盖成字段值, 之后 s 的全部成员读写全错
+                        // (compat/struct-by-value-22: initScd(&s.s, n) 后 s.c/s.d
+                        // 变栈垃圾, 且后续 s.a 填充也写错区域)。
+                        self.gen_lvalue_addr(expr, dst);
                     } else {
                         // 通用路径: 基址来自任意 lvalue (如 &s.a.b, &s.i[k].f)
                         if !self.gen_lvalue_addr(expr, dst) {

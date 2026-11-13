@@ -488,6 +488,9 @@ impl Codegen {
         // 分配), 跨函数残留会导致 sizeof 读到别的函数帧的槽
         // (20040423-1: 匿名 struct 的空 tag 在 main/sub1 同 key)
         self.vm_struct_size_slots.clear();
+        // VM 成员偏移 scratch 槽池同样是每函数状态：槽偏移在各函数独立分配，
+        // 残留会让下一个函数复用到别人的帧槽（读到上一个函数的 sizeof 残值）。
+        self.vm_off_scratch.clear();
         self.homes.clear();
         // file-scope 绑定也要过同一道逸出判据：地址被取走的对象必须留在内存里。
         self.collect_addr_escaped(prog);
@@ -1525,14 +1528,72 @@ impl Codegen {
                     self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
                 }
             }
-            for (arg_off, off) in stack_param_stores {
-                // 栈传参位于调用方栈顶: 经过 call 压入的返回地址与
-                // 被调方 push r13 后, 第一个栈参数位于 [r13 + 16].
-                // arg_off 是字节偏移 (含对齐 padding, 与 caller 一致).
-                // (变参 overflow_arg_area 同样以 16 为基址 — 见 emit_va_start)
-                let incoming = 16i64 + arg_off;
-                self.load_stack(0, incoming);
-                self.store_stack(0, off);
+            // 连续 chunk 的栈参数落位：逐 chunk 的 `load; store` 对 256KB 的
+            // by-value 聚合参数是 65536 条指令（pr28982b 的 `bar`，目标文件
+            // 696KB vs gcc 5.2KB）。把 (源, 目标) 同步递增的区间合并，>=128B
+            // 的用 `rep movsb` 整块搬运。源在 r13 上方（调用方栈）、目标在帧内，
+            // 两者不可能重叠。
+            {
+                let mut i = 0usize;
+                while i < stack_param_stores.len() {
+                    let (a0, o0) = stack_param_stores[i];
+                    let delta = a0 - o0;
+                    let mut n = 1usize;
+                    while i + n < stack_param_stores.len() {
+                        let (a, o) = stack_param_stores[i + n];
+                        let k = n as i64;
+                        if a - o == delta && o == o0 + k * 8 {
+                            n += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let bytes = n as i64 * 8;
+                    if bytes >= 128 {
+                        // rdi 可能还是尚未落位的 sret 指针（它在本段之后才保存），
+                        // rcx/rsi 名义上是 caller-saved，但同批参数落位仍以
+                        // 不改写任何入站寄存器为准。
+                        for r in [1u8, 6, 7] {
+                            self.emit_insn(&Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                                    op: crate::codegen::x86_64::opcode::StackOp::Push,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        r,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            ));
+                        }
+                        self.mov_imm(1, bytes as i128);
+                        self.emit_lea_r13(6, 16 + a0);
+                        self.emit_lea_r13(7, o0);
+                        self.emit_insn(&Insn::noarg(
+                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                        ));
+                        for r in [7u8, 6, 1] {
+                            self.emit_insn(&Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                                    op: crate::codegen::x86_64::opcode::StackOp::Pop,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        r,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            ));
+                        }
+                    } else {
+                        for k in 0..n {
+                            let (arg_off, off) = stack_param_stores[i + k];
+                            self.load_stack(0, 16 + arg_off);
+                            self.store_stack(0, off);
+                        }
+                    }
+                    i += n;
+                }
             }
             // A1: 保存 sret 指针 (rdi) 到帧底部专用槽, 供返回时写回聚合结果
             if has_sret {
@@ -2046,6 +2107,14 @@ impl Codegen {
             let parent_var_map = self.var_map.clone();
             let parent_name = f.name.name.clone();
             let parent_static_chain_off = self.static_chain_offset;
+            // 父帧长必须在循环**外**取一次快照：`compile_func` 会把
+            // `self.frame_layout` 换成子函数自己的且返回时不恢复（父的体/尾声
+            // 此时已发完，本就不该再读它）。循环里每轮重读就会让第二个及以后
+            // 的嵌套函数拿到**上一个兄弟**的帧长 —— 实测 torture `pr128464.c`：
+            // g1 的 nonlocal goto 用 `lea -112(%r13),%rsp`（f 帧 112 ✓），到 g2
+            // 变成 `lea -48(%r13),%rsp`（g1 的帧 48 ✗），跳回 f 的 .Ll_f_l2 后
+            // `add $112,%rsp; pop %r13; ret` 从帧外取返回地址，SIGSEGV。
+            let parent_frame_size = self.frame_layout.frame_size;
             // 父级 upvars: name → (origin_offset, chain_depth, intermediate_offsets)
             let parent_upvar_info: HashMap<String, (i64, u32, Vec<i64>)> = f
                 .upvars
@@ -2127,11 +2196,11 @@ impl Codegen {
                 // 将嵌套函数加入 defined_funcs，这样 ELF 发射器知道它的符号
                 self.defined_funcs.insert(unique_name.clone());
                 // 非局部 goto 要用父帧长把 %rsp 拉回父帧底（见
-                // `Codegen::nonlocal_parent_frame`）。此处父函数正在发体中段，
-                // `frame_layout` 已解算定稿，读到就是父帧长；`compile_func` 会把
-                // 它改写成子函数自己的，所以子函数编完必须回填。
+                // `Codegen::nonlocal_parent_frame`）。用循环外取的
+                // `parent_frame_size` 快照：父函数正在发体中段时
+                // `frame_layout` 已解算定稿，但编完一个子函数就会被子函数覆盖。
                 let saved_parent_frame = self.nonlocal_parent_frame;
-                self.nonlocal_parent_frame = Some(self.frame_layout.frame_size);
+                self.nonlocal_parent_frame = Some(parent_frame_size);
                 self.compile_func(&nf_decl, prog);
                 self.nonlocal_parent_frame = saved_parent_frame;
                 // 恢复父级链状态 (父函数可能还有兄弟嵌套函数)
