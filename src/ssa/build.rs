@@ -1181,13 +1181,23 @@ impl Builder {
                 };
                 // 实参的 AST 类型只能在这里记（`Operand::Int` 不带类型）：裸字面量重建回
                 // AST 时只能按量级阶梯猜，而按实参类型定语义的内建（`__builtin_clzll` 的
-                // 宽度等）问的正是它。只记阶梯会猜错的槽位（判据见
-                // `Function::call_arg_tys`）。
+                // 宽度等）问的正是它。只记类型会被重建改写的槽位（判据见
+                // `Function::call_arg_tys`）：
+                //   * 裸 `Expr::Int` 且阶梯猜出的类型 ≠ AST 真类型；
+                //   * 整型 `Expr::Cast` —— SCCP 的 `inst_constant` 把 `Cast` 直接折成
+                //     无类型的 `Operand::Int`，窄化 cast 的目标类型（`(unsigned char)0`）
+                //     就只剩阶梯给的 `int`。`__builtin_*_overflow_p` 的第三个参数正是
+                //     按类型定语义：实测 -O2 把 uchar 目标当 int，300 被判成放得下。
                 if let Some(ref d) = dest {
                     let arg_tys: Vec<Type> = args.iter().map(|a| a.ty()).collect();
                     let guessed_wrong = args.iter().zip(arg_tys.iter()).any(|(a, t)| {
-                        matches!(a, Expr::Int { v, .. }
-                            if crate::ssa::expr_rebuild::int_const_ty(*v) != *t)
+                        match a {
+                            Expr::Int { v, .. } => {
+                                crate::ssa::expr_rebuild::int_const_ty(*v) != *t
+                            },
+                            Expr::Cast { ty, .. } => ty.is_int(),
+                            _ => false,
+                        }
                     });
                     if guessed_wrong {
                         self.func.note_call_arg_tys(d.name(), &arg_tys);
@@ -1706,8 +1716,16 @@ impl Builder {
                 // `arch/x86/boot/startup/gdt_idt.c` 报 `impossible constraint ... (expression:
                 // _taddr_1)`）。而 SSA 里没有「保存表达式」的槽，所以这种函数整退 AST
                 // 通道（那里操作数还是 `&g` 这样的表达式，常量求值器能直接吃）。
-                // 纯整型字面量不必逃：值化后仍然是同一个 Immediate（如内核无处不在的
-                // `ALTERNATIVE("", insn, X) ` 里的 `"i"(预算常量)`）。
+                //
+                // 能折成**整数**的操作数不必逃，但也**不能交给 `lower_expr` 值化**：
+                // 像 `(unsigned long)&((struct S *)0)->m / sizeof(void *)`（GCC 常见的
+                // offsetof 写法）整体是整型常量，可里面的成员地址被值化成 `_tsubaddr_2`
+                // 后又被 `>> 3` 卷进去，重建出的表达式只剩临时量，`"i"` 当场折不出来
+                // （实测 analyzer/torture/asm-x86-linux-cpuid-paravirt-2.c 在 -O2 报
+                // impossible constraint，-O0 走 AST 通道则正常）。因此这里把求值器的
+                // 结果记下来，降级时直接交 `Operand::Int(v)` —— 立即数契约要的本来就是
+                // 那个数值，表达式形态只是算出它的手段。
+                let mut imm_values: Vec<Option<i128>> = vec![None; inputs.len()];
                 for (idx, e) in inputs.iter().enumerate() {
                     let imm_only = input_constraints.get(idx).is_some_and(|c| {
                         crate::codegen::shared::asm_constraints::constraint_is_immediate_only(c)
@@ -1715,14 +1733,16 @@ impl Builder {
                     if !imm_only {
                         continue;
                     }
-                    if !matches!(
-                        crate::const_eval::eval_full(e, false),
-                        Ok(crate::const_eval::ConstValue::Int(_))
-                    ) {
-                        self.unsupported(
-                            "asm 的「只能接立即数」操作数不是整型常量（SSA 值化会丢掉表达式形态）",
-                        );
-                        return Operand::Int(0);
+                    match crate::const_eval::eval_full(e, false) {
+                        Ok(crate::const_eval::ConstValue::Int(v)) => imm_values[idx] = Some(v),
+                        _ => {
+                            // 符号地址（`&g`、函数名）折不出数值，只能保留表达式形态退
+                            // AST 通道 —— 那里 `&g` 还是表达式，后端能发重定位。
+                            self.unsupported(
+                                "asm 的「只能接立即数」操作数不是整型常量（SSA 值化会丢掉表达式形态）",
+                            );
+                            return Operand::Int(0);
+                        },
                     }
                 }
                 // `"m"` / `"+m"` 操作数降级成**地址**，不是值。
@@ -1741,6 +1761,12 @@ impl Builder {
                 // 地址”就没人说得清 —— 这类「静默错值」的代价比一次 lea 高得多。
                 let mut input_ops: Vec<Operand> = Vec::with_capacity(inputs.len() + outputs.len());
                 for (idx, e) in inputs.iter().enumerate() {
+                    if let Some(v) = imm_values[idx] {
+                        // 立即数约束：交求值器算出的数值，别让常量树里的 lvalue 子表达式
+                        // 经 SSA 值化后变成临时量（原因见上面的 `imm_values` 注释）。
+                        input_ops.push(Operand::Int(v));
+                        continue;
+                    }
                     let raw = input_constraints.get(idx).map(String::as_str).unwrap_or("r");
                     if crate::codegen::shared::asm_constraints::constraint_prefers_memory(
                         raw,

@@ -5957,3 +5957,37 @@ fn asm_immediate_only_out_of_range_is_hard_error() {
         "诊断应点明约束越界，实际 stderr:\n{stderr}"
     );
 }
+
+/// 没人引用的 `static inline` 定义不发射独立副本（与 GCC 同）。
+///
+/// 旧实现只在 -O2 起跑跨函数 DCE，-O0/-O1 把 `__always_inline` 副本照样
+/// 发射；副本体里的 `"i"(形参)` 离开调用点的常量实参折不出立即数 ⇒ 整个 TU
+/// 硬错误。现场：analyzer/torture 的 asm-x86-linux-cpuid-paravirt-2.c /
+/// asm-x86-linux-wfx_get_ps_timeout-full.c（内核 arch_static_branch）。
+#[test]
+fn unused_static_inline_asm_imm_body_not_emitted() {
+    assert_all_levels_match_gcc(
+        "static-inline-unused-asm-imm",
+        include_str!("../fixtures/c/static_inline_unused_asm_imm.c"),
+        "未引用的 static inline 副本被发射（失败码：1=内联助手、2=取地址副本、\
+         3=仍有 out-of-line 调用的 static inline 被误删）",
+    );
+}
+
+/// `"i"` 约束里的整型地址常量（`&((T *)0)->m` 这种 GCC offsetof 写法）
+/// 必须在 SSA 值化前折出数值。
+///
+/// 旧实现有两个断点：常量求值器把空指针基址交给后端兜底成 0（全局初始化
+/// `static const size_t off = offsetof(S, m);` 静默读回 0）；SSA 把成员地址
+/// 值化成 `_tsubaddr_N` 后，`((unsigned long)_tsubaddr_N >> 3)` 在 -O2 报
+/// impossible constraint（-O0 走 AST 通道则正常）。现场：
+/// analyzer/torture/asm-x86-linux-cpuid-paravirt-2.c 的 PARAVIRT_PATCH。
+#[test]
+fn asm_imm_offsetof_constant_survives_ssa() {
+    assert_all_levels_match_gcc(
+        "asm-imm-offsetof",
+        include_str!("../fixtures/c/asm_imm_offsetof_const.c"),
+        "`\"i\"(&((T *)0)->m ...)` 没折成立即数（失败码：1/2/3=全局初始化式偏移错、\
+         4=`/sizeof(void*)` 形态、5=嵌套成员、6=cast+移位）",
+    );
+}

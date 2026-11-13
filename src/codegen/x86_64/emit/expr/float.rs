@@ -985,16 +985,28 @@ impl Codegen {
     fn gen_float_cmp(&mut self, op: BinOp, ty: &Type) {
         let is_float = matches!(ty, Type::Float);
         // xmm0 = 左操作数, xmm1 = 右操作数
-        // ucomiss/ucomisd xmm1, xmm0 (比较 左 vs 右).
-        // P11 Bucket AC: 收敛到 simd_arith_reg{Ucomi}.
+        // P11 Bucket AC: 收敛到 simd_arith_reg{Ucomi/Comi}.
         let width = if is_float {
             crate::codegen::x86_64::opcode::SimdWidth::SS
         } else {
             crate::codegen::x86_64::opcode::SimdWidth::SD
         };
-        let ucomi_mnem = if is_float { "ucomiss" } else { "ucomisd" };
+        // 有序比较 (`<`/`<=`/`>`/`>=`) 用**信令**比较 comiss/comisd：C 标准把
+        // 这四个运算符定义为信令比较，任一操作数为 NaN（含 quiet NaN）时要置
+        // FE_INVALID。ucomis* 只对 sNaN 置位，实测 `nan > 1.0` 之后
+        // fetestexcept(FE_INVALID) 为 0，gcc 为 1（inf-compare-1..4、pr91323、
+        // pr92690、pr93133、pr52451 都按 gcc 口径断言）。
+        // `==`/`!=` 是安静比较，gcc 用 ucomis*，成本不变。两者的 CF/ZF/PF 结果
+        // 完全相同，下面的 PF 修正逻辑不需要区分。
+        let ordered = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
+        let (cmp_op, cmp_mnem) = if ordered {
+            (crate::codegen::x86_64::opcode::SimdArithOp::Comi, "comiss")
+        } else {
+            (crate::codegen::x86_64::opcode::SimdArithOp::Ucomi, "ucomiss")
+        };
+        let ucomi_mnem = if is_float { cmp_mnem } else if ordered { "comisd" } else { "ucomisd" };
         self.emit_insn(
-            &Insn::simd_arith_reg(crate::codegen::x86_64::opcode::SimdArithOp::Ucomi, width, 0, 1)
+            &Insn::simd_arith_reg(cmp_op, width, 0, 1)
                 .with_gas(format!("{ucomi_mnem} %xmm1, %xmm0")),
         );
         // ucomiss/ucomisd 后 CF/ZF/PF 按 IEEE 无序比较设置, 其中 PF=1 表示

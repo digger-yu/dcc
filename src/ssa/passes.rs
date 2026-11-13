@@ -328,12 +328,19 @@ pub fn dead_bb_elim(func: &mut Function) -> bool {
 /// `i * 2^N`  -> `i << N` ; `i / 2^N` -> `i >> N` (仅无符号)。
 /// Mul→Shl 对有符号/无符号均安全; Div→Shr 仅对无符号类型执行,
 /// 因为有符号除法向零取整而算术右移向负无穷取整, 语义不同。
+/// 仅对**整数**目标成立: `double x; x *= 2;` 的 Bin{Mul, x, 2} 同样命中
+/// `const_pow2`, 换成 Shl 后 codegen 对浮点 Shl 报 E1003
+/// (graphite/pr46185.c 的 `u[1336 * i] *= 2` 实测 -O2 编译失败)。
 pub fn strength_reduction(func: &mut Function) -> bool {
     // 构建 SSA 变量类型映射, 用于判断 Div 左侧操作数是否无符号
     let ty_map = build_ssa_type_map(func);
     let mut changed = false;
     for b in func.blocks.values_mut() {
         for inst in &mut b.insts {
+            let int_dest = inst.dest.as_ref().is_some_and(|d| d.ty.is_int());
+            if !int_dest {
+                continue;
+            }
             if let InstKind::Bin { op, l, r } = &mut inst.kind {
                 if let Some(n) = const_pow2(r) {
                     let new_op = match op {

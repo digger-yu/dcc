@@ -322,7 +322,12 @@ impl Codegen {
     /// 走整数 `neg`（那是 rax 的补码取负，与浮点值无关）。
     ///
     /// 做法：把「只有位 127 为 1」的 16 字节掩码常量落 .rodata，然后
-    /// `xorpd xmm0, [rip+mask]` 一次翻转。
+    /// 用 `movupd` 搬到 xmm1 再 `xorpd xmm0, xmm1` 翻转。
+    ///
+    /// 不能直接发 `xorpd m128, %xmm0`：该形式要求内存操作数 **16 字节对齐**，
+    /// 而 .rodata 里的常量没有对齐保证（实测掩码落在 off%16==8 时指令直接
+    /// #GP → SIGSEGV，q5.c 一类最小复现即此）。`movupd` 是非对齐版本；
+    /// 寄存器形式的 `xorpd` 也不受对齐约束。
     ///
     /// 不能用寄存器搭掩码：`movq xmm1, rax` 只把掩码放进**低** 64 位，而
     /// `punpcklqdq xmm1, xmm1` 会把它**复制到两半** ⇒ 顺手把位 63 也翻了
@@ -346,16 +351,18 @@ impl Codegen {
             self.string_pool.insert(key_bytes.clone(), o);
         }
         let off = self.string_pool[&key_bytes];
-        // xorpd xmm0, [RIP + disp32]  (66 0F 57 05 disp32)
+        // movupd 0(%rip), %xmm1  (66 0F 10 0D disp32): 非对齐载入掩码。
         // 8 字节指令、disp32 在字节 4 ⇒ 复用 `float_refs` 的 RIP 相对修补通道。
         //
         // 起始 pc 在发射后取（发射入口可能在本条之前插入存出，发射前拿的 pos 会偏）。
         if let Some(at) = self.emit_insn_head(&Insn::raw_with_gas(
-            &[0x66, 0x0F, 0x57, 0x05, 0, 0, 0, 0],
-            "xorpd 0x0(%rip), %xmm0",
+            &[0x66, 0x0F, 0x10, 0x0D, 0, 0, 0, 0],
+            "movupd 0(%rip), %xmm1",
         )) {
             self.float_refs.push((at, off));
         }
+        // xorpd %xmm1, %xmm0
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 1));
     }
 
     /// binary128 的二元算术：求值两侧 → xmm0/xmm1 → 调 libgcc。

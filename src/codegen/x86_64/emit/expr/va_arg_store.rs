@@ -68,6 +68,15 @@ impl Codegen {
         if !matches!(ty, Type::Struct(..) | Type::Union(..) | Type::Array(..) | Type::Vector(..)) {
             return false;
         }
+        // 与 `value_is_whole_copy` 同源：标量 store 的编码宽度集只有
+        // {1,2,4,8}，3/5/6/7 字节聚合（如 `struct { char c,d,e; }`）在那条
+        // 判据下已归入整块拷贝，交付侧若仍报「寄存器交付」，赋值路由的类型轴
+        // 会把 8 字节寄存器值存进目标下方 8 字节的临时区 —— 那里紧邻前一个
+        // 变量，实测 931004-12.c 的循环计数器 i 被 3 字节 struct 覆盖
+        // （i 变成 0x1E140A，循环只跑一趟，尾部 long 也读错）。
+        if Self::value_is_whole_copy(ty) {
+            return true;
+        }
         !(ty.size() <= 8 && matches!(Self::abi_classes(ty).as_slice(), [AbiClass::Integer]))
     }
 
@@ -532,7 +541,11 @@ impl Codegen {
             return;
         }
         let ap_off = self.var_offset(ap_name) as i32;
-        let sz = arg_ty.size();
+        // caller 对 `...` 位置的 float 实参做默认提升, 以 double 写入 8 字节;
+        // 这里必须按同一个宽度读 (读 4 字节只能拿到 double 的低半, 恒为 0 ——
+        // float32-basic/float16-basic 实测), 读完再 cvtsd2ss 收窄回 float。
+        let promoted_float = matches!(arg_ty, Type::Float);
+        let sz = if promoted_float { 8 } else { arg_ty.size() };
         let reg_step = 16i32; // reg_save_area 中 XMM 槽为 16 字节对齐
                               // overflow_arg_area 按对象自身向上取整到 8 字节：float/double 走 8，
                               // `__m128` 系走 16。写死 8 会让 16 字节向量的后续参数错位。
@@ -588,12 +601,23 @@ impl Codegen {
         ));
         self.pop(0);
         self.label(&done);
+        if promoted_float {
+            // cvtsd2ss xmm0, xmm0 (F2 0F 5A C0): 提升后的 double → float
+            self.emit_insn(&Insn::simd_arith_reg(
+                crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                0,
+                0,
+            ));
+        }
         if dst != 0 {
             self.mov_xmm(dst, 0);
         }
     }
     fn gen_va_arg_fp_global(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
-        let sz = arg_ty.size();
+        // 与 named 版同一约定: float 变参按提升后的 double 读 (见 gen_va_arg_fp)
+        let promoted_float = matches!(arg_ty, Type::Float);
+        let sz = if promoted_float { 8 } else { arg_ty.size() };
         let overflow_step = sz.div_ceil(8).max(1) as i32 * 8;
         let overflow = self.fresh_label();
         let done = self.fresh_label();
@@ -644,6 +668,15 @@ impl Codegen {
         )); // mov [r10+8], rcx
         self.pop(0);
         self.label(&done);
+        if promoted_float {
+            // cvtsd2ss xmm0, xmm0: 提升后的 double → float
+            self.emit_insn(&Insn::simd_arith_reg(
+                crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                0,
+                0,
+            ));
+        }
         if dst != 0 {
             self.mov_xmm(dst, 0);
         }
@@ -1238,6 +1271,8 @@ impl Codegen {
         }
     }
     fn gen_va_arg_ptr_fp(&mut self, arg_ty: &Type, dst: u8) {
+        // float 变参由 caller 提升为 double, 按 8 字节读后收窄 (见 gen_va_arg_fp)
+        let promoted_float = matches!(arg_ty, Type::Float);
         let reg_step = 16i32;
         let overflow_step = 8i32;
         let overflow = self.fresh_label();
@@ -1260,7 +1295,7 @@ impl Codegen {
             1,
             16,
         )); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
-        if matches!(arg_ty, Type::Float) {
+        if matches!(arg_ty, Type::Float) && !promoted_float {
             // movss (r11,rax), xmm0: F3 41 0F 10 04 03
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::SimdMov {
@@ -1315,7 +1350,7 @@ impl Codegen {
             1,
             8,
         )); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
-        if matches!(arg_ty, Type::Float) {
+        if matches!(arg_ty, Type::Float) && !promoted_float {
             self.emit_insn(&Insn::simd_mov_mem_base(
                 false,
                 crate::codegen::x86_64::opcode::SimdWidth::SS,
@@ -1350,6 +1385,15 @@ impl Codegen {
         )); // mov 8(rcx), r11 (REX.R=1: reg=r11)
         self.pop(0);
         self.label(&done);
+        if promoted_float {
+            // cvtsd2ss xmm0, xmm0: 提升后的 double → float
+            self.emit_insn(&Insn::simd_arith_reg(
+                crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                0,
+                0,
+            ));
+        }
         if dst != 0 {
             self.mov_xmm(dst, 0);
         }

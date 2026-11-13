@@ -162,6 +162,12 @@ fn encode_float_component(c: FloatConst, inner: &Type) -> Vec<u8> {
             // F32 精确；F64/LongDouble 在此显式降级到 f32。
             (c.as_f64() as f32).to_bits().to_le_bytes().to_vec()
         },
+        // binary128: 位数组本身就是 16 字节小端内存镜像；跨精度先显式
+        // 转换（见 `FloatConst::coerce_to` 的精度边界说明）。
+        Type::Float128 => match c.coerce_to(&Type::Float128) {
+            FloatConst::Float128(bits) => bits.to_vec(),
+            _ => unreachable!(),
+        },
         Type::LongDouble => match c {
             FloatConst::LongDouble(b) => {
                 let mut bits = b.to_vec();
@@ -193,6 +199,18 @@ pub fn encode_complex_parts_f(re: FloatConst, im: FloatConst, inner: &Type) -> V
 /// 整数域加/减，全程不经 f64 中转。
 fn combine_float_consts(l: FloatConst, r: FloatConst, subtract: bool, inner: &Type) -> FloatConst {
     match inner {
+        Type::Float128 => {
+            // 常量折叠的 binary128 加减：真 113 位尾数没有软件实现（
+            // `crate::float128` 只有转换），这里在 f64 域求值后回写
+            // binary128 —— 仅对可精确 f64 表示的子集无损，属于已知
+            // 精度边界（LongDouble 走真 80-bit，见下）。
+            let v = if subtract {
+                l.as_f64() - r.as_f64()
+            } else {
+                l.as_f64() + r.as_f64()
+            };
+            FloatConst::Float128(crate::float128::from_f64(v))
+        },
         Type::LongDouble => {
             let (la, lb) = match (l, r) {
                 (FloatConst::LongDouble(a), FloatConst::LongDouble(b)) => (a, b),
@@ -427,7 +445,7 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
 /// Generate bytes for complex constant initialization.
 pub fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
     match inner {
-        Type::Float | Type::Double | Type::LongDouble => {
+        Type::Float | Type::Double | Type::LongDouble | Type::Float128 => {
             let (re, im) = complex_init_parts(init, inner)?;
             Some(encode_complex_parts_f(re, im, inner))
         },

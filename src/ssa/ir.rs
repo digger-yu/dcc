@@ -483,7 +483,10 @@ pub struct Function {
     /// 随后 `sparse_init_subsection_map` 在 `ms->usage == NULL` 上取 `->map` —— PVH 启动
     /// 在 `__bitmap_set+0x183` 以 #GP 收场（§5.18）。
     ///
-    /// 只记**阶梯会猜错**的那些槽位（裸 `Expr::Int` 且其 AST 类型 ≠ `int_const_ty(值)`）：
+    /// 只记**重建会改写类型**的那些槽位：裸 `Expr::Int` 且其 AST 类型 ≠ `int_const_ty(值)`，
+    /// 以及整型 `Expr::Cast`（SCCP 的 `inst_constant` 会把 `Cast` 直接折成无类型的
+    /// `Operand::Int`，窄化目标类型因此销毁 —— `(unsigned char)0` 重建后成了 `int`，
+    /// `__builtin_*_overflow_p` 的第三参数据此把 uchar 目标算成 4 字节）；
     /// 其余情况重建得到的就是真类型，多存一份只会让这张表在改名/克隆后变成噪音。
     pub call_arg_tys: HashMap<String, Vec<Type>>,
 }

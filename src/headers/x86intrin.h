@@ -4,6 +4,11 @@
 #define _DCC_X86INTRIN_H
 
 typedef long long __m128i __attribute__((__vector_size__(16)));
+/* GCC 的 xmmintrin.h/emmintrin.h 里 __m128/__m128d 是基础向量类型, 由编译器
+   提供; 缺了它们, 只用 __m128 声明形参的源码 (torture/stackalign/alloca-2.c)
+   会被当成隐式 int 而解析失败。 */
+typedef float __m128 __attribute__((__vector_size__(16)));
+typedef double __m128d __attribute__((__vector_size__(16)));
 
 typedef union {
   __m128i v;

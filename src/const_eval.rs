@@ -197,11 +197,6 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             } => {
                 if *is_arrow {
                     // Arrow form: ptr->field is (*ptr).field
-                    // Evaluate the pointer as an address constant
-                    let base_addr = match eval_full(expr, fenv_access)? {
-                        ConstValue::Addr { name, offset } => (name, offset),
-                        _ => return Err(ConstEvalError::NotConstant),
-                    };
                     // Look up field in the pointee struct/union
                     let pointee_ty = expr.ty();
                     let struct_ty = match &pointee_ty {
@@ -219,11 +214,34 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         },
                         _ => return Err(ConstEvalError::NotConstant),
                     };
+                    // Evaluate the pointer as an address constant
+                    let base_addr = match eval_full(expr, fenv_access)? {
+                        ConstValue::Addr { name, offset } => (name, offset),
+                        // `((T *)0)->m` / `((T *)const)->m`: 基址是整数常量（空指针
+                        // 转换只是地址 0），成员地址就是 该整数 + 字段偏移 —— 整型
+                        // 常量表达式。`(unsigned long)&((T*)0)->m / sizeof(void*)`
+                        // 是 `"i"` 约束里常见的 offsetof 写法 (analyzer 的
+                        // asm-x86-linux-cpuid-paravirt-2.c)，旧实现把基址交给
+                        // 后端兜底成 0，地址整体丢失。
+                        ConstValue::Int(v) => {
+                            return Ok(ConstValue::Int(v + field_offset as i128));
+                        },
+                        _ => return Err(ConstEvalError::NotConstant),
+                    };
                     return Ok(ConstValue::Addr {
                         name: base_addr.0,
                         offset: base_addr.1 + field_offset as i128,
                     });
                 }
+                // 计算字段在结构体内的偏移
+                let field_offset = match &expr.ty() {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+                        crate::ast::find_field(fields, &field.name)
+                            .map(|(f, extra_off)| f.offset + extra_off)
+                            .ok_or(ConstEvalError::NotConstant)?
+                    },
+                    _ => return Err(ConstEvalError::NotConstant),
+                };
                 // 递归求基地址: 必须是 &ident.field1.field2... 形式
                 let base_addr = match eval_full(
                     &Expr::AddrOf {
@@ -234,14 +252,10 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                     fenv_access,
                 )? {
                     ConstValue::Addr { name, offset } => (name, offset),
-                    _ => return Err(ConstEvalError::NotConstant),
-                };
-                // 计算字段在结构体内的偏移
-                let field_offset = match &expr.ty() {
-                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
-                        crate::ast::find_field(fields, &field.name)
-                            .map(|(f, extra_off)| f.offset + extra_off)
-                            .ok_or(ConstEvalError::NotConstant)?
+                    // `(*(T *)0).m` 与 arrow 臂同源: 基址是整数常量时结果是
+                    // 该整数 + 字段偏移 (见上方 arrow 臂的根因说明)。
+                    ConstValue::Int(v) => {
+                        return Ok(ConstValue::Int(v + field_offset as i128));
                     },
                     _ => return Err(ConstEvalError::NotConstant),
                 };
@@ -2167,6 +2181,16 @@ fn cmp_values<F: Fn(f64, f64) -> i128>(
     r: ConstValue,
     f: F,
 ) -> Result<ConstValue, ConstEvalError> {
+    // LongDouble / Float128 不做编译期比较折叠: 宿主无 80-bit / 128-bit
+    // 运算, 降级到 f64 会把仅尾数低位不同的两个值判成相等 (与解释器
+    // 对该类型的真实比较结果相反)。与 fold_float / mod_values 同口径。
+    let wide = |v: &ConstValue| match v {
+        ConstValue::Float(c) => c.is_long_double() || c.is_float128(),
+        _ => false,
+    };
+    if wide(&l) || wide(&r) {
+        return Err(ConstEvalError::NotConstant);
+    }
     // 提升到 f64 比较; 整数/整数走 i128 -> f64 精确
     let a = l.as_float().ok_or(ConstEvalError::NotConstant)?;
     let b = r.as_float().ok_or(ConstEvalError::NotConstant)?;

@@ -1035,6 +1035,22 @@ fn float_mod_run_returns_zero() {
     }
 }
 
+/// 回归: `__builtin_isinf` 对 ±Inf 恒 1, `isinf_sign` 返回 ±1 (float/double/
+/// long double/_Float16/_Float32x/_Float64x/_Float128 全宽度)。
+/// 夹具逐个检查并打印失败码，覆盖 abs 掩码、movmskps 符号位、f64x 常量通道
+/// 与普通 isinf 的归一化四类缺陷。
+#[test]
+fn builtin_isinf_sign_all_widths_matches_gcc() {
+    let source = include_str!("../fixtures/c/builtin_isinf_sign.c");
+    let (output, _exe) = run_compile_and_run("builtin-isinf-sign", source);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "builtin_isinf_sign 语义错 (失败码见 stdout), got {rc}");
+    }
+}
+
 /// M13.1: __int128 &&/|| 高 64 位合并后再 test
 #[test]
 fn int128_logical_run_returns_zero() {
@@ -1059,6 +1075,137 @@ fn global_indexed_run_returns_zero() {
         let rc = run_exe(&_exe);
         assert_eq!(rc, 0, "global_indexed should return 0, got {rc}");
     }
+}
+
+/// 参数/局部遮蔽同名全局: 聚合赋值、向量元素、__int128 读写都
+/// 必须选局部槽而不是全局符号。
+/// GCC torture ipa/20040703-wpa.c 的 `cpp_num num` 参数与全局 num 同名,
+/// -O2 下 `orig = num` 曾被绑到全局符号 (res.low 错值 abort)。
+#[test]
+#[cfg(unix)]
+fn global_local_shadow_uses_local_slot() {
+    let source = include_str!("../fixtures/c/global_local_shadow_agg.c");
+    for flags in [&[][..], &["-O1"][..], &["-O2"][..]] {
+        let (out, exe) = run_compile_and_run_flags("global-local-shadow", source, flags);
+        assert!(
+            out.status.success(),
+            "global_local_shadow {flags:?} compile failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "global_local_shadow {flags:?} should return 0, got {rc}");
+    }
+}
+
+/// 64 字节 __int128 元素向量与标量混合运算: 标量广播必须逐 lane 复用
+/// 同一槽, 全局 128 位向量元素读写必须搬完整 16 字节 (pr116037 / pr119318)。
+#[test]
+#[cfg(unix)]
+fn int128_vector_scalar_broadcast_runs() {
+    let source = include_str!("../fixtures/c/int128_vector_broadcast.c");
+    for flags in [&[][..], &["-O1"][..], &["-O2"][..]] {
+        let (out, exe) = run_compile_and_run_flags("int128-vector-broadcast", source, flags);
+        assert!(
+            out.status.success(),
+            "int128_vector_broadcast {flags:?} compile failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "int128_vector_broadcast {flags:?} should return 0, got {rc}");
+    }
+}
+
+/// __builtin_add/sub_overflow_p: 目标类型窄于 128 位操作数时, 必须按
+/// 操作数完整宽度运算再判截断 (pr117476-2: ~g 全 1 放不进 unsigned long)。
+#[test]
+#[cfg(unix)]
+fn overflow_p_wide_operand_runs() {
+    let source = include_str!("../fixtures/c/overflow_p_wide.c");
+    for flags in [&[][..], &["-O2"][..]] {
+        let (out, exe) = run_compile_and_run_flags("overflow-p-wide", source, flags);
+        assert!(
+            out.status.success(),
+            "overflow_p_wide {flags:?} compile failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "overflow_p_wide {flags:?} should return 0, got {rc}");
+    }
+}
+
+/// 3/5 字节结构体变参交付 + 空结构体返回（GCC torture 931004-12 /
+/// strct-stdarg-1 / compile/920928-5）。
+///
+/// 标量 store 的编码宽度集只有 {1,2,4,8}，3/5 字节聚合因此归入整块拷贝；
+/// `va_arg_result_in_memory` 必须与 `value_is_whole_copy` 同源，否则赋值
+/// 路由会按类型轴走通用物化，把 8 字节寄存器值存进目标下方 8 字节的临时
+/// 区，覆盖紧邻的循环变量（实测 i 变成 0x1E140A，循环只跑一趟）。空聚合
+/// （size 0）反过来不得进整块拷贝，否则函数指针参数返回时去要物化缓冲地址
+/// 而 panic。
+#[test]
+#[cfg(unix)]
+fn small_struct_va_arg_and_empty_return_run() {
+    let source = include_str!("../fixtures/c/small_struct_va_arg.c");
+    for flags in [&[][..], &["-O1"][..], &["-O2"][..]] {
+        let (out, exe) = run_compile_and_run_flags("small-struct-va-arg", source, flags);
+        assert!(
+            out.status.success(),
+            "small_struct_va_arg {flags:?} compile failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(
+            rc, 0,
+            "small_struct_va_arg {flags:?} should return 0, got {rc} \
+             (1/2/3=3-byte va_arg, 4/5=5-byte va_arg, 6=empty struct return)"
+        );
+    }
+}
+
+/// __builtin_bswap128 (GCC 14): 运行期与 parser 常量折叠两条路径。
+#[test]
+#[cfg(unix)]
+fn bswap128_builtin_runs() {
+    let source = include_str!("../fixtures/c/bswap128.c");
+    for flags in [&[][..], &["-O2"][..]] {
+        let (out, exe) = run_compile_and_run_flags("bswap128", source, flags);
+        assert!(
+            out.status.success(),
+            "bswap128 {flags:?} compile failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "bswap128 {flags:?} should return 0, got {rc}");
+    }
+}
+
+/// 枚举最后一个成员取 LONG_LONG_MAX 是合法用例 (GCC torture
+/// tree-ssa/builtin-sprintf-warn-19.c: `llmax = __LONG_LONG_MAX__`):
+/// 隐式递增游标 i64::MAX + 1 曾在解析期溢出 panic。
+#[test]
+fn enum_max_last_member_compiles() {
+    let output = run_syntax_test(
+        "enum-max-last",
+        "typedef enum { i0, imax = __INT_MAX__ } Int;\n\
+         typedef enum { ll0, llmax = __LONG_LONG_MAX__ } LLong;\n\
+         int main(void) { return (int) (llmax == __LONG_LONG_MAX__) - 1; }\n",
+    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// LONG_LONG_MAX 之后还有隐式成员: 与 GCC 同口径诊断溢出 (不得 panic)。
+#[test]
+fn enum_implicit_after_max_diagnoses_overflow() {
+    let output = run_syntax_test(
+        "enum-overflow",
+        "enum { ya = __LONG_LONG_MAX__, yb };\nint main(void) { return 0; }\n",
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("overflow in enumeration values"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // =================== C 前端补洞: 新增特性 ===================
@@ -4958,4 +5105,323 @@ fn const_switch_fold_nested_break_stays_in_switch() {
         "常量 switch 折叠后 if 内嵌 break 绑到外层循环（失败码：1=do-while 提前退出、\
          2=未命中 if 的臂值错）",
     );
+}
+
+/// pr89111：packed 位域结构体可以只有 3 字节（`int b:24`）。整块赋值曾被
+/// `value_is_whole_copy` 的 `size > 8` 判据排除，退到标量 store，而标量发射侧
+/// 只有 1/2/4/8 宽度，3 字节落到 `_ => B64` —— 多写的 5 字节把紧邻的全局
+/// 循环计数器清零，`while (e++ < 3)` 变成死循环。
+/// 修复：判据改为「尺寸在 {1,2,4,8} 内才是标量可承载的聚合」。
+#[test]
+#[cfg(unix)]
+fn packed_3byte_bitfield_struct_assign_keeps_neighbor_global() {
+    let src = r#"
+struct __attribute__((packed)) A { int b:24; };
+struct A c[243], f;
+int e;
+int main(void) {
+    struct A h = {0};
+    while (e++ < 3) {
+        f = c[46] = h;
+    }
+    return e == 4 ? 0 : 1;
+}
+"#;
+    let (out, exe) = run_compile_and_run("packed-3byte-struct-assign", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "packed 3-byte struct assign compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "adjacent global clobbered by 8-byte store (rc={rc})");
+}
+
+/// pr52402：`__builtin_malloc` 的返回类型曾缺在 `call_result_type` 里，落到
+/// `assuming int` —— `sizeof(__builtin_malloc(8))` 得 4，赋给 `char *` 的返回值
+/// 按 32 位搬运。分配器一族必须返回 `void *`。
+#[test]
+#[cfg(unix)]
+fn builtin_malloc_result_is_pointer_sized() {
+    let src = r#"
+#include <stddef.h>
+int main(void) {
+    char *p = __builtin_malloc(16);
+    if (!p) return 1;
+    if (sizeof(__builtin_malloc(8)) != sizeof(void *)) return 2;
+    if (sizeof(p) != sizeof(void *)) return 3;
+    p[0] = 1;
+    p[15] = 2;
+    __builtin_free(p);
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("builtin-malloc-pointer", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "builtin malloc compile failed: {stderr}");
+    assert!(
+        !stderr.contains("return type of '__builtin_malloc' is not known"),
+        "W1015 noise for a known builtin: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "builtin malloc treated as int (rc={rc})");
+}
+
+/// pr52402 的第二层：向量右值取下标。`foo()` 的返回值按 dcc 约定只写进向量
+/// 临时槽 0，`rax` 不是它的地址；lvalue 回退路径直接 `gen_expr` 后拿 `rax`
+/// 当基址，`foo()[0]` 于是按调用残值解引用并段错误。
+/// 修复：vector 右值先物化到槽 0，再把槽地址交给下标运算。
+#[test]
+#[cfg(unix)]
+fn vector_call_result_subscript_materializes_temp_slot() {
+    let src = r#"
+typedef int v4si __attribute__((vector_size(16)));
+static v4si __attribute__((noinline)) foo(void) {
+    v4si v = {1, 2, 3, 4};
+    return v;
+}
+int main(void) {
+    v4si w = foo();
+    if (w[0] != 1 || w[3] != 4) return 1;
+    if (foo()[0] != 1 || foo()[3] != 4) return 2;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("vector-rvalue-subscript", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "vector rvalue subscript compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "vector rvalue subscript used stale rax (rc={rc})");
+}
+
+/// pr91323 / pr52451：`__builtin_isless(isgreater/...)` 对 **float** 实参曾恒
+/// 用 `movsd/ucomisd` 按 double 比较 —— float 只有低 32 位有效，NaN 的位模式
+/// 被当成极小的 double，`islessgreater(nanf, 1.0f)` 误判为 1。
+/// C99 谓词还必须是安静比较：NaN 时只返回 0，不得置 FE_INVALID。
+#[test]
+#[cfg(unix)]
+fn builtin_float_nan_predicates_compare_at_float_width() {
+    let src = r#"
+int main(void) {
+    volatile float nanf = __builtin_nanf("");
+    volatile float argf = 1.0f;
+    if (__builtin_isless(nanf, argf)) return 1;
+    if (__builtin_isgreater(nanf, argf)) return 2;
+    if (__builtin_islessgreater(nanf, argf)) return 3;
+    if (__builtin_islessequal(nanf, argf)) return 4;
+    if (__builtin_isgreaterequal(nanf, argf)) return 5;
+    if (__builtin_isunordered(nanf, argf) != 1) return 6;
+    if (!__builtin_isless(1.0f, 2.0f)) return 7;
+    if (!__builtin_isgreater(2.0f, 1.0f)) return 8;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("builtin-float-nan-predicates", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "float NaN predicate compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "float NaN predicate wrong (rc={rc})");
+}
+
+/// pr91323 / pr93133：C 标准把 `<`/`<=`/`>`/`>=` 定义为**信令**比较，任一
+/// 操作数为 NaN 时要置 FE_INVALID；`==`/`!=` 是安静比较。旧实现两类都用
+/// `ucomisd`，`nan > 1.0` 之后 `fetestexcept(FE_INVALID)` 为 0。
+#[test]
+#[cfg(unix)]
+fn fenv_float_double_ordered_compare_is_signaling() {
+    let src = r#"
+#include <fenv.h>
+#define CHK(expr, want) do { \
+    feclearexcept(FE_INVALID); \
+    volatile int r = (expr); \
+    (void)r; \
+    if (!!fetestexcept(FE_INVALID) != (want)) return __LINE__; \
+} while (0)
+int main(void) {
+    volatile float nanf = __builtin_nanf("");
+    volatile float argf = 1.0f;
+    volatile double nand = __builtin_nan("");
+    volatile double argd = 1.0;
+    CHK(nanf > argf, 1);
+    CHK(nanf < argf, 1);
+    CHK(nanf >= argf, 1);
+    CHK(nanf <= argf, 1);
+    CHK(nanf == argf, 0);
+    CHK(nanf != argf, 0);
+    CHK(__builtin_isless(nanf, argf), 0);
+    CHK(__builtin_islessgreater(nanf, argf), 0);
+    CHK(nand > argd, 1);
+    CHK(nand < argd, 1);
+    CHK(nand >= argd, 1);
+    CHK(nand <= argd, 1);
+    CHK(nand == argd, 0);
+    CHK(nand != argd, 0);
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run_flags("fenv-f32-f64-cmp", src, &["-lm"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fenv f32/f64 compare compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "fenv signaling compare wrong at line {rc}");
+}
+
+/// pr52451：long double 比较走 x87，曾恒用 `fucomip`（安静），`nanl > 1.0L`
+/// 不置 FE_INVALID；C99 谓词走信令 `fcomip` 则会误置。另外 `__builtin_nanl`
+/// 曾按 8 字节 double 放进 xmm0，赋值时 `fstpt` 弹空栈 → indefinite NaN 并置
+/// FE_INVALID（volatile 初始化即带脏标志）。
+#[test]
+#[cfg(unix)]
+fn fenv_long_double_compare_and_nanl_init() {
+    let src = r#"
+#include <fenv.h>
+#define CHK(expr, want) do { \
+    feclearexcept(FE_INVALID); \
+    volatile int r = (expr); \
+    (void)r; \
+    if (!!fetestexcept(FE_INVALID) != (want)) return __LINE__; \
+} while (0)
+int main(void) {
+    feclearexcept(FE_INVALID);
+    volatile long double nanl = __builtin_nanl("");
+    volatile long double argl = 1.0L;
+    if (fetestexcept(FE_INVALID)) return 1;
+    CHK(nanl > argl, 1);
+    CHK(nanl < argl, 1);
+    CHK(nanl >= argl, 1);
+    CHK(nanl <= argl, 1);
+    CHK(nanl == argl, 0);
+    CHK(nanl != argl, 0);
+    CHK(__builtin_isless(nanl, argl), 0);
+    CHK(__builtin_isgreater(nanl, argl), 0);
+    CHK(__builtin_islessgreater(nanl, argl), 0);
+    CHK(__builtin_isunordered(nanl, argl), 0);
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run_flags("fenv-long-double-cmp", src, &["-lm"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fenv long double compare compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "fenv long double compare wrong at line {rc}");
+}
+
+/// pr92690：向量复合字面量里的浮点→整数元素转换。gen_expr 把浮点值交付
+/// 在 xmm0，旧实现直接 `emit_store(0, ...)` 存 rax 残值，`(v4si){src[0], ...}`
+/// 于是把地址量写进向量。
+#[test]
+#[cfg(unix)]
+fn vector_init_float_to_int_elements_truncate() {
+    let src = r#"
+typedef int v4si __attribute__((vector_size(16)));
+typedef float v4sf __attribute__((vector_size(16)));
+static void __attribute__((noinline)) foo(v4si *dstp, v4sf *srcp) {
+    v4sf src = *srcp;
+    *dstp = (v4si) { src[0], src[1], 3, 4 };
+}
+int main(void) {
+    v4sf x = (v4sf) { 1, 2, 3.5f, 4.5f };
+    v4si y;
+    foo(&y, &x);
+    if (y[0] != 1 || y[1] != 2 || y[2] != 3 || y[3] != 4) return 1;
+    y = (v4si) { 10.9f, -2.7f, 0.5f, 7 };
+    if (y[0] != 10 || y[1] != -2 || y[2] != 0 || y[3] != 7) return 2;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("vector-init-float-to-int", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "vector float->int init compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "vector float->int element wrong (rc={rc})");
+}
+
+/// pr110228：GCC 的 `+` 输出带**隐式输入半**，编号排在全部显式操作数之后。
+/// `asm("movq $-1, %q1" : "+a"(x))` 只有一个显式操作数，`%1` 合法且指向
+/// 同一个寄存器。旧实现把 `%1` 判成越界并告警，模板里的 `%q1` 也未替换。
+#[test]
+#[cfg(unix)]
+fn asm_plus_output_implicit_input_operand() {
+    let src = r#"
+static int __attribute__((noinline)) bug(int x) {
+    asm("movq $-1, %q1" : "+a"(x));
+    return x;
+}
+int main(void) {
+    if (bug(42) != -1) return 1;
+    int y = 5;
+    asm("movq %1, %q2" : "+a"(y) : "r"(7));
+    if (y != 7) return 2;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("asm-plus-quot-q1", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "asm %q1 compile failed: {stderr}");
+    assert!(
+        !stderr.contains("only 1 operand") && !stderr.contains("references operand"),
+        "asm %q1 rejected by template validation: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "asm + output implicit input wrong (rc={rc})");
+}
+
+/// vshuf-v2sf：全局 float 向量元素的赋值。值在 xmm0，旧实现走 GP 的
+/// `mov [rcx], rax`（rax 当时是全局地址），把**地址**当元素值写进全局。
+#[test]
+#[cfg(unix)]
+fn global_float_vector_shuffle_stores_values() {
+    let src = r#"
+typedef float V __attribute__((vector_size(8)));
+typedef unsigned int VI __attribute__((vector_size(8)));
+V a, c;
+static void __attribute__((noinline)) t(void) {
+    VI mask = { 1, 0 };
+    c = __builtin_shuffle(a, mask);
+}
+int main(void) {
+    a[0] = 2;
+    a[1] = 3;
+    t();
+    if (c[0] != 3.0f || c[1] != 2.0f) return 1;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("global-f32-vector-shuffle", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "global float vector shuffle compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "global float vector stored buffer address (rc={rc})");
+}
+
+/// stackalign/inline-1：`static void\ninline __attribute__((always_inline))` ——
+/// `inline` 出现在返回类型之后。类型循环在 `void` 处无条件 break，把 `inline`
+/// 当成声明符，报 `expected identifier, got KwInline`。
+#[test]
+#[cfg(unix)]
+fn inline_after_return_type_parses() {
+    let src = r#"
+static void
+inline __attribute__((always_inline))
+foo(int *p) {
+    *p = 7;
+}
+int main(void) {
+    int x = 0;
+    foo(&x);
+    return x == 7 ? 0 : 1;
+}
+"#;
+    let (out, exe) = run_compile_and_run("inline-after-type", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "`static void inline` compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "inline-after-type result wrong (rc={rc})");
 }

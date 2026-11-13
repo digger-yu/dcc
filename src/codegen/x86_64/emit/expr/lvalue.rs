@@ -421,7 +421,17 @@ impl Codegen {
             let arr_is_arr = matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _));
             if arr_is_arr {
                 if !self.gen_lvalue_addr(arr, Self::EVAL_BASE) {
-                    self.gen_expr(arr, Self::EVAL_BASE);
+                    // 向量右值 (`foo()[i]` / `(a+b)[i]`) 没有 lvalue 地址: dcc 的向量
+                    // 值约定是「值在向量临时槽 0」, gen_expr 只写槽、不设 rax。
+                    // 若直接 gen_expr, 下面 push/pop 保住的 rax 是调用残值,
+                    // `foo()[0]` 于是按垃圾地址取元素 (pr52402 段错误)。
+                    // 先物化到槽 0, 再把槽地址交给下标运算。
+                    if matches!(arr_ty, Type::Vector(_, _)) {
+                        self.gen_vector_load_into_slot(arr, 0);
+                        self.emit_lea_r13(0, self.vector_temp_base(0, arr_ty.size()));
+                    } else {
+                        self.gen_expr(arr, Self::EVAL_BASE);
+                    }
                 }
             } else {
                 self.gen_expr(arr, Self::EVAL_BASE);

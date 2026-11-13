@@ -1871,3 +1871,52 @@ fn cpp_cxx_native_auto_falls_back_for_unsupported() {
     // legacy fallback 路径产出文件; native 路径产出文件亦可.
     let _ = obj;
 }
+
+/// 回归: EH 落地垫入口必须把 `%rsp` 从「受保护 call 的调用点」复位到帧线。
+///
+/// unwinder 交付控制时 rsp 等于那次 call 执行前的值, 而出参区/对齐垫会让它
+/// 比帧线低。旧实现不在落地垫复位, catch 体顺延到函数出口时
+/// `add $帧长,%rsp` 少退那一段, `pop %r13; ret` 从被异常运行时数据覆盖的
+/// 槽位读返回地址与 callee-saved 号 —— `tests/fixtures/cpp_abi_eh` 的 6 个
+/// 夹具全部 SIGSEGV(139)。
+///
+/// 夹具把抛点埋进两层实参求值 (printf → add6 → boom), 使落地垫入口的
+/// rsp 比帧线低三段, 复位后还要能正常走到出口; 同一帧里的第二个 try/catch
+/// 再走一遍另一个落地垫。
+#[test]
+#[cfg(unix)]
+fn cpp_eh_landing_pad_restores_stack_pointer() {
+    let src = r#"
+#include <cstdio>
+static int add6(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }
+static int boom() { throw 7; }
+int main() {
+    int caught = 0;
+    int tail = 0;
+    try {
+        printf("%d\n", add6(1, 2, 3, 4, 5, boom()));
+        tail = 99;
+    } catch (int e) {
+        caught = e;
+    }
+    int inner = 0;
+    try { throw 11; } catch (int e) { inner = e; }
+    printf("caught=%d inner=%d tail=%d\n", caught, inner, tail);
+    return (caught == 7 && inner == 11 && tail == 0) ? 0 : 1;
+}
+"#;
+    let (out, obj) = run_cpp_object_test("cpp-eh-pad-rsp", src);
+    assert!(
+        out.status.success(),
+        "cpp_eh_landing_pad_restores_stack_pointer compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dcc_exit = host_link_cpp_object_and_run("cpp-eh-pad-rsp", &obj);
+    let _ = std::fs::remove_file(&obj);
+    let gxx_exit = gxx_native_cpp_exit_code("cpp-eh-pad-rsp", src);
+    assert_eq!(gxx_exit, 0, "g++ 原生真值应为 0, 得到 {gxx_exit}");
+    assert_eq!(
+        dcc_exit, gxx_exit,
+        "dcc(g++ 链接) 退出码 {dcc_exit} 应与 g++ 原生 {gxx_exit} 一致"
+    );
+}

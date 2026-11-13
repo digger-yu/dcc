@@ -136,7 +136,7 @@ impl Codegen {
                 };
                 let inner_sz = inner.size() as i64;
                 let result_off = self.complex_result_off();
-                if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
+                if matches!(inner, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
                     self.gen_float_imm_load(*real, &inner); // xmm0 = 实部
                     self.gen_float_store_at(result_off, &inner);
                     self.gen_float_imm_load(*imag, &inner); // xmm0 = 虚部

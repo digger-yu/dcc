@@ -1402,11 +1402,17 @@ impl Codegen {
                 // 槽被算两遍。
                 let operand_slots = Self::complex_ld_slot(&l.ty())
                     + Self::complex_ld_slot(&r.ty());
+                // `_Complex _Float128` 二元/比较: 发射侧
+                // `gen_complex_f128_binop` 对两个操作数各物化一次
+                // (`gen_complex_f128_materialize`), 每份 32B 分量对槽;
+                // complex 源另加一个 8B 基址槽 (两槽均按 16B 步进)。
+                let f128_slots = Self::complex_f128_binop_slots(l, r);
                 // 左右子表达式**求和**，不取 max：发射侧是 bump 分配，表达式树
                 // 内部不回收（`||`/`&&` 短路的左支槽也要活到整个条件求值完），
                 // 取 max 会让 `a1!=ld1 || a2!=ld2 || …` 只算一个 64B —— 实测
                 // `complex-7.c` 的 `check_long_double` 就是五段串联，水位 320B。
                 Self::complex_ld_sret_binop(e).max(operand_slots)
+                    + f128_slots
                     + Self::sret_bytes_expr(l)
                     + Self::sret_bytes_expr(r)
             },
@@ -1511,7 +1517,7 @@ impl Codegen {
             | Expr::VaArg { .. }
             | Expr::AsmExpr { .. }
             | Expr::Unary { .. } => 0,
-            _ => Self::complex_ld_slot(&e.ty()),
+            _ => Self::complex_ld_slot(&e.ty()) + Self::complex_f128_leaf_slot(&e.ty()),
         };
         own + leaf_slot
     }
@@ -1563,6 +1569,53 @@ impl Codegen {
             Expr::Unary { ty, .. } if is_cld(ty) => 32,
             _ => 0,
         }
+    }
+
+    /// `_Complex _Float128` 表达式在消费端物化一槽的字节数。
+    ///
+    /// 发射侧 `gen_complex_f128_materialize` 是 `alloc_local(32)`
+    /// (两分量各 16B) + `alloc_local(8)` (源对象基址), 两笔都按
+    /// `sret_slot_bytes` 的 16B 步进 = 48B。与 `complex_ld_slot` 同构。
+    fn complex_f128_slot(ty: &Type) -> i64 {
+        if matches!(ty, Type::Complex(q) if matches!(q.base, Type::Float128)) {
+            48
+        } else {
+            0
+        }
+    }
+
+    /// `_Complex _Float128` 作为**值被消费**时的一笔物化槽。
+    /// 与 `complex_ld_slot` 的叶登记同层: 初始化 (`z = w`)、cast、
+    /// 按值实参都会走 `gen_complex_f128_materialize`。
+    fn complex_f128_leaf_slot(ty: &Type) -> i64 {
+        Self::complex_f128_slot(ty)
+    }
+
+    /// `_Complex _Float128` 二元/比较运算符的物化预算。
+    ///
+    /// 判据与发射侧同源: 任一侧是复数才进 `gen_complex_binop`
+    /// (`emit/expr/dispatch.rs` 的 Complex 分流), inner 取
+    /// `Type::common_real_type` 这个前端真源; inner 为 Float128 时
+    /// 两个操作数各落一份物化槽。complex/imaginary 源是 48B
+    /// (含基址槽), 标量源只有 32B。
+    fn complex_f128_binop_slots(l: &Expr, r: &Expr) -> i64 {
+        let is_cmx = |t: &Type| matches!(t, Type::Complex(_) | Type::Imaginary(_));
+        if !is_cmx(&l.ty()) && !is_cmx(&r.ty()) {
+            return 0; // 纯标量: 不走 gen_complex_binop
+        }
+        let inner = |t: &Type| -> Type {
+            match t {
+                Type::Complex(q) | Type::Imaginary(q) => q.base.clone(),
+                other => other.clone(),
+            }
+        };
+        if !matches!(inner(&l.ty()).common_real_type(&inner(&r.ty())), Type::Float128) {
+            return 0;
+        }
+        // 宁可多给: 发射侧只在 complex 源时多要那 16B 基址槽,
+        // 少给就是 E1128, 多给只是帧大 16 字节。
+        let slot = |t: &Type| if is_cmx(t) { 48 } else { 32 };
+        slot(&l.ty()) + slot(&r.ty())
     }
 
     /// 单个变量声明占用的 8 字节栈槽数 (分配口径的单一真源)。

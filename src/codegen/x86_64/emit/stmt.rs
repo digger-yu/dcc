@@ -1364,6 +1364,12 @@ impl Codegen {
             } => {
                 let lbl = self.c_label_to_asm(&label.name);
                 self.label(&lbl);
+                // unwinder 交进来的 %rsp 停在受保护 call 的调用点水平 (常见比帧线
+                // 低: 出参区 / 对齐垫的 `sub $N,%rsp`)。不先复位, catch 体走到
+                // 函数出口时 `add $帧长,%rsp` 少退那一段, 返回地址与 callee-saved
+                // 槽位全部错位 —— cpp_abi_eh 夹具实测 SIGSEGV。复位不发 rax/rdx,
+                // 不影响紧接着的异常对象 / selector 交接。
+                self.emit_eh_landing_pad_rsp_restore();
                 let slots = match (&**object, &**selector) {
                     (Expr::Ident { name: o, .. }, Expr::Ident { name: s, .. }) => {
                         Some((o.name.clone(), s.name.clone()))

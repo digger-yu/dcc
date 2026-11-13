@@ -42,35 +42,19 @@ charset/asm6.c
 # TImode) 或专有的 ctype builtin, dcc 未实现, 编译或运行结果不可信。
 # 属设计上不支持, 非代码缺陷 (见 tests/README.md §6 跳过列表纪律)。
 
-# _Float16
-torture/float16-complex.c
+# _Float16 — 分类 / 复数 / 转换用例均已修好 (__builtin_fpclassify 重写为按位
+# 模式分类后恢复)。仍剩 floath: 该用例要求 binary16 的 FLT16_MANT_DIG==11 /
+# MAX_EXP==16 / MIN_EXP==-13, 而 dcc 把 _Float16 退化为 float
+# (__FLT16_MANT_DIG__=24), 属类型表示层设计缺口。
 torture/float16-floath.c
-# _Float32
-torture/float32-complex.c
-# _Float128 / _Float128x / _Float64x
-# long double 表示层已修好 (值通道 st(0): emit_scalar_to_xmm0_if_needed_ty 对
-# elem_ty==LongDouble 改走 emit_operand_to_st0; 分类/比较谓词统一用 x87 80-bit
-# 位判据), 故 float64x-tg / float128-tg / float128x-nan / float128-extend-nan
-# 等分类测试已恢复。
-# 仍失败者根因各异: extend-inf/floath 需 <float.h> 的 _Float128 常量与 SNAN 宏;
-# tg-3/nan-floath 需信令 NaN 触发 FE_INVALID (fenv) 与 SNAN 语义;
-# fp-int-convert 系列: 基本 int↔long double 转换已对, 但**局部** long double 变量
-# "赋值"(非初始化)整数时变 -nan —— `F a; a = (signed char)0;` 即 -nan (全局赋值/
-# 初始化/局部 double 均正常)。反汇编见 fildl(int→st0) 之后 st(0) 未被正确维持/
-# 存储, 属 x87 st(0) 跨语句管理 bug (比表示层更深, 待专门追踪局部 long double 的
-# x87 寄存器分配/溢出)。属 dcc 缺陷 (非设计不支持)。
-torture/float128-extend-inf.c
-torture/float128-tg-3.c
+# _Float128 / _Float128x / _Float64x — 分类 (含 __builtin_fpclassify 的位
+# 模式重写)、信令 NaN、int<->long double 转换用例均已修好。仍剩
+# float128x-floath: 该用例要求 binary256 (MANT_DIG>=128), 而 dcc 把
+# _Float128x 映射为 binary128 (113), 属类型表示层设计缺口。
 torture/float128x-floath.c
-torture/float128x-nan-floath.c
-torture/fp-int-convert-float128-ieee.c
-torture/fp-int-convert-float64x.c
 # _Decimal (dfp)
 torture/dfp-default-init-3.c
-# TImode (128-bit int)
-torture/fp-int-convert-timode-3.c
-torture/fp-int-convert-timode-4.c
-torture/fp-int-convert-float16-timode.c
+# TImode (128-bit int) — 转换用例已恢复 (见 tests/README.md §6)。
 # _BitInt(N>64) 大整数字面量 — dcc 的 _BitInt 是宽度映射垫片 (N<=8→char,
 # <=16→short, <=32→int, 其余一律 64-bit long), AST 字面量是 i128,
 # 133-bit 常量 (5444517870735015415413993718908291383300uwb) 超出 i128
@@ -110,10 +94,8 @@ torture/pr123175-1.c
 torture/pr80122.c
 torture/pr86505.c
 
-# builtin-iseqsig-1 — __builtin_iseqsig (C23 信令 NaN 比较谓词) 转发到
-# libm `iseqsig`, 但宿主 glibc 未提供该符号 (glibc 2.4x 仍缺), 链接期
-# undefined reference; dcc 亦未内联实现信令 NaN 语义, 暂跳过待补内建。
-torture/builtin-iseqsig-1.c
+# builtin-iseqsig-1 — 已恢复: dcc 对 __builtin_iseqsig 已有可用实现 (分类/
+# 信令 NaN 语义修好后不再依赖宿主 glibc 的 iseqsig 符号)。
 
 # __thread TLS — dcc 后端未实现线程局部存储 (__thread 变量未放进 TLS 段,
 # 主线程与子线程拿到同一地址), tls-test.c 据此判 FAIL。属设计不支持。

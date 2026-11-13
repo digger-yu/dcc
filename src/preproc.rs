@@ -8339,6 +8339,7 @@ impl Preprocessor {
                 | "__builtin_bswap16"
                 | "__builtin_bswap32"
                 | "__builtin_bswap64"
+                | "__builtin_bswap128"
                 | "__builtin_bitreverse8"
                 | "__builtin_bitreverse16"
                 | "__builtin_bitreverse32"

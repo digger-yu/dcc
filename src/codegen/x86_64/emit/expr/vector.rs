@@ -34,7 +34,14 @@ impl Codegen {
         }
         self.emit_load_mem(elem_size);
     }
-    fn emit_global_vector_elem_store(&mut self, name: &str, elem_idx: usize, elem_size: usize) {
+    fn emit_global_vector_elem_store(
+        &mut self,
+        name: &str,
+        elem_idx: usize,
+        elem_size: usize,
+        is_float: bool,
+        is_double: bool,
+    ) {
         self.emit_global_addr(1, name); // rcx = &global
         let byte_off = (elem_idx * elem_size) as i64;
         if byte_off != 0 {
@@ -43,6 +50,26 @@ impl Codegen {
             } else {
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, byte_off));
             }
+        }
+        // 浮点元素的值在 xmm0（调用方 `gen_vector_store` 已按宽度 load_stack_xmm），
+        // 不能走下面的 GP 存储：那时 rax 里是地址，会把**地址**当元素值写进全局。
+        // vshuf-v2sf 的 `c = __builtin_shuffle(a, mask)`（c 是全局 float 向量）
+        // 两个分量因此都成了缓冲区地址，主程序比较时 abort。
+        if is_float || is_double {
+            self.emit_insn(&Insn::mov_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                0,
+                1,
+            )); // mov rax, rcx
+            // movss/movsd [rax], xmm0 (store=true 才是存储方向；
+            // emit_xmm_rax_disp 是加载方向，会把全局值读进 xmm0 覆盖结果)
+            let width = if is_float {
+                crate::codegen::x86_64::opcode::SimdWidth::SS
+            } else {
+                crate::codegen::x86_64::opcode::SimdWidth::SD
+            };
+            self.emit_insn(&Insn::simd_mov_mem_base(true, width, 0, 0, 0));
+            return;
         }
         // mov [rcx], rax (按元素宽度)
         match elem_size {
@@ -105,6 +132,29 @@ impl Codegen {
                     },
                     &[],
                 ));
+                if elem_size == 16 {
+                    // 128 位元素: 高 64 位在 rdx (emit_load_mem(16) 的约定),
+                    // 上面只写了低半部, 全局向量赋值的元素高半部会丢。
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                            rip_relative: false,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                                crate::codegen::x86_64::opcode::MemOperand {
+                                    disp: 8,
+                                    base: Some(1),
+                                    index: None,
+                                    seg: None,
+                                },
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // mov %rdx, 8(%rcx)
+                }
             },
         }
     }
@@ -129,7 +179,8 @@ impl Codegen {
         }
         match e {
             Expr::Ident { name, .. } => {
-                if self.is_global_var(&name.name) {
+                // 局部优先: 参数/局部向量变量可遮蔽同名全局 (判据与 lvalue 路径同源)。
+                if self.is_global_not_local(&name.name) {
                     self.emit_global_vector_elem_load(&name.name, elem_idx, elem_size);
                 } else {
                     let off = self.var_offset(&name.name) + (elem_idx * elem_size) as i64;
@@ -180,7 +231,7 @@ impl Codegen {
         }
         match e {
             Expr::Ident { name, .. } => {
-                if self.is_global_var(&name.name) {
+                if self.is_global_not_local(&name.name) {
                     self.emit_global_addr(0, &name.name);
                     let byte_off = (elem_idx * elem_size) as i64;
                     if byte_off != 0 {
@@ -975,7 +1026,19 @@ impl Codegen {
             let v_ty_opt = value.as_ref().map(|v| v.ty());
             if let Some(v) = value {
                 self.gen_expr(v, Self::EVAL_BASE);
-                self.emit_scalar_to_xmm0_if_needed(v, elem_ty);
+                // 浮点源 → 整数元素：C 的截断转换必须显式做。gen_expr 把浮点值
+                // 交付在 xmm0/st(0)，下面的 emit_store 存的却是 rax 残值 ——
+                // pr92690 的 `(v4si){src[0], src[1], 3, 4}` 因此把两个地址量
+                // 写进向量。复用隐式转换的单源实现（含饱和与无符号口径）。
+                let v_ty = v.ty();
+                if matches!(v_ty, Type::Float | Type::Double | Type::LongDouble)
+                    && !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble)
+                    && elem_size != 16
+                {
+                    self.emit_implicit_float_to_int(0, &v_ty, elem_ty);
+                } else {
+                    self.emit_scalar_to_xmm0_if_needed(v, elem_ty);
+                }
             } else {
                 if matches!(elem_ty, Type::Float | Type::Double) {
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0));
@@ -1090,11 +1153,19 @@ impl Codegen {
         let is_int128_elem = elem_size == 16 && !matches!(elem_ty, Type::Float | Type::Double);
         match e {
             Expr::Ident { name, .. } => {
-                if self.is_global_var(&name.name) {
+                if self.is_global_not_local(&name.name) {
                     for i in 0..count {
                         self.emit_global_vector_elem_load(&name.name, i, elem_size);
                         let dst_off = temp_off + (i * elem_size) as i64;
-                        self.emit_store(0, dst_off, elem_size);
+                        // emit_store 的宽度表只到 8B, 16B 元素会被静默丢弃,
+                        // 临时槽读到旧值 (pr119318: 全局 __int128 向量参与
+                        // `u + c` 时读出错误值)。128 位元素 rax:rdx 分两次存。
+                        if elem_size == 16 {
+                            self.emit_store(0, dst_off, 8);
+                            self.emit_store(2, dst_off + 8, 8);
+                        } else {
+                            self.emit_store(0, dst_off, elem_size);
+                        }
                     }
                     return;
                 }
@@ -1229,7 +1300,8 @@ impl Codegen {
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
         let temp_off = self.vector_temp_base(0, vec_size);
-        let is_global = self.is_global_var(name);
+        // 局部优先: 参数/局部向量变量可遮蔽同名全局。
+        let is_global = self.is_global_not_local(name);
         let is_float_elem = matches!(elem_ty, Type::Float);
         let is_double_elem = matches!(elem_ty, Type::Double);
         for i in 0..count {
@@ -1241,7 +1313,7 @@ impl Codegen {
                 self.emit_load_mem(elem_size);
             }
             if is_global {
-                self.emit_global_vector_elem_store(name, i, elem_size);
+                self.emit_global_vector_elem_store(name, i, elem_size, is_float_elem, is_double_elem);
             } else {
                 let var_off = self.var_offset(name);
                 let dst_off = var_off + (i * elem_size) as i64;

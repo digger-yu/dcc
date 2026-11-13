@@ -2377,32 +2377,32 @@ impl X86_64Opcode {
                 imm8,
             } => {
                 // P11 Bucket G2: psllq/psrlq/psrad xmm, imm8.
-                //   psllq xmm0, imm8: 66 0F F3 C0 ib
-                //   psrlq xmm0, imm8: 66 0F D3 C0 ib
-                //   psrad xmm0, imm8: 66 0F E2 C0 ib
+                // 立即数形式走**移位组**编码（/ext 在 ModRM.reg 字段），不是
+                // 寄存器形式的 0F F3/D3/E2 —— 后者不带 imm8，会把 imm8 字节
+                // 留给下一条指令当 REX 前缀（实测 `psrlq $64` 被解码成
+                // 4 字节的 `psrlq %xmm0,%xmm0`，高位 64 位从未被移下来）：
+                //   psllq xmm, imm8: 66 0F 73 /6 ib
+                //   psrlq xmm, imm8: 66 0F 73 /2 ib
+                //   psrad xmm, imm8: 66 0F 72 /4 ib
                 let Operand::Reg(dst_xmm, _) = dst else {
                     return None;
                 };
                 // op=PShiftImm8, width selects: Q=psllq, D=psrlq, W=psrad.
-                let opc2: u8 = match (op, width) {
-                    (SimdArithOp::PShiftImm8, SimdWidth::Q) => 0xF3, // psllq
-                    (SimdArithOp::PShiftImm8, SimdWidth::D) => 0xD3, // psrlq
-                    (SimdArithOp::PShiftImm8, SimdWidth::W) => 0xE2, // psrad
+                let (opc2, ext): (u8, u8) = match (op, width) {
+                    (SimdArithOp::PShiftImm8, SimdWidth::Q) => (0x73, 6), // psllq
+                    (SimdArithOp::PShiftImm8, SimdWidth::D) => (0x73, 2), // psrlq
+                    (SimdArithOp::PShiftImm8, SimdWidth::W) => (0x72, 4), // psrad
                     _ => return None,
                 };
                 let need_rex = *dst_xmm >= 8;
-                let mut out = Vec::with_capacity(7);
+                let mut out = Vec::with_capacity(6);
                 out.push(0x66);
                 if need_rex {
-                    let mut rex: u8 = 0x40;
-                    if *dst_xmm >= 8 {
-                        rex |= 0x04;
-                    }
-                    out.push(rex);
+                    out.push(0x41); // REX.B (rm 字段 = xmm)
                 }
                 out.push(0x0F);
                 out.push(opc2);
-                out.push(0xC0 | ((*dst_xmm & 7) << 3) | (*dst_xmm & 7));
+                out.push(0xC0 | ((ext & 7) << 3) | (*dst_xmm & 7));
                 out.push(*imm8);
                 Some(out)
             },
@@ -2452,9 +2452,14 @@ impl X86_64Opcode {
                 // P11 Bucket B: cvtsi2sd/cvtsi2ss (r64->xmm) / cvttsd2si/cvttss2si (xmm->r64).
                 //   cvtsi2sd r64,xmm:  F2 REX.W 0F 2A /r  modrm: reg=xmm, r/m=r64
                 //   cvtsi2ss r64,xmm:  F3 REX.W 0F 2A /r
-                //   cvttsd2si r64,xmm: F2 REX.W 0F 2C /r  modrm: reg=xmm, r/m=r64
+                //   cvttsd2si r64,xmm: F2 REX.W 0F 2C /r  modrm: reg=r64, r/m=xmm
                 //   cvttss2si r64,xmm: F3 REX.W 0F 2C /r
-                // Intel: modrm.reg = SSE operand, modrm.r/m = GPR.
+                // **两个方向不一致**: 0F 2A 的 reg 字段是 SSE 目的操作数 (r/m 是 GPR 源),
+                // 0F 2C 的 reg 字段是 GPR 目的操作数 (r/m 是 XMM 源)。旧实现两向都按
+                // 「reg=xmm」编，于是 `cvttss2si r8, xmm0` 被写成 `F3 49 0F 2C C0`
+                // (REX.W|B)，objdump 读作 `cvttss2si %xmm8,%rax` —— 目标 r8 永远不写，
+                // 紧跟的饱和序列读到垃圾 (实测 vec-cvt-1 的 `(unsigned char)f[i]`
+                // 与 1 比较不相等)。
                 let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
                     return None;
                 };
@@ -2463,28 +2468,27 @@ impl X86_64Opcode {
                     SimdWidth::SS => 0xF3,
                     _ => return None,
                 };
-                // In both directions reg field (reg_xmm) goes in ModRM.reg slot,
-                // r64 in r/m slot. Determine which operand is xmm vs r64 by to_xmm flag.
-                let (xmm_idx, gpr_idx) = if *to_xmm {
+                let opc2: u8 = if *to_xmm { 0x2A } else { 0x2C };
+                // modrm.reg / r/m 里的实际操作数依方向而定。
+                let (reg_idx, rm_idx) = if *to_xmm {
                     // dst=xmm, src=r64. modrm.reg=xmm(dst), r/m=gpr(src).
                     (*dst_idx, *src_idx)
                 } else {
-                    // dst=r64, src=xmm. modrm.reg=xmm(src), r/m=gpr(dst).
-                    (*src_idx, *dst_idx)
+                    // dst=r64, src=xmm. modrm.reg=gpr(dst), r/m=xmm(src).
+                    (*dst_idx, *src_idx)
                 };
-                let opc2: u8 = if *to_xmm { 0x2A } else { 0x2C };
                 let mut rex: u8 = if *gpr_64 { 0x48 } else { 0x40 };
-                if xmm_idx >= 8 {
+                if reg_idx >= 8 {
                     rex |= 0x04;
                 }
-                if gpr_idx >= 8 {
+                if rm_idx >= 8 {
                     rex |= 0x01;
                 }
-                let modrm: u8 = 0xC0 | ((xmm_idx & 7) << 3) | (gpr_idx & 7);
+                let modrm: u8 = 0xC0 | ((reg_idx & 7) << 3) | (rm_idx & 7);
                 let mut out = Vec::with_capacity(6);
                 out.push(pfx);
                 // P11: 只在真有字段扩位时才发 REX 字节 (B32 路径若两 idx 均<8 则裸 REX 是多余的).
-                let needs_rex = *gpr_64 || xmm_idx >= 8 || gpr_idx >= 8;
+                let needs_rex = *gpr_64 || reg_idx >= 8 || rm_idx >= 8;
                 if needs_rex {
                     out.push(rex);
                 }
@@ -3613,7 +3617,8 @@ impl X86_64Opcode {
                 // 精确按 (op, width) 出助记符 (psllq / pslld 在 P11 Bucket G2 注释里).
                 let m = match (op, width) {
                     (SimdArithOp::PShiftImm8, SimdWidth::Q) => "psllq",
-                    (SimdArithOp::PShiftImm8, SimdWidth::D) => "pslld",
+                    (SimdArithOp::PShiftImm8, SimdWidth::D) => "psrlq",
+                    (SimdArithOp::PShiftImm8, SimdWidth::W) => "psrad",
                     _ => "ps",
                 };
                 format!("{m}\t${imm8}, {}", fmt_operand(dst))
@@ -6046,7 +6051,8 @@ mod tests {
             dst: xmm(0),
             imm8: 1,
         };
-        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xF3, 0xC0, 0x01]));
+        // psllq xmm0, 1: 66 0F 73 /6 ib → ModRM.reg=110
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x73, 0xF0, 0x01]));
     }
 
     #[test]
@@ -6057,7 +6063,8 @@ mod tests {
             dst: xmm(0),
             imm8: 2,
         };
-        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xD3, 0xC0, 0x02]));
+        // psrlq xmm0, 2: 66 0F 73 /2 ib → ModRM.reg=010
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x73, 0xD0, 0x02]));
     }
 
     #[test]
@@ -6068,7 +6075,8 @@ mod tests {
             dst: xmm(0),
             imm8: 3,
         };
-        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xE2, 0xC0, 0x03]));
+        // psrad xmm0, 3: 66 0F 72 /4 ib → ModRM.reg=100
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x72, 0xE0, 0x03]));
     }
 
     // ---- P11 Bucket K: movd/movq GPR↔XMM reg-reg ----

@@ -118,8 +118,26 @@ impl Codegen {
     /// store 承载 (尺寸装不进一个寄存器, 或者尺寸是运行时值)。这也是
     /// `va_arg` 缓冲区交付 (`va_arg_result_in_memory`) 与内存返回
     /// (`needs_memory_return`) 共用的同一条「装不进寄存器」轴。
+    ///
+    /// 「装得进」的判据是标量 store 的**编码宽度集** {1,2,4,8}, 不是 `<= 8`:
+    /// packed 位域结构体可以只有 3 字节 (`struct __attribute__((packed))
+    /// { int b : 24; }`), 标量路径没有 3 字节宽度, 会退到 8 字节 store ——
+    /// 多写的 5 字节把紧随其后的全局/栈槽清零, 实测 `f = c[46] = h;` 的
+    /// 外层循环计数器被反复清 0 而挂死 (pr89111)。
     pub(crate) fn value_is_whole_copy(ty: &Type) -> bool {
-        Self::is_aggregate_shape(ty) && (ty.size() > 8 || ty.has_vla())
+        if !Self::is_aggregate_shape(ty) {
+            return false;
+        }
+        let sz = ty.size();
+        // 空聚合（GNU 空结构体，size 0）没有字节：标量 store 与整块拷贝都无事
+        // 可做。若按「尺寸不在 {1,2,4,8}」把它判成整块拷贝，`struct b d = f();`
+        // 会去要 f() 的物化缓冲地址（f 是函数指针参数时走不到调用快路径，
+        // 落到 `gen_lvalue_addr(Call)` 的 `complex_result_off`）—— 920928-5.c
+        // 在没有复数物化带的函数里直接 panic。
+        if sz == 0 && !ty.has_vla() {
+            return false;
+        }
+        ty.has_vla() || sz > 8 || !matches!(sz, 1 | 2 | 4 | 8)
     }
 
     /// 这条聚合赋值是否走「先把目标地址物化到一个 sret 帧槽、再整块 `rep movsb`」那一形
@@ -511,7 +529,12 @@ impl Codegen {
         } else {
             match r {
                 Expr::Ident { name: src_name, .. } => {
-                    if self.is_global_var(&src_name.name) {
+                    // 局部优先：参数/局部变量可以遮蔽同名全局变量。
+                    // 裸 `is_global_var` 只看全局表，`struct S num` 参数同名
+                    // 全局 `S num` 时把 `orig = num` 绑到全局符号
+                    // (ipa/20040703-wpa.c -O2 错值)。判据与 lvalue 路径
+                    // 统一走 `is_global_not_local`。
+                    if self.is_global_not_local(&src_name.name) {
                         self.emit_global_addr(6, &src_name.name); // rsi = 全局变量地址
                     } else if let Some(&off) = self.vla_offsets.get(&src_name.name) {
                         // VM struct/VLA 变量: 源地址 = 数据区基址槽

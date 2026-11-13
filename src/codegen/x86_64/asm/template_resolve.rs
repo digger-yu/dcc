@@ -159,6 +159,32 @@ impl Codegen {
                 resolved = resolved.replace(&key, &val);
             }
         }
+        // GCC 的 `+` 输出在模板编号里还有一个隐式输入半（编号在全部显式操作数
+        // 之后，与输出共用寄存器），别名由 `build_asm_operand_map` 写进 op_map。
+        // 它不是一次独立求值，所以上面的显式循环看不到它，这里补一轮替换。
+        {
+            let explicit = outputs.len() + inputs.len();
+            let mut synth: Vec<(usize, &String)> = op_map
+                .iter()
+                .filter_map(|(k, v)| {
+                    let n = k.strip_prefix('%')?.parse::<usize>().ok()?;
+                    (n >= explicit).then_some((n, v))
+                })
+                .collect();
+            synth.sort_by_key(|(n, _)| *n);
+            for (n, val) in synth {
+                for m in ['b', 'w', 'h', 'k', 'q'] {
+                    let mkey = format!("%{}{}", m, n);
+                    if resolved.contains(&mkey) {
+                        if let Some(sub) = Self::asm_reg_modifier_subst(val, m) {
+                            resolved = resolved.replace(&mkey, &sub);
+                        }
+                    }
+                }
+                let key = format!("%{}", n);
+                resolved = resolved.replace(&key, &Self::asm_format_subst_safe(val));
+            }
+        }
         for (i, name) in output_names.iter().chain(input_names.iter()).enumerate() {
             if let Some(n) = name {
                 let key = format!("%[{n}]");

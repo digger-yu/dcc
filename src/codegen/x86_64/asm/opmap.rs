@@ -1559,6 +1559,21 @@ impl Codegen {
                 }
             }
         }
+        // GCC 的 `+` 输出在模板编号里还有一个**隐式输入半**：它排在全部显式
+        // 操作数之后（输入列表末尾），与输出共用同一个寄存器。pr110228 的
+        // `asm("movq $-1, %q1":"+a"(x))` 只有一个操作数却引用 %1 就是在用这一半。
+        // 不建这个别名时 parser 的越界检查会把它判成 references operand 并置空。
+        // `%[name]` 按显式编号解析（GCC 同样如此），不需要跟着复制。
+        let explicit = outputs.len() + inputs.len();
+        let mut plus_ord = 0usize;
+        for (i, c) in output_constraints.iter().enumerate() {
+            if c.trim().starts_with('+') {
+                if let Some(reg) = map.get(&format!("%{}", i)).cloned() {
+                    map.insert(format!("%{}", explicit + plus_ord), reg);
+                }
+                plus_ord += 1;
+            }
+        }
         if Self::asm_operand_map_dbg() {
             let mut kv: Vec<_> = map.iter().collect::<Vec<_>>();
             kv.sort();

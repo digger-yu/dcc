@@ -2425,6 +2425,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-std=iso9899:2017" => std = StdMode::C17,
             "-std=c23" => std = StdMode::C23,
             "-std=c2x" => std = StdMode::C23, // c2x = c23 别名
+            // GCC 14 起用 c2y 称呼下一个标准 (尚在草案, 核心语义是 C23 超集);
+            // dcc 无独立 C2y 模式, 按 C23 处理 —— 否则 gcc-dg 里
+            // `dg-options "-std=c2y"` 的用例会被 driver 直接拒掉 (bitint-132)。
+            "-std=c2y" => std = StdMode::C23,
             "-std=iso9899:2024" => std = StdMode::C23,
             "-std=gnu89" => std = StdMode::Gnu89,
             "-std=gnu90" => std = StdMode::Gnu89, // gnu90 = gnu89 别名
@@ -2434,6 +2438,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-std=gnu18" => std = StdMode::Gnu17, // gnu18 = gnu17 别名
             "-std=gnu23" => std = StdMode::Gnu23,
             "-std=gnu2x" => std = StdMode::Gnu23, // gnu2x = gnu23 别名
+            "-std=gnu2y" => std = StdMode::Gnu23, // 同上, c2y 家族按 C23 处理
             // C++ 标准模式
             "-std=c++11" | "-std=c++0x" => std = StdMode::Cpp11,
             "-std=c++14" | "-std=c++1y" => std = StdMode::Cpp14,

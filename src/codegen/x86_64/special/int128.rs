@@ -838,7 +838,8 @@ impl Codegen {
 
     // P1-4: __int128 加载变量到 rax:rdx (低:高)
     pub fn gen_int128_load(&mut self, name: &str) {
-        if self.is_global_var(name) {
+        // 局部优先: __int128 参数/局部变量可遮蔽同名全局。
+        if self.is_global_not_local(name) {
             self.emit_global_addr(11, name); // r11 = &global (resolve_global_key inside)
             self.emit_load_r11_disp64(0, 0); // rax = [r11]
             self.emit_load_r11_disp64(2, 8); // rdx = [r11+8]
@@ -872,7 +873,8 @@ impl Codegen {
 
     // P1-4: __int128 从 rax:rdx 存储到变量
     pub fn gen_int128_store(&mut self, name: &str) {
-        if self.is_global_var(name) {
+        // 局部优先: __int128 参数/局部变量可遮蔽同名全局。
+        if self.is_global_not_local(name) {
             self.emit_global_addr(11, name);
             self.emit_store_r11_disp64(0, 0); // [r11] = rax
             self.emit_store_r11_disp64(2, 8); // [r11+8] = rdx
@@ -973,24 +975,48 @@ impl Codegen {
             self.vector_temp_base(l_slot, vec_size)
         } else {
             self.gen_expr(l, Self::EVAL_BASE);
-            let t_off = self.vector_temp_base(l_slot, 16);
+            // 槽偏移必须与向量槽同一把尺子 (vec_size 步长): 按 16B 步长算,
+            // 64B 向量时槽 1 落在 [16,32), 与占 [0,64) 的 result 槽重叠,
+            // 结果逐 lane 写回时会把标量槽踩掉 (pr116037 一类 64B 向量)。
+            let t_off = self.vector_temp_base(l_slot, vec_size);
             self.emit_store(0, t_off, 8); // [r13+t_off] = rax (low)
-                                          // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
-            self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                    op: crate::codegen::x86_64::opcode::AluOp::Xor,
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        2,
+                                          // 标量 → 元素类型是转换而非零扩展: 有符号负值 (int -1)
+                                          // 转 unsigned __int128 元素得 2^128-1, 必须符号扩展;
+                                          // 128 位源 rax:rdx 已是完整值, 不能再改写高半部。
+            let st = l.ty();
+            if !matches!(st, Type::Int128 | Type::UInt128) {
+                let src_unsigned = matches!(
+                    st,
+                    Type::Bool
+                        | Type::UChar
+                        | Type::UShort
+                        | Type::UInt
+                        | Type::ULong
+                        | Type::ULongLong
+                        | Type::Ptr(_)
+                );
+                if src_unsigned {
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // xor rdx, rdx (零扩展)
+                } else {
+                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(
                         crate::codegen::shared::asm_operand::Width::B64,
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        2,
-                        crate::codegen::shared::asm_operand::Width::B64,
-                    ),
-                },
-                &[],
-            )); // xor rdx, rdx
+                    )); // cqo (符号扩展)
+                }
+            }
             self.emit_store(2, t_off + 8, 8); // [r13+t_off+8] = rdx (high)
             t_off
         };
@@ -1000,36 +1026,70 @@ impl Codegen {
             self.vector_temp_base(r_slot, vec_size)
         } else {
             self.gen_expr(r, Self::EVAL_BASE);
-            let t_off = self.vector_temp_base(r_slot, 16);
+            // 与左操作数同一条规矩: 槽按 vec_size 步长定位, 标量按源类型
+            // 符号/零扩展到 128 位 (见上)。
+            let t_off = self.vector_temp_base(r_slot, vec_size);
             self.emit_store(0, t_off, 8);
-            self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                    op: crate::codegen::x86_64::opcode::AluOp::Xor,
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        2,
+            let st = r.ty();
+            if !matches!(st, Type::Int128 | Type::UInt128) {
+                let src_unsigned = matches!(
+                    st,
+                    Type::Bool
+                        | Type::UChar
+                        | Type::UShort
+                        | Type::UInt
+                        | Type::ULong
+                        | Type::ULongLong
+                        | Type::Ptr(_)
+                );
+                if src_unsigned {
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // xor rdx, rdx (零扩展)
+                } else {
+                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(
                         crate::codegen::shared::asm_operand::Width::B64,
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        2,
-                        crate::codegen::shared::asm_operand::Width::B64,
-                    ),
-                },
-                &[],
-            )); // xor rdx, rdx
+                    )); // cqo (符号扩展)
+                }
+            }
             self.emit_store(2, t_off + 8, 8);
             t_off
         };
 
         for i in 0..count {
-            // 逐元素 stride: 每个 __int128 元素占 elem_size 字节
+            // 结果的 lane 偏移 (向量逐元素写回, 与操作数是否标量无关)
             let eo = (i as i64) * (elem_size as i64);
+            // 逐元素 stride: 向量操作数按 lane 前移; 标量只物化一份, 每个 lane
+            // 复用同一槽。若对标量也加 lane 偏移, 从第 2 个 lane 起读到槽外
+            // (pr116037: `x + vv` 只有 v[0] 正确)。
+            let l_eo = if l_is_vec {
+                (i as i64) * (elem_size as i64)
+            } else {
+                0
+            };
+            let r_eo = if r_is_vec {
+                (i as i64) * (elem_size as i64)
+            } else {
+                0
+            };
             // 加载操作数到 GP 寄存器对:
             // rax:rdx = left (low:high), rcx:r8 = right (low:high)
-            self.load_stack(0, l_off + eo); // rax = left low 64-bit
-            self.load_stack(2, l_off + eo + 8); // rdx = left high 64-bit
-            self.load_stack(1, r_off + eo); // rcx = right low 64-bit
-            self.load_stack(8, r_off + eo + 8); // r8 = right high 64-bit
+            self.load_stack(0, l_off + l_eo); // rax = left low 64-bit
+            self.load_stack(2, l_off + l_eo + 8); // rdx = left high 64-bit
+            self.load_stack(1, r_off + r_eo); // rcx = right low 64-bit
+            self.load_stack(8, r_off + r_eo + 8); // r8 = right high 64-bit
 
             match op {
                 // === 比较操作 (EqEq/Ne): 顺序 setcc + AND, 无需跳转 ===

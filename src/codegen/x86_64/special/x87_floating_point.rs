@@ -489,9 +489,25 @@ impl Codegen {
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
     }
 
-    /// x87 浮点比较: fucomip + 标志修正 -> rax (0/1)
+    /// x87 浮点比较: fucomip/fcomip + 标志修正 -> rax (0/1)
     /// 调用前: 需要加载左操作数和右操作数到 x87 栈
+    ///
+    /// 信令选择与 SSE 侧 `gen_float_cmp` 一致：C 标准把 `<`/`<=`/`>`/`>=`
+    /// 定义为**信令**比较，任一操作数为 NaN（含 quiet NaN）时要置
+    /// FE_INVALID，对应 `fcomip`；`==`/`!=` 是安静比较，对应 `fucomip`。
+    /// 旧实现恒用 fucomip，pr52451 的 `nanl > 1.0L` 不置 FE_INVALID。
     pub fn gen_float_cmp_x87(&mut self, op: BinOp, ty: &Type, l: &Expr, r: &Expr) {
+        let ordered = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
+        self.gen_float_cmp_x87_core(op, ty, l, r, ordered);
+    }
+
+    /// 安静版 x87 比较：供 `isless`/`isgreater`/… 这些 C99 谓词内建使用。
+    /// 它们在任一操作数为 NaN 时只返回 0，不得置 FE_INVALID（pr52451 断言）。
+    pub fn gen_float_cmp_x87_quiet(&mut self, op: BinOp, ty: &Type, l: &Expr, r: &Expr) {
+        self.gen_float_cmp_x87_core(op, ty, l, r, false);
+    }
+
+    fn gen_float_cmp_x87_core(&mut self, op: BinOp, ty: &Type, l: &Expr, r: &Expr, signaling: bool) {
         let is_ld = matches!(ty, Type::LongDouble);
         // 固定 16 字节: 既够装 tbyte, 又保证嵌套求值里 `call` 时 rsp 仍 16 字节对齐
         // （旧代码非 ld 时用 8, 会在比较表达式含调用时把对齐破坏给被调方）。
@@ -519,8 +535,8 @@ impl Codegen {
         }
         self.emit_insn(&Insn::add_rsp_imm(save_bytes as i64)); // add rsp, 16
                                                                // 现在 st(0) = l, st(1) = r
-                                                               // fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
-        self.emit_insn(&Insn::x87_fixed(0xDF, 0xE9)); // fucomip st(0), st(1)
+        // fcomip/fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
+        self.emit_insn(&Insn::x87_fixed(0xDF, if signaling { 0xF1 } else { 0xE9 }));
                                                       // 实测（fnstsw 读 TOP 位）：FUCOMIP 只弹**一次**，
                                                       // 弹出的是左操作数，右操作数仍留在 st(0)。不弹掉它，
                                                       // 每个浮点比较就漏一层 x87 栈（8 层后溢出成静默错值，

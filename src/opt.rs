@@ -157,6 +157,18 @@ pub fn optimize_with_full_target(
     if !opt_skipped("fold_asm_immediate_consts") {
         crate::pass_probe::probe("fold_asm_immediate_consts", module, fold_asm_immediate_consts);
     }
+    // `static inline` 的定义就是内联体：调用点全展开后没人引用就不发副本。
+    // 必须排在内联之后（判据看的是展开后还剩不剩引用），且必须在 `level == 0`
+    // 提前返回**之前** —— 内核 `arch_static_branch` 这类 `"i"(形参)` 的
+    // `__always_inline` 助手在 -O0/-O1 没有跨函数 DCE，副本会直接编不出来。
+    if !opt_skipped("drop_unused_static_inline_defs") {
+        crate::pass_probe::probe(
+            "drop_unused_static_inline_defs",
+            module,
+            drop_unused_static_inline_defs,
+        );
+        dump_after_pass("drop_unused_static_inline_defs", module);
+    }
     if level == 0 {
         crate::pass_probe::flush("");
         return;
@@ -2010,6 +2022,73 @@ fn cross_function_dce(module: &mut Module) {
     prog.decls = all;
 }
 
+/// 丢弃「无人引用」的 `static inline` 函数定义。
+///
+/// GCC 对 `static` + `inline` 的语义是「定义即内联体」：没有任何 out-of-line
+/// 引用（调用点全部被内联展开、地址没被取、asm 文本没点名）时**不发射**独立
+/// 副本 —— `-O0` 实测同样如此（未使用的普通 `static` 会发射，`static inline`
+/// 不会：`nm` 里前者有 `t`、后者一个符号都没有）。
+///
+/// dcc 的 `cross_function_dce` 只在 `level >= 2` 跑，`-O0`/`-O1` 于是把副本
+/// 照样发射；而副本体里的 `"i"(形参)`（内核 `__always_inline` 的
+/// `arch_static_branch` 这类）离开调用点的常量实参根本折不出立即数 ⇒ 整个 TU
+/// 硬错误。实测默认档位：analyzer/torture/asm-x86-linux-cpuid-paravirt-2.c、
+/// asm-x86-linux-wfx_get_ps_timeout-full.c。
+///
+/// 判据刻意保守：从**所有**实体上收名字（函数体、全局初始化器、文件级 asm、
+/// asm 文本），只删「除自己体里的引用外没人提到」的 `static inline` 定义。
+/// 自引用（递归）是唯一放不下的形状：那点保守只会多留一份体，不会误删。
+fn drop_unused_static_inline_defs(module: &mut Module) {
+    let prog = module.source_mut();
+    let mut referenced: HashSet<String> = collect_asm_names(prog);
+    let collect = |e: &Expr, out: &mut HashSet<String>| {
+        if let Expr::Ident { name, .. } = e {
+            out.insert(name.name.clone());
+        }
+    };
+    for d in &prog.decls {
+        match d {
+            Decl::Func(f) => {
+                // alias/ifunc/copy 的目标是按**名字**引用的，asm 文本取词器看不见。
+                if let Some(t) = &f.alias_name {
+                    referenced.insert(t.clone());
+                }
+                if let Some(t) = &f.ifunc_resolver {
+                    referenced.insert(t.clone());
+                }
+                if let Some(b) = &f.body {
+                    walk_block_ref(b, &mut |e| collect(e, &mut referenced));
+                }
+            },
+            Decl::Var(v) => {
+                if let Some(init) = &v.init {
+                    walk_expr_ref(init, &mut |e| collect(e, &mut referenced));
+                }
+            },
+            Decl::GlobalAsm { outputs, inputs, .. } => {
+                for e in outputs.iter().chain(inputs.iter()) {
+                    walk_expr_ref(e, &mut |e| collect(e, &mut referenced));
+                }
+            },
+            _ => {},
+        }
+    }
+    prog.decls.retain(|d| match d {
+        Decl::Func(f) => {
+            if !f.is_static || !(f.is_inline || f.is_always_inline) || f.body.is_none() {
+                return true;
+            }
+            // 硬根（used/retain/ctor/dtor/非 inline 的 section/alias/ifunc/…）
+            // 与 weak 一律保留：链接期还有别人可能引用它们。
+            if f.is_weak || crate::ssa::passes::is_dce_root_hard(f) {
+                return true;
+            }
+            referenced.contains(&f.name.name)
+        },
+        _ => true,
+    });
+}
+
 fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Ident { name, ty, .. } => {
@@ -2578,9 +2657,16 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                 if let (Expr::Float { c: lc, .. }, Expr::Float { c: rc, .. }) =
                     (l.as_ref(), r.as_ref())
                 {
-                    // LongDouble 不做编译期折叠：宿主无 80-bit 运算，
-                    // 留给后端 x87 运行时按目标舍入模式求值。
-                    if lc.is_long_double() || rc.is_long_double() {
+                    // LongDouble / Float128 不做编译期折叠：宿主无 80-bit /
+                    // 128-bit 运算，f64 中转会把 binary128 的低位舍掉——
+                    // `1.0f128 - FLT128_EPSILON * 0.5f128` 的正确值
+                    // 1 - 2^-113 在 f64 里就是 1.0，整条比较因此恒真
+                    // (float128-floath.c 最后一条检查 abort)。
+                    if lc.is_long_double()
+                        || rc.is_long_double()
+                        || lc.is_float128()
+                        || rc.is_float128()
+                    {
                         // fall through, keep original expression
                     } else if let Some(v) = eval_float_binop(op, lc.as_f64(), rc.as_f64()) {
                         // 结果精度必须匹配目标类型: Float 结果截为 f32

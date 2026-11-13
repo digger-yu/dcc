@@ -2480,6 +2480,32 @@ impl Codegen {
         }
     }
 
+    /// EH 落地垫入口的栈复位。
+    ///
+    /// unwinder 交控制到标签时, `%rsp` 等于受保护 `call` **执行前**的值 —— 而
+    /// 调用点为了出参区 / 16 字节对齐常常把 rsp 压得比帧线低 (`Stmt::Invoke` 区间
+    /// 里就有 `sub $N,%rsp` 包着那次 call)。不在入口复位, catch 体随后顺延到
+    /// 函数出口时 `add $帧长,%rsp` 会少退那一段, `pop %r13; ret` 便从错误槽位
+    /// 读返回地址与 callee-saved 号 —— 实测 `tests/fixtures/cpp_abi_eh` 的 6 个
+    /// 夹具全部 SIGSEGV(139)。
+    ///
+    /// 帧线口径与尾声一致: `%r13` 是帧基 (过对齐帧里它已被序言下调到对齐基线);
+    /// frame-pointer 模式在 `mov %rsp,%r13` 之后又多推了 8 字节, 那 8 不在
+    /// `frame_size` 里。复位后 rsp 正落在帧线上, 所以 `stack_shift` 一并清零。
+    pub fn emit_eh_landing_pad_rsp_restore(&mut self) {
+        if self.cur_func_is_naked {
+            return;
+        }
+        let mut below_frame_line = self.frame_layout.frame_size;
+        if self.target.frame_pointer {
+            below_frame_line += 8;
+        }
+        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
+        self.emit_sub_rsp(below_frame_line);
+        // rsp 已在帧线上: 后续调用点不再需要补偿任何「中途下推」。
+        self.stack_shift = 0;
+    }
+
     // ========================================================================
     // Arithmetic instructions
     // ========================================================================

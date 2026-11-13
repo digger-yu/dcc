@@ -1033,9 +1033,12 @@ impl Codegen {
                         0,
                     ));
                 }
-                // C 语义: 可变参数函数的 float 参数默认提升为 double
-                // printf("%f", 1.0f) 实际传递的是 double 1.0
-                // K&R (无原型) 函数同样适用默认参数提升: float → double
+                // C 语义: 变参部分(`...`)的 float 实参默认提升为 double
+                // (printf("%f", 1.0f) 实际传递的是 double 1.0)。
+                // 但**具名形参**已有原型声明, 不做默认提升: 对
+                // `float vaf(float a, ...)` 的 `a`, gcc 按 movss 传 4 字节,
+                // 提升会让 callee 从 xmm0 低 32 位读到 0 (float32-basic 实测)。
+                // K&R (无原型) 函数则所有实参都走默认提升, 与具名与否无关。
                 let is_variadic = direct
                     .and_then(|name| self.variadic_funcs.get(name))
                     .copied()
@@ -1043,7 +1046,13 @@ impl Codegen {
                 let is_old_style = direct
                     .map(|name| self.old_style_funcs.contains(name))
                     .unwrap_or(false);
-                let promoted = (is_variadic || is_old_style) && matches!(effective_ty, Type::Float);
+                // 该实参位置是否有原型声明的形参类型 (有 = 具名形参)
+                let has_proto_param = direct
+                    .and_then(|name| self.func_param_types.get(name))
+                    .map(|ps| arg_idx < ps.len())
+                    .unwrap_or(false);
+                let promoted = (is_old_style || (is_variadic && !has_proto_param))
+                    && matches!(effective_ty, Type::Float);
                 if promoted {
                     // cvtss2sd xmm0, xmm0: float → double
                     self.emit_insn(&Insn::simd_arith_reg(

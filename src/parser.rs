@@ -2331,7 +2331,12 @@ impl<'a> Parser<'a> {
                 }
                 // 内存/指针函数
                 "__builtin_memchr" | "__builtin_stack_save" | "__builtin_stack_restore" |
-                "__builtin_alloca" => {
+                "__builtin_alloca" | "__builtin_alloca_with_align" |
+                // 分配器返回 void*: 缺这些臂会把返回值当 int, 指针高位被截掉
+                // (pr52402: `char *p = __builtin_malloc(...)` 得 32 位残值)。
+                "__builtin_malloc" | "__builtin_calloc" | "__builtin_realloc" |
+                "__builtin_aligned_alloc" | "__builtin_assume_aligned" |
+                "__builtin_apply_args" | "__builtin_apply" | "__builtin_return" => {
                     return Type::Ptr(Box::new(Type::Void.into()))
                 }
                 // 返回 int 的 builtin
@@ -2342,6 +2347,11 @@ impl<'a> Parser<'a> {
                 "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" |
                 "__builtin_ilogb" | "__builtin_ilogbf" | "__builtin_ilogbl" |
                 "__builtin_iseqsig" | "__builtin_iseqsigf" | "__builtin_iseqsigl" |
+                "__builtin_isinf_sign" | "__builtin_isinf_signf" |
+                "__builtin_isinf_signl" | "__builtin_iscntrl" |
+                "__builtin_add_overflow_p" | "__builtin_sub_overflow_p" |
+                "__builtin_clzg" | "__builtin_ctzg" |
+                "__builtin_va_arg_pack_len" |
                 "__builtin___snprintf_chk" | "__builtin_memcmp" |
                 "__builtin_strncmp" | "__builtin_strncasecmp" |
                 "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" |
@@ -2361,15 +2371,18 @@ impl<'a> Parser<'a> {
                 }
                 // 返回 float 的 builtin
                 "__builtin_modff" | "__builtin_fmodf" |
+                "__builtin_fabsf" |
                 "__builtin_copysignf" => {
                     return Type::Float
                 }
                 // 返回 double 的 builtin
-                "__builtin_copysign" | "__builtin_modf" => {
+                "__builtin_copysign" | "__builtin_modf" |
+                "__builtin_fabs" => {
                     return Type::Double
                 }
                 // 返回 long double 的 builtin
                 "__builtin_modfl" | "__builtin_fmodl" |
+                "__builtin_fabsl" |
                 "__builtin_copysignl" => {
                     return Type::LongDouble
                 }
@@ -2382,19 +2395,22 @@ impl<'a> Parser<'a> {
                 // 返回 char* 的 builtin
                 "__builtin_strdup" | "__builtin_strndup" |
                 "__builtin_stpncpy" | "__builtin_strncat" | "__builtin_strncpy" |
+                "__builtin_strcat" |
                 "__builtin_strcpy" | "__builtin_stpcpy" => {
                     return Type::Ptr(Box::new(Type::Char.into()))
                 }
                 // 返回 void 的 builtin (无返回值, 不需要警告)
                 "__builtin_va_end" | "__builtin_clear_padding" |
                 "__builtin___clear_cache" | "__builtin_abort" |
-                "__builtin_exit" |
+                "__builtin_exit" | "__builtin_unwind_init" | "__builtin_longjmp" |
                 "__builtin_va_start" => return Type::Void,
                 // 返回 long 的 builtin
                 "__builtin_expect" => return Type::Long,
                 // 返回 unsigned 的 builtin
                 "__builtin_bswap16" | "__builtin_bswap32" => return Type::UInt,
                 "__builtin_bswap64" => return Type::ULong,
+                // GCC 14: uint128_t __builtin_bswap128 (uint128_t)
+                "__builtin_bswap128" => return Type::UInt128,
                 // Vector 操作 (返回类型依赖参数, 暂时返回 int)
                 "__builtin_shufflevector" | "__builtin_convertvector" => return int_t(),
                 _ => {}
@@ -2409,6 +2425,133 @@ impl<'a> Parser<'a> {
             other => other,
         };
         result
+    }
+
+    /// `__builtin_tgmath(funcs..., args...)` 的解析期分派。
+    ///
+    /// 候选函数占前缀（函数声明或 `__builtin_*` 数学名），尾部实参按
+    /// “通常算术转换”合成选择类型（纯整型 → double）；再挑参数类型匹配的
+    /// 候选，退化成普通调用。dcc 把 `_Float16/_Float32` 退化为 float、
+    /// `_Float32x/_Float64` 退化为 double，同宽度的两个候选无法区分，
+    /// 此时取列表中第一个同宽度者（GCC 的 `_FloatN` 精确定位测试依赖
+    /// 原始类型拼写，这一层退化是已知边界）。
+    fn lower_builtin_tgmath(&mut self, args: Vec<Expr>, sp: Span) -> Expr {
+        // 1. 前缀候选: 函数类型 / `__builtin_*` 数学内建名。
+        let mut nfunc = 0usize;
+        while nfunc < args.len() {
+            if Self::func_sig(&args[nfunc].ty()).is_some() {
+                nfunc += 1;
+                continue;
+            }
+            if let Expr::Ident { name, .. } = &args[nfunc] {
+                if name.name.starts_with("__builtin_") {
+                    nfunc += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        if nfunc == 0 || nfunc == args.len() {
+            self.diags.push(Diagnostic::err(
+                "E0018",
+                "__builtin_tgmath needs leading function candidates and trailing arguments",
+                sp.clone(),
+            ));
+            return Expr::Int { v: 0, span: sp, ty: int_t() };
+        }
+        // 2. 选择类型: 尾部实参按算术转换合并; 纯整型落到 double。
+        let (mut rank, mut cplx) = (0u8, false);
+        for a in &args[nfunc..] {
+            let (r, c) = Self::tgmath_class(&a.ty());
+            rank = rank.max(r);
+            cplx |= c;
+        }
+        if rank == 0 {
+            rank = 2;
+            cplx = false;
+        }
+        // 3. 候选匹配: 先按 (等级, 复数性), 再退到同等级, 最后 double。
+        let mut chosen = None;
+        let mut same_rank = None;
+        let mut dbl = None;
+        for i in 0..nfunc {
+            let prm = Self::tgmath_candidate_param(&args[i]);
+            if prm == (rank, cplx) {
+                chosen = Some(i);
+                break;
+            }
+            if prm.0 == rank && same_rank.is_none() {
+                same_rank = Some(i);
+            }
+            if prm == (2, false) && dbl.is_none() {
+                dbl = Some(i);
+            }
+        }
+        let idx = chosen.or(same_rank).or(dbl).unwrap_or(0);
+        let ret = Self::func_sig(&args[idx].ty())
+            .map(|(r, _)| r)
+            .unwrap_or_else(|| self.call_result_type(&args[idx]));
+        Expr::Call {
+            callee: Box::new(args[idx].clone()),
+            args: args[nfunc..].to_vec(),
+            span: sp,
+            ty: ret,
+        }
+    }
+
+    /// 函数类型 → (返回类型, 参数类型表)。
+    fn func_sig(t: &Type) -> Option<(Type, Vec<QualType>)> {
+        match t {
+            Type::Func(ret, params) => Some((ret.base.clone(), params.clone())),
+            Type::Ptr(inner) => match &inner.base {
+                Type::Func(ret, params) => Some((ret.base.clone(), params.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// tgmath 候选取参类型: 函数声明取首参; 未声明的 `__builtin_*`
+    /// 数学内建按名字后缀推（f→float, l→long double, fN/fNx→基础类型）。
+    fn tgmath_candidate_param(e: &Expr) -> (u8, bool) {
+        if let Some((_, params)) = Self::func_sig(&e.ty()) {
+            if let Some(p) = params.first() {
+                return Self::tgmath_class(&p.base);
+            }
+        }
+        if let Expr::Ident { name, .. } = e {
+            // fN/fNx 后缀先于裸 f/l 判断（f128 不能当成 f 后缀）。
+            if let Some((_, base)) = Self::float_builtin_suffix(&name.name) {
+                return Self::tgmath_class(&base);
+            }
+            let bare = name.name.strip_prefix("__builtin_").unwrap_or(&name.name);
+            if bare.ends_with('f') && bare.len() > 1 {
+                return (1, false);
+            }
+            if bare.ends_with('l') && bare.len() > 1 {
+                return (3, false);
+            }
+        }
+        (2, false)
+    }
+
+    /// (等级, 是否复数): 0=整型/指针, 1=float, 2=double, 3=long double, 4=binary128。
+    fn tgmath_class(t: &Type) -> (u8, bool) {
+        match t {
+            Type::Float => (1, false),
+            Type::Double => (2, false),
+            Type::LongDouble => (3, false),
+            Type::Float128 => (4, false),
+            Type::Complex(inner) => {
+                let (r, _) = Self::tgmath_class(&inner.base);
+                (if r == 0 { 2 } else { r }, true)
+            },
+            Type::Imaginary(inner) => {
+                let (r, _) = Self::tgmath_class(&inner.base);
+                (if r == 0 { 2 } else { r }, true)
+            },
+            _ => (0, false),
+        }
     }
 
     /// 扩展浮点 (_FloatN/_FloatNx) 内建的 fN/fNx 宽度后缀 → (stem, 降级基础浮点类型).
@@ -3065,6 +3208,14 @@ impl<'a> Parser<'a> {
         //    以 matched constraint、多重约束和显式寄存器分类为准。
         // 5. 模板占位符数量与操作数数量不匹配 (W0008)
         let total_ops = outputs.len() + inputs.len();
+        // GCC 的模板编号把每个 `+` 输出的隐式输入半排在全部显式操作数之后，
+        // 所以 `+a` 单独一个操作数时 %1 合法（pr110228 的 `%q1`），而 `=` 输出
+        // 没有输入半（%1 越界）。这里只影响模板越界判定，不动匹配约束那条。
+        let template_ops = total_ops
+            + output_constraints
+                .iter()
+                .filter(|c| c.trim().starts_with('+'))
+                .count();
         let bytes = asm_str.as_bytes();
         let mut pos = 0;
         let mut max_idx: Option<usize> = None;
@@ -3157,14 +3308,14 @@ impl<'a> Parser<'a> {
             }
         }
         if let Some(max) = max_idx {
-            if max >= total_ops && total_ops > 0 {
+            if max >= template_ops && template_ops > 0 {
                 self.diags.push(
                     Diagnostic::warn(
                         "W0008",
                         format!(
                             "asm template references operand %{} but only {} \
                          operand(s) provided; emitted as nop",
-                            max, total_ops
+                            max, template_ops
                         ),
                         sp.clone(),
                     )
@@ -6331,6 +6482,43 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 基类型（void/_Bool/__int128/_Fract/_Accum 等会 `break` 的那类）之后是否
+    /// 紧跟一个**只能属于声明说明符、不可能是声明符**的 token。
+    ///
+    /// 为什么需要：C11 6.7.2 允许声明说明符任意排列，`static void inline f()`
+    /// 合法（gcc-dg torture/stackalign/inline-1.c）；但上面那些臂在设完 base 后
+    /// 直接 break，把 `inline` 丢给了声明符解析 → `expected identifier, got
+    /// KwInline`。而 `_Bool _Bool;` 里的第二个 `_Bool` 在本解析器里是合法的
+    /// 声明符名字（KwBool 也认作标识符），不能因为「后面还有关键字」就继续吞，
+    /// 所以只放行确定不是声明符的 token。
+    fn post_type_specifier_follows(&self) -> bool {
+        matches!(
+            self.cur.kind,
+            TokKind::KwInline
+                | TokKind::KwStatic
+                | TokKind::KwExtern
+                | TokKind::KwRegister
+                | TokKind::KwConst
+                | TokKind::KwVolatile
+                | TokKind::KwRestrict
+                | TokKind::KwAtomic
+        ) || (self.cur.kind == TokKind::Ident
+            && matches!(
+                self.cur.text.as_str(),
+                "__attribute__"
+                    | "__asm__"
+                    | "__asm"
+                    | "__extension__"
+                    | "_Noreturn"
+                    | "_Alignas"
+                    | "__thread"
+                    | "_Thread_local"
+            ))
+            || (self.cur.kind == TokKind::Ident
+                && self.cur.text == "alignas"
+                && self.opts.is_c23)
+    }
+
     fn parse_decl_specifiers(&mut self) -> Option<Type> {
         self.parse_type_mode(true)
     }
@@ -7479,7 +7667,9 @@ impl<'a> Parser<'a> {
                             .unwrap_or(Type::Int)
                     };
                     self.enum_consts.insert(id.name.clone(), (val, cty));
-                    nv = val + 1;
+                    // 最后一个成员取 i64::MAX 时 +1 溢出; 该游标此后不再使用,
+                    // 隐式成员越界已由 parse_enum_body 诊断。
+                    nv = val.saturating_add(1);
                 }
                 return Some(self.finish_type(Type::Enum(nm, vals_rc, under), specifiers_only));
             } else if !nm.is_empty() {
@@ -7592,7 +7782,10 @@ impl<'a> Parser<'a> {
                 // 未被消费, declarator 解析会把它当成变量名而报
                 // `expected ';', '=', '(', got Ident` (gcc-dg torture/float32x-complex.c)。
                 // 退化映射与第一个 loop 逐字一致 (x86-64: f16/f32→float,
-                // f32x/f64→double, f64x/f128/f128x→long double)。
+                // f32x/f64→double, f64x→long double, f128/f128x→binary128)。
+                // 旧写法把 f128/f128x 也归到 long double, 于是 `_Complex _Float128`
+                // 的 inner 变成 x87 80-bit: 全局初始化写出 80-bit 位型、分量读写
+                // 走 fld/fstp —— float128-complex.c 静默错值 (re=3 真值被读成 -5e-308)。
                 // 不 break: 之后可能还有 `_Complex`/指针/declarator。
                 TokKind::Ident
                     if matches!(
@@ -7609,7 +7802,8 @@ impl<'a> Parser<'a> {
                     base = Some(match self.cur.text.as_str() {
                         "_Float16" | "_Float32" => Type::Float,
                         "_Float32x" | "_Float64" => Type::Double,
-                        _ => Type::LongDouble,
+                        "_Float64x" => Type::LongDouble,
+                        _ => Type::Float128,
                     });
                     self.advance();
                 },
@@ -7632,27 +7826,37 @@ impl<'a> Parser<'a> {
                 TokKind::KwVoid => {
                     base = Some(Type::Void);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwBool => {
                     base = Some(Type::Bool);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwChar8 => {
                     base = Some(Type::Char8);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwChar16 => {
                     base = Some(Type::Char16);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwChar32 => {
                     base = Some(Type::Char32);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwFloat => {
                     base = Some(Type::Float);
@@ -7677,22 +7881,30 @@ impl<'a> Parser<'a> {
                 TokKind::KwInt128 => {
                     base = Some(Type::Int128);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwUInt128 => {
                     base = Some(Type::UInt128);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwFract => {
                     base = Some(Type::Fract);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwAccum => {
                     base = Some(Type::Accum);
                     self.advance();
-                    break;
+                    if !self.post_type_specifier_follows() {
+                        break;
+                    }
                 },
                 TokKind::KwSigned => {
                     // 以前只消费关键字不记事实，于是 `char`（C11 6.2.5p6：与 `signed char`
@@ -7830,6 +8042,18 @@ impl<'a> Parser<'a> {
                 },
                 // __extension__: GNU 扩展, 抑制警告, 直接跳过
                 TokKind::Ident if self.cur.text == "__extension__" => {
+                    self.advance();
+                },
+                // _Noreturn: 函数说明符, 可出现在基类型之后 (`void _Noreturn f()`)
+                TokKind::Ident if self.cur.text == "_Noreturn" => {
+                    self.decl_attrs.is_noreturn = true;
+                    self.advance();
+                },
+                // _Thread_local / __thread: 存储类, 可出现在类型之后
+                TokKind::Ident
+                    if self.cur.text == "_Thread_local" || self.cur.text == "__thread" =>
+                {
+                    self.decl_storage.is_thread_local = true;
                     self.advance();
                 },
                 _ => break,
@@ -8689,7 +8913,9 @@ impl<'a> Parser<'a> {
     fn parse_enum_body(&mut self) -> Vec<(Ident, Option<i64>)> {
         let mut vs = vec![];
         let mut seen = std::collections::HashSet::new();
-        let mut nv: i64 = 0; // 隐式递增游标 (enum { A, B } -> A=0, B=1)
+        // 隐式递增游标 (enum { A, B } -> A=0, B=1)。None 表示前一个
+        // 显式值已是 i64::MAX, 后继隐式值超出 long long 可表示范围。
+        let mut nv: Option<i64> = Some(0);
         while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
             if self.cur.kind == TokKind::Comma {
                 self.advance();
@@ -8728,9 +8954,25 @@ impl<'a> Parser<'a> {
             // (enum { A = 1, B = A + 1 }; 的 B 表达式解析时 A 必须已可查)。
             // 类型先用 Int 占位, 解析完整个 enum 后由调用方统一覆盖为
             // C23 底层类型 (值不受影响)。
-            let v = val.unwrap_or(nv);
+            let v = match val {
+                Some(v) => v,
+                None => match nv {
+                    Some(n) => n,
+                    None => {
+                        // 前一个成员已是 i64::MAX, 隐式值 = 前值 + 1 越界。
+                        // GCC 对同样的输入报 "overflow in enumeration values"
+                        // (旧实现直接 `v + 1` 溢出 panic)。
+                        self.err_here(
+                            "E0005",
+                            "overflow in enumeration values".to_string(),
+                            Some("implicit enumerator value exceeds the range of long long"),
+                        );
+                        0
+                    },
+                },
+            };
             self.enum_consts.insert(nm.name.clone(), (v, Type::Int));
-            nv = v + 1;
+            nv = v.checked_add(1);
             vs.push((nm, val));
             if self.cur.kind == TokKind::Comma {
                 self.advance();
@@ -12402,6 +12644,31 @@ impl<'a> Parser<'a> {
                             e = chosen;
                             continue;
                         }
+                        // __builtin_tgmath(funcs..., args...): 类型泛型分派。
+                        // glibc 的 <tgmath.h> 把每个数学宏都展开成本内建
+                        // （如 sqrt(x) → __builtin_tgmath(sqrtf, sqrt,
+                        // sqrtl, __builtin_sqrtf128, x)）；不实现它连
+                        // `#include <tgmath.h>` 的普通用例都过不了。
+                        // 按尾部实参合成的“选择类型”在候选里挑参数类型匹配的
+                        // 那个，退化成对它的普通调用。
+                        if name.name == "__builtin_tgmath" {
+                            let mut targs: Vec<Expr> = Vec::new();
+                            if self.cur.kind != TokKind::RParen {
+                                loop {
+                                    targs.push(self.parse_expr_bp(2)?);
+                                    if self.cur.kind == TokKind::Comma {
+                                        self.advance();
+                                        continue;
+                                    }
+                                    break;
+                                }
+                            }
+                            if !self.expect(TokKind::RParen, "')'") {
+                                return None;
+                            }
+                            e = self.lower_builtin_tgmath(targs, sp.clone());
+                            continue;
+                        }
                         // __builtin_constant_p(expr): 只判断，不执行参数。
                         if name.name == "__builtin_constant_p" {
                             let arg = self.parse_expr_bp(2)?;
@@ -12665,10 +12932,13 @@ impl<'a> Parser<'a> {
                                 }
                             }
                         }
-                        // __builtin_bswap16/32/64: 字节序反转 (编译期)
+                        // __builtin_bswap16/32/64/128: 字节序反转 (编译期)
                         if matches!(
                             name.name.as_str(),
-                            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
+                            "__builtin_bswap16"
+                                | "__builtin_bswap32"
+                                | "__builtin_bswap64"
+                                | "__builtin_bswap128"
                         ) {
                             if let TokKind::Number = self.cur.kind {
                                 // 先折再吃 token（同 __builtin_abs 臂）：折不动就把
@@ -12676,20 +12946,31 @@ impl<'a> Parser<'a> {
                                 if let Some(v) = crate::const_eval::eval_int_lit(&self.cur.text) {
                                     self.advance();
                                     if self.expect(TokKind::RParen, "')'") {
-                                        let bits: u64 = v as u64;
+                                        let bits: u128 = v as u128;
                                         let result = match name.name.as_str() {
                                             "__builtin_bswap16" => {
-                                                (bits & 0xffff).swap_bytes() as i128
+                                                (bits as u16).swap_bytes() as i128
                                             },
                                             "__builtin_bswap32" => {
                                                 (bits as u32).swap_bytes() as i128
                                             },
-                                            _ => bits.swap_bytes() as i128,
+                                            "__builtin_bswap128" => bits.swap_bytes() as i128,
+                                            _ => (bits as u64).swap_bytes() as i128,
+                                        };
+                                        // 折叠结果类型必须与内建返回类型一致:
+                                        // 统一标 int 会在赋值时把 bswap64/128 的
+                                        // 高位 (及 128 位结果) 截掉。
+                                        let rty = match name.name.as_str() {
+                                            "__builtin_bswap16" | "__builtin_bswap32" => {
+                                                Type::UInt
+                                            },
+                                            "__builtin_bswap128" => Type::UInt128,
+                                            _ => Type::ULong,
                                         };
                                         e = Expr::Int {
                                             v: result,
                                             span: sp.clone(),
-                                            ty: int_t(),
+                                            ty: rty,
                                         };
                                         continue;
                                     }
@@ -12921,6 +13202,32 @@ impl<'a> Parser<'a> {
                                     | "__builtin_add_overflow"
                                     | "__builtin_sub_overflow"
                                     | "__builtin_mul_overflow"
+                                    // 以下名字已在 `call_result_type` 里有显式返回类型臂;
+                                    // 列在这里只为止掉 W1015 误报的噪声。
+                                    | "__builtin_malloc"
+                                    | "__builtin_calloc"
+                                    | "__builtin_realloc"
+                                    | "__builtin_aligned_alloc"
+                                    | "__builtin_alloca_with_align"
+                                    | "__builtin_assume_aligned"
+                                    | "__builtin_apply_args"
+                                    | "__builtin_apply"
+                                    | "__builtin_return"
+                                    | "__builtin_unwind_init"
+                                    | "__builtin_longjmp"
+                                    | "__builtin_isinf_sign"
+                                    | "__builtin_isinf_signf"
+                                    | "__builtin_isinf_signl"
+                                    | "__builtin_iscntrl"
+                                    | "__builtin_add_overflow_p"
+                                    | "__builtin_sub_overflow_p"
+                                    | "__builtin_clzg"
+                                    | "__builtin_ctzg"
+                                    | "__builtin_va_arg_pack_len"
+                                    | "__builtin_strcat"
+                                    | "__builtin_fabs"
+                                    | "__builtin_fabsf"
+                                    | "__builtin_fabsl"
                                     | "__builtin_sprintf"
                                     | "__builtin_strlen"
                                     | "__builtin_return_address"
@@ -12935,6 +13242,7 @@ impl<'a> Parser<'a> {
                                     | "__builtin_bswap16"
                                     | "__builtin_bswap32"
                                     | "__builtin_bswap64"
+                                    | "__builtin_bswap128"
                                     | "__builtin_sqrt"
                                     | "__builtin_sqrtf"
                                     | "__builtin_sqrtl"
@@ -12981,6 +13289,12 @@ impl<'a> Parser<'a> {
                                     | "__builtin_nan"
                                     | "__builtin_nanf"
                                     | "__builtin_nanl"
+                                    // 信令 NaN 家族与上面同形: `call_result_type` 已给出
+                                    // double/float/long double, 漏列只会让已知返回类型的内建
+                                    // 反而报 W1015「assuming int」(builtin-iseqsig-1.c 实测)。
+                                    | "__builtin_nans"
+                                    | "__builtin_nansf"
+                                    | "__builtin_nansl"
                                     | "__builtin_nanq"
                                     | "__builtin_nansq"
                                     // x86 CPU 检测三件套：真实现在
