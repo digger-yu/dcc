@@ -110,6 +110,19 @@ impl Codegen {
             _ => {},
         }
     }
+    /// `ceil/floor/round/trunc` 的 SSE4.1 内联实现。`roundsd/roundss` 的 IMM8 里，
+    /// 置位 imm8[3]（0x08）时舍入非整数**不**置 FE_INEXACT——实测本机 imm8[2]
+    /// （0x04）对 PE 位毫无影响（$2/$3/$6/$7 均报 inexact，$8~$11 均不报），
+    /// GCC 在 `-fno-fp-int-builtin-inexact` 下也正是发 `$0x0A`(ceil)/`$0x09`(floor)。
+    /// 这正是 C23 F.10.6.1 对这四个内建的精确性要求；bit3 清零时按 IEEE 缺省报告
+    /// 精度异常（GCC 默认的 `-ffp-int-builtin-inexact`）。
+    /// 旧实现恒发 bit3=0，于是 torture/builtin-fp-int-inexact.c 的
+    /// `__builtin_ceil(1.5)` 把 FE_INEXACT 置了起来。
+    fn emit_round_to_integral(&mut self, width: SimdWidth, mode: u8) {
+        let spe = if self.target.fp_int_builtin_inexact { 0 } else { 0x08 };
+        self.emit_insn(&Insn::simd_round_reg(width, mode | spe, 0, 0));
+    }
+
     fn eval_mem_order(&self, arg: &Expr) -> i32 {
         match arg {
             Expr::Int { v, .. } => *v as i32,
@@ -152,6 +165,85 @@ impl Codegen {
                 if ord == 5 {
                     self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
+                if dst != 6 {
+                    self.mov(dst, 6);
+                }
+                true
+            },
+            // __atomic_add_fetch/__atomic_sub_fetch: 原子加/减并返回**新值**。
+            // 与 fetch_* 只差返回值：`lock xadd` 后 rsi = 旧值，新值 = 旧值 ± val；
+            // val 在 xadd 前存进 rdx（gen_expr 均已结束，rdx 是空闲 scratch）。
+            "__atomic_add_fetch" | "__atomic_sub_fetch" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                use crate::codegen::x86_64::opcode::AluOp as A;
+                let is_sub = name == "__atomic_sub_fetch";
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 6); // rsi = val
+                self.mov(2, 6); // rdx = val
+                if is_sub {
+                    self.emit_neg(sz);
+                }
+                self.emit_atomic_xadd(sz); // rsi = old
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    if is_sub { A::Sub } else { A::Add },
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    6,
+                    2,
+                )); // rsi = old ± val
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 {
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
+                }
+                if dst != 6 {
+                    self.mov(dst, 6);
+                }
+                true
+            },
+            // __sync_add_and_fetch/__sync_sub_and_fetch：同样返回新值，但没有
+            // 内存序实参（__sync 系列是 full barrier）。
+            "__sync_add_and_fetch" | "__sync_sub_and_fetch" => {
+                if args.len() < 2 {
+                    return false;
+                }
+                use crate::codegen::x86_64::opcode::AluOp as A;
+                let is_sub = name == "__sync_sub_and_fetch";
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.mov(2, 6);
+                if is_sub {
+                    self.emit_neg(sz);
+                }
+                self.emit_atomic_xadd(sz);
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    if is_sub { A::Sub } else { A::Add },
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    6,
+                    2,
+                ));
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
+                if dst != 6 {
+                    self.mov(dst, 6);
+                }
+                true
+            },
+            // __sync_fetch_and_add/__sync_fetch_and_sub：返回**旧值**。
+            "__sync_fetch_and_add" | "__sync_fetch_and_sub" => {
+                if args.len() < 2 {
+                    return false;
+                }
+                let is_sub = name == "__sync_fetch_and_sub";
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                if is_sub {
+                    self.emit_neg(sz);
+                }
+                self.emit_atomic_xadd(sz);
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 if dst != 6 {
                     self.mov(dst, 6);
                 }
@@ -1666,6 +1758,36 @@ impl Codegen {
                 }
                 true
             },
+            // __builtin_complex(re, im): 复数构造器. 两个实参都是浮点常量时
+            // parser 已脱糖成 Expr::ComplexLit, 只有运行期实参走到这里
+            // (torture/builtin-complex-1.c 的 `__builtin_complex (a, b)`).
+            // 结果约定与 gen_expr_complex_lit 完全一致: 分量落 complex 结果槽
+            // (实部@result_off, 虚部@result_off+inner_sz), 值通道 = 实部
+            // (SSE 在 xmm0, x87 内型在 st(0)), rax = 槽地址供 rep movsb 物化.
+            "__builtin_complex" => {
+                let inner = match args.first().map(|a| a.ty()) {
+                    Some(t @ (Type::Float | Type::Double | Type::LongDouble)) => t,
+                    // GCC 要求两实参同为**实浮点**类型; 非浮点实参只有
+                    // 误用才会出现, 按 parser 的同一判据退到 double.
+                    _ => Type::Double,
+                };
+                let inner_sz = inner.size() as i64;
+                let result_off = self.complex_result_off();
+                self.gen_expr(&args[0], Self::EVAL_BASE);
+                self.gen_float_store_at(result_off, &inner);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
+                self.gen_float_store_at(result_off + inner_sz, &inner);
+                // SSE 内型的结果通道被上一步的虚部占用, 从槽里回装实部;
+                // x87 内型的两枚 fstp 已把分量全落内存, 通道里本就没有值.
+                if !self.float_in_st0(&inner) {
+                    self.gen_float_load_at(result_off, &inner);
+                }
+                self.emit_lea_r13(0, result_off);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
             // __builtin_conj/conjf/conjl: 复数共轭 (实部不变, 虚部翻转符号位).
             // 参数为 lvalue 时直接对内存分量寻址; rvalue 时按 complex rvalue
             // 约定 (xmm0=实部, 调用返回时虚部在 xmm1) 物化到临时槽再处理.
@@ -1825,9 +1947,114 @@ impl Codegen {
                 }
                 true
             },
-            // Vector 操作: placeholder (返回 0)
+            // __builtin_convertvector(expr, type): 逐元素转换到目标向量类型。
+            // 第二个「实参」是类型占位（parser 把目标类型写进它的 `.ty()`），不是值。
+            // 值通道与 shufflevector 一致：源物化到槽 0（slot 0 的偏移与步长无
+            // 关），结果暂存槽 1，最后搬回槽 0 并重设 rax；出口还需把前 16 字节
+            // 同步进 xmm0（`gen_call` 尾部的 vector ABI 物化段会无条件存它）。
             "__builtin_convertvector" => {
-                self.mov_imm(dst, 0);
+                let (src_elem, src_n) = match args[0].ty() {
+                    Type::Vector(ref e, n) => (e.base.clone(), n),
+                    _ => {
+                        self.gen_expr(&args[0], dst);
+                        return true;
+                    },
+                };
+                let (dst_elem, dst_n) = match args.get(1).map(|a| a.ty()) {
+                    Some(Type::Vector(ref e, n)) => (e.base.clone(), n),
+                    _ => {
+                        self.gen_expr(&args[0], dst);
+                        return true;
+                    },
+                };
+                let src_sz = src_elem.size();
+                let dst_sz = dst_elem.size();
+                // 16 字节元素（__int128 / _Float128 / long double）没有可用的
+                // 标量搬运通道；元素个数不一致则不是逐元素转换。两者都拒绝，
+                // 不静默退化成错误的值。
+                if src_n != dst_n || src_sz == 0 || dst_sz == 0 || src_sz > 8 || dst_sz > 8 {
+                    let span = Span::point(&self.source_name, 0, 1);
+                    let mut diag = Diagnostic::err(
+                        "E0018",
+                        format!(
+                            "__builtin_convertvector cannot convert {}x{}B elements to {}x{}B elements",
+                            src_n, src_sz, dst_n, dst_sz
+                        ),
+                        span,
+                    );
+                    diag.hint = Some(
+                        "both vectors must have the same element count and elements of at most 8 bytes"
+                            .to_string(),
+                    );
+                    self.diagnostics.push(diag);
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let src_is_fp = matches!(src_elem, Type::Float | Type::Double);
+                let dst_is_fp = matches!(dst_elem, Type::Float | Type::Double);
+                let src_bytes = src_sz * src_n;
+                let out_bytes = dst_sz * dst_n;
+                let stride_hint = out_bytes.max(src_bytes).max(16);
+                if self.frame_layout.vec_band_slots(stride_hint) < 2 {
+                    let span = Span::point(&self.source_name, 0, 1);
+                    let mut diag = Diagnostic::err(
+                        "E0018",
+                        format!(
+                            "vector convert scratch does not fit the frame ({} bytes per slot)",
+                            stride_hint
+                        ),
+                        span,
+                    );
+                    diag.hint = Some("use a narrower vector".to_string());
+                    self.diagnostics.push(diag);
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let scratch_off = self.vector_temp_base(0, stride_hint);
+                let res_off = self.vector_temp_base(1, stride_hint);
+                self.gen_vector_load_into_slot(&args[0], 0);
+                for i in 0..dst_n {
+                    let src_off = scratch_off + (i * src_sz) as i64;
+                    let dst_off = res_off + (i * dst_sz) as i64;
+                    // 1. 读源元素：整型按源符号性扩展进 rax；float/double 进 xmm0。
+                    self.emit_lea_r13(0, src_off);
+                    if src_is_fp {
+                        self.emit_load_scalar_float_at(&src_elem, 0);
+                    } else if !self.emit_load_mem_typed_at(src_sz, &src_elem, 0, 0) {
+                        self.mov_imm(0, 0);
+                    }
+                    // 2. 转换：整→整无需动作（rax 已扩到 64 位，存窄宽度即截断）；
+                    //    其余三组都走既有的标量通道（含 double↔float 舍入）。
+                    if src_is_fp && dst_is_fp {
+                        self.emit_scalar_to_xmm0_if_needed_ty(&src_elem, &dst_elem);
+                    } else if src_is_fp {
+                        // 先做真正的截断转换 cvtt{s,d}2si，再由 saturate 夹正溢出
+                        // （helper 只做夹取，不发 cvt）。
+                        let w = if matches!(src_elem, Type::Float) {
+                            SimdWidth::SS
+                        } else {
+                            SimdWidth::SD
+                        };
+                        if dst_sz == 8 {
+                            self.emit_insn(&Insn::cvt2sd_reg(false, w, 0, 0));
+                        } else {
+                            self.emit_insn(&Insn::cvt2sd_reg_b32(false, w, 0, 0));
+                        }
+                        self.emit_float_to_int_saturate(0, &src_elem, dst_sz == 8);
+                    } else if dst_is_fp {
+                        self.emit_scalar_to_xmm0_if_needed_ty(&src_elem, &dst_elem);
+                    }
+                    // 3. 写目标元素（浮点经标量通道，整数直接截断存储）。
+                    if dst_is_fp {
+                        self.emit_lea_r13(0, dst_off);
+                        self.emit_store_scalar_float_at(&dst_elem, &dst_elem, 0);
+                    } else {
+                        self.emit_store(0, dst_off, dst_sz);
+                    }
+                }
+                self.copy_r13_bytes(res_off, scratch_off, out_bytes);
+                self.emit_movdqu_r13_to_xmm(0, scratch_off);
+                self.emit_insn(&Insn::lea_reg_base_disp(0, 13, scratch_off as i32));
                 true
             },
             // __builtin_iseqsig/iseqsigf/iseqsigl: IEEE **信令相等** (signaling
@@ -2868,7 +3095,33 @@ impl Codegen {
                     return true;
                 }
                 let arg_ty = args[0].ty();
+                // long double: 值在 x87 st(0)，SSE 掩码/比较路径碰不到它，
+                // 而且会把 st(0) 漏在栈上（每次漏一层，8 次后 x87 栈溢出成
+                // indefinite，后续所有 ld 判定静默错乱 —— type-generic-1.c）。
+                // 与 __builtin_isfinite 同构，走 80-bit 位型判据。
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.gen_ld_arg_bits(&args[0]);
+                    self.gen_ld_bit_predicate(2); // isfinite
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
                 let is_f = matches!(arg_ty, Type::Float);
+                // abs 掩码按类型取：float 的符号位在低 dword 的 bit31，64 位掩码
+                // 0x7FFF_FFFF_FFFF_FFFF 的低 32 位是全 1，清不掉那个符号位。
+                let abs_mask: u64 = if is_f {
+                    0x7FFF_FFFF
+                } else {
+                    0x7FFF_FFFF_FFFF_FFFF
+                };
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                                           // 加载 abs_mask 到 xmm1
                 self.emit_insn(&Insn::new(
@@ -2879,9 +3132,7 @@ impl Codegen {
                             0,
                             crate::codegen::shared::asm_operand::Width::B64,
                         ),
-                        src: crate::codegen::x86_64::opcode::Operand::Imm(
-                            0x7FFFFFFFFFFFFFFFu64 as i64,
-                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(abs_mask as i64),
                     },
                     &[],
                 ));
@@ -3480,6 +3731,67 @@ impl Codegen {
                 )); // bsf dst, dst
                 true
             },
+            // __builtin_crc32_data8/16/32/64(data, crc, poly): 反射式 CRC-32 续算。
+            // 语义（GCC 文档）：poly 是**反射形式**的多项式（IEEE 的 0xEDB88320），
+            // `data` 的位宽由名字给出，crc/poly/返回值都是 uint32_t。逐位：
+            //   if ((crc ^ data) & 1) crc = (crc >> 1) ^ poly; else crc >>= 1;
+            // 循环体只有 8 条指令且每轮的「数据位」就是 data 的最低位，
+            // 直接按位宽展开（最多 64 轮）—— 不必占一个计数器寄存器
+            // （rcx 存着 crc，而 dcc 的表达式求值区只有 rax/rcx/rdx）。
+            "__builtin_crc32_data8" | "__builtin_crc32_data16" | "__builtin_crc32_data32"
+            | "__builtin_crc32_data64" => {
+                if args.len() < 3 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let bits: i64 = match name {
+                    "__builtin_crc32_data8" => 8,
+                    "__builtin_crc32_data16" => 16,
+                    "__builtin_crc32_data32" => 32,
+                    _ => 64,
+                };
+                // 三个实参按左到右求值，用栈过渡（成对 push 保持 16 对齐，
+                // 求值表达式里可能含函数调用）。最终 rax=data, rcx=crc, rdx=poly。
+                self.gen_expr(&args[0], 0); // rax = data
+                self.push(0);
+                self.push(0);
+                self.gen_expr(&args[1], 0); // rax = crc
+                self.mov_reg_truncate(0, 0, 4); // 按 uint32 截断（清高 32 位）
+                self.push(0);
+                self.push(0);
+                self.gen_expr(&args[2], 0); // rax = poly
+                self.mov_reg_truncate(2, 0, 4); // rdx = poly
+                self.pop(1);
+                self.pop(1); // rcx = crc
+                self.pop(0);
+                self.pop(0); // rax = data
+                self.push(8); // 保存 r8（循环临时）
+                if bits == 32 {
+                    // uint32 实参：高 32 位可能未定义，用 32 位写清零。
+                    self.mov_reg_truncate(0, 0, 4);
+                } else if bits < 64 {
+                    // 窄实参求值只保证低 width 位有效，先清高位再逐位消费。
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, (1i64 << bits) - 1));
+                }
+                use crate::codegen::x86_64::opcode::AluOp as A;
+                for _ in 0..bits {
+                    self.mov(8, 1); // r8 = crc
+                    self.emit_insn(&Insn::alu_rm_reg_reg(A::Xor, crate::codegen::shared::asm_operand::Width::B64, 8, 0)); // r8 ^= data
+                    self.emit_insn(&Insn::alu_rm_reg_imm8_b64(4, 8, 1)); // r8 &= 1
+                    self.emit_insn(&Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        8,
+                    )); // r8 = -r8（0/全 1 掩码）
+                    self.emit_insn(&Insn::alu_rm_reg_reg(A::And, crate::codegen::shared::asm_operand::Width::B64, 8, 2)); // r8 &= poly
+                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 1, 1)); // crc >>= 1
+                    self.emit_insn(&Insn::alu_rm_reg_reg(A::Xor, crate::codegen::shared::asm_operand::Width::B64, 1, 8)); // crc ^= r8
+                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 1)); // data >>= 1
+                }
+                self.pop(8); // 恢复 r8
+                self.mov_reg_truncate(dst, 1, 4); // 结果按 uint32 返回
+                true
+            },
             // __builtin_clzg/ctzg(x, fb): x==0 时返回 fb, 否则返回 clz/ctz(x).
             // bsr/bsf 对 0 源结果未定义但会置 ZF; 据此 cmov 选 fb (pr112639).
             "__builtin_clzg" | "__builtin_ctzg" => {
@@ -3538,6 +3850,40 @@ impl Codegen {
                 self.gen_expr(&args[0], dst);
                 // popcnt dst, dst: F3 [REX.W] 0F B8 /r (reflexive)
                 self.emit_insn(&Insn::popcnt_reg_reg_b64(dst));
+                true
+            },
+            // __builtin_popcountg(x): C23 泛型 popcount（位宽跟随实参类型）。
+            // 返回 int。`__int128` 要两半各数一次再相加 —— popcnt 只有 64 位宽，
+            // 直接对 rax 数会漏掉高半（pr116480-1.c 的 unsigned __int128 实参）。
+            "__builtin_popcountg" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let wide = matches!(args[0].ty(), Type::Int128 | Type::UInt128);
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax=lo, rdx=hi
+                self.emit_insn(&Insn::popcnt_reg_reg_b64(0));
+                if wide {
+                    self.emit_insn(&Insn::popcnt_reg_reg_b64(2)); // popcnt rdx, rdx
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Add,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // add rax, rdx
+                }
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
                 true
             },
             // __builtin_parity/parityl/parityll: 奇偶校验 (popcount & 1)
@@ -5782,6 +6128,23 @@ impl Codegen {
             },
             // __builtin_rotateleft8/16/32/64 / __builtin_rotateright8/16/32/64
             // 策略: 按位宽选 ROL/ROR modrm 编码.
+            // C23 的泛型版 `__builtin_stdc_rotate_left/right(x, n)` 位宽不靠名字
+            // 后缀而靠 **x 的类型**（pr117492-1.c 的 `unsigned` → 32 位）；
+            // 转成带宽度后缀的名字后递归复用同一套编码，不另写一份。
+            "__builtin_stdc_rotate_left" | "__builtin_stdc_rotate_right" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let bits = args[0].ty().size() as u32 * 8;
+                let dir = if name.ends_with("left") {
+                    "rotateleft"
+                } else {
+                    "rotateright"
+                };
+                let alias = format!("__builtin_{}{}", dir, bits);
+                self.gen_builtin(&alias, args, dst)
+            },
             n if n.starts_with("__builtin_rotateleft")
                 || n.starts_with("__builtin_rotateright") =>
             {
@@ -6471,6 +6834,17 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             },
+            // __builtin_assoc_barrier(x): 只阻止浮点重结合（`(x)` 的语义），
+            // 值就是 x 本身，不产生任何运行期操作。旧行为是落到 E0018 硬错误
+            // （tree-ssa/trapping-1.c）。
+            "__builtin_assoc_barrier" => {
+                if let Some(a) = args.first() {
+                    self.gen_expr(a, dst);
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+                true
+            },
             // __builtin_isalpha / iscntrl / isspace ... : GCC 的字符分类内建,
             // 语义就是同名 libc 函数 (同样受 locale 影响, glibc 导出真实符号).
             // 直接转发; 之前只认 __builtin_isdigit, 其余名字在 -O0 下报 E0018
@@ -6822,6 +7196,38 @@ impl Codegen {
                 self.call_label("free");
                 true
             },
+            // __builtin_calloc: 转发到 libc calloc()
+            // SysV ABI: rdi = nmemb, rsi = size。call_result_type 早已把它
+            // 声明为 void*（否则指针高位被截），但 codegen 一直没实现，
+            // 于是 `tree-ssa/calloc-5.c` / `pr125040.c` 报 E0018 硬错误。
+            "__builtin_calloc" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 7); // rdi = nmemb
+                    self.gen_expr(&args[1], 6); // rsi = size
+                } else if !args.is_empty() {
+                    self.gen_expr(&args[0], 7); // rdi = nmemb (缺 size 时兜底)
+                }
+                self.call_label("calloc");
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
+            // __builtin_aligned_alloc: 转发到 libc aligned_alloc()
+            // SysV ABI: rdi = alignment, rsi = size（参数顺序与 calloc 同形）。
+            "__builtin_aligned_alloc" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 7); // rdi = alignment
+                    self.gen_expr(&args[1], 6); // rsi = size
+                } else if !args.is_empty() {
+                    self.gen_expr(&args[0], 7); // rdi = alignment
+                }
+                self.call_label("aligned_alloc");
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
             // __builtin_realloc: 转发到 libc realloc()
             // SysV ABI: rdi = ptr, rsi = size
             "__builtin_realloc" => {
@@ -6838,16 +7244,31 @@ impl Codegen {
                 true
             },
             // __builtin_fabs / fabsf / fabsl: 浮点绝对值
-            // 清除符号位: AND with abs_mask
+            // 清符号位: double 用 `andpd` + 0x7FFF…（低 64 位），float 用 `andps`
+            // + 0x7FFF_FFFF（旧的 `andps` 路径偷懒沿用了 double 的掩码，
+            // 0x7FFF_FFFF_FFFF_FFFF 的 bit31 是 1 ⇒ float 的符号位清不掉，
+            // `__builtin_fabsf(-3.5f)` 返回 -3.5）；`long double` 走 x87 fabs
+            // （tbyte 的符号位不在低 64 位，见 `emit_x87_abs`）。
             "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
                 }
                 let arg_ty = args[0].ty();
+                self.gen_expr(&args[0], Self::EVAL_BASE);
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.emit_x87_abs();
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
-                                                          // 加载 abs_mask 到 xmm1
+                let mask: u64 = if is_f {
+                    0x7FFF_FFFF
+                } else {
+                    0x7FFF_FFFF_FFFF_FFFF
+                };
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                         rip_relative: false,
@@ -6856,9 +7277,7 @@ impl Codegen {
                             0,
                             crate::codegen::shared::asm_operand::Width::B64,
                         ),
-                        src: crate::codegen::x86_64::opcode::Operand::Imm(
-                            0x7FFFFFFFFFFFFFFFu64 as i64,
-                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
                     },
                     &[],
                 ));
@@ -6898,19 +7317,20 @@ impl Codegen {
                 true
             },
             // __builtin_copysignl: long double 版本
-            // SysV ABI: long double 参数在 xmm0 (实际走 x87 栈), 但 libc
-            // copysignl 接受 xmm0/xmm1 传递, 结果在 xmm0
+            //
+            // SysV 语义：`long double` 参数的 SysV 类属 X87，**整枚参数在栈上**
+            // （16B 对齐），返回值在 st(0) —— 不是 xmm0/xmm1。旧实现把两个 tbyte
+            // 当 double 用 `movsd` 搬进 xmm0/xmm1 再 `call copysignl`，被调方读到
+            // 的是一堆零；实测 `__builtin_copysignl(1.0L, nanl(""))` 返回 nan
+            // 而不是 +1.0（builtin-complex-1.c 的 comparel abort）。
+            // 这里直接交给通用 SysV 调用序（与本文件其它 libm 转发同一个口），
+            // 参数栈/结果通道全按真实 ABI 走。
             "__builtin_copysignl" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude (long double)
-                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0 (backup)
-                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign (long double)
-                self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2
-                self.call_label("copysignl");
+                self.emit_sysv_call(Some("copysignl"), None, args, None);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -7050,6 +7470,13 @@ impl Codegen {
 
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE);
+                // abs 掩码按类型取（float 的符号位在低 dword bit31，64 位掩码
+                // 清不掉，−Inf 掩完仍是 −Inf，比较得 1 ⇒ isfinite 误报）。
+                let abs_mask: u64 = if is_f {
+                    0x7FFF_FFFF
+                } else {
+                    0x7FFF_FFFF_FFFF_FFFF
+                };
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                         rip_relative: false,
@@ -7058,9 +7485,7 @@ impl Codegen {
                             0,
                             crate::codegen::shared::asm_operand::Width::B64,
                         ),
-                        src: crate::codegen::x86_64::opcode::Operand::Imm(
-                            0x7FFFFFFFFFFFFFFFu64 as i64,
-                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(abs_mask as i64),
                     },
                     &[],
                 ));
@@ -8069,7 +8494,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x01, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SD, 0x01);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8081,7 +8506,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x01, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SS, 0x01);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8127,7 +8552,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x02, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SD, 0x02);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8139,7 +8564,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x02, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SS, 0x02);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8185,7 +8610,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x00, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SD, 0x00);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8197,7 +8622,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x00, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SS, 0x00);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8243,7 +8668,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x03, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SD, 0x03);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8255,7 +8680,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x03, 0, 0));
+                self.emit_round_to_integral(SimdWidth::SS, 0x03);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -8362,6 +8787,32 @@ impl Codegen {
                     }
                     if dst != 0 && chan == LibmChan::Sse {
                         self.mov(dst, 0);
+                    }
+                    true
+                } else if let Some(libm) = crate::libm_builtins::libm_symbol(name) {
+                    // 传统 f/l 后缀的 libm 数学内建（acos/hypot/fmod/nearbyint/
+                    // ldexp/cabs/csqrt/...）：转发到同名 libm 符号。
+                    //
+                    // 三类实参形态都交给 emit_sysv_call：
+                    //   * 全浮点（acos/hypot/fmod/...）—— xmm 参数按 SysV 分类；
+                    //   * 混合（ldexp(double,int)/frexp(double,int*)/
+                    //     jn(int,double)/remquo(...,int*)）；
+                    //   * 复数（cabs/csqrt/...）—— `_Complex float/double` 是
+                    //     两分量 SSE 类，已按 (实部,虚部) 分发到 xmm0/xmm1；
+                    //     `_Complex long double` 参数侧走内存槽、返回侧
+                    //     st0=实部/st1=虚部（`needs_memory_return` 已把它排除在
+                    //     sret 之外），与本分支后面的物化段一致。
+                    //
+                    // 返回值：float/double 在 xmm0，long double 在 st(0)，
+                    // 复数由调用点的 Complex 物化段统一搬运；这里只补
+                    // `dst != 0` 时的 rax→dst（与 gen_call_result_move 同构）。
+                    self.emit_sysv_call(Some(&libm), None, args, None);
+                    if dst != 0 {
+                        let in_st0 = crate::libm_builtins::result_type(name)
+                            .is_some_and(|t| self.float_in_st0(&t));
+                        if !in_st0 {
+                            self.mov(dst, 0);
+                        }
                     }
                     true
                 } else {
@@ -8675,15 +9126,17 @@ impl Codegen {
                 )); // and ecx, eax (ecx = MXCSR & excepts)
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                        // 测试 x87 FPU 状态字异常标志
+                // x87 状态字低 6 位与 FE_* 同布局, 但 DE(0x02) 不在
+                // FE_ALL_EXCEPT(0x3d) 里: glibc 的 fetestexcept 只返回
+                // `sw & excepts & FE_ALL_EXCEPT`。旧写法 `and ax, ax` 是空操作,
+                // 把残留的 DE 也报出去 —— torture/float128-div-underflow.c 的
+                // `fetestexcept(FE_UNDERFLOW|FE_INEXACT)` 因此误报 0x02 而 abort。
+                // fnstsw ax 会覆盖 eax 低 16 位 (此时 eax 保存 excepts 掩码),
+                // 先入栈保全, 读完状态字再按掩码过滤。
+                self.push(0);
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::x87_fixed(0xDF, 0xE0)); // fnstsw ax (x87 状态字 -> ax)
                 self.emit_insn(&Insn::alu_acc_imm16_b16_acc(0x25, 0x3F)); // and ax, 0x3F
-                self.emit_insn(&Insn::alu_rm_reg_reg(
-                    crate::codegen::x86_64::opcode::AluOp::And,
-                    crate::codegen::shared::asm_operand::Width::B16,
-                    0,
-                    0,
-                )); // and ax, ax (保留 excepts 位)
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                         rip_relative: false,
@@ -8702,7 +9155,14 @@ impl Codegen {
                     &[],
                 )); // movzx eax, ax
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
-                                                       // 合并 MXCSR 和 x87 结果 (OR)
+                self.pop(2); // rdx = excepts
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    crate::codegen::x86_64::opcode::AluOp::And,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    0,
+                    2,
+                )); // and eax, edx (只保留 excepts 选中的位)
+                // 合并 MXCSR 和 x87 结果 (OR)
                 self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::Or,
                     crate::codegen::shared::asm_operand::Width::B32,

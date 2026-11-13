@@ -119,6 +119,40 @@ impl Codegen {
     /// 可见性从私有提到 `pub(crate)`：帧规划期（`Codegen::compute_callee_plan`）要用
     /// 同一个判据算「哪些池号被 asm 钉死」，不能在那里再写一份字母表 —— 两份表
     /// 一定会漂移，而漂移的方向是「计划漏了号 ⇒ 序言少一条保存」。
+    /// 把具名匹配约束 `[name]`（GCC: `"[a]"` / `"[a],m"`）归一化成数字匹配 `"N"`。
+    ///
+    /// GCC 语义：输入侧 `"[a]"` 要求与名为 a 的操作数共用寄存器/位置；带 `,m`
+    /// 备选时仍优先复用寄存器。名字不在表里（异常写法）原样返回，交给后续兜底。
+    /// 不归一化的话，下面所有按字母扫约束的判定都会误读：`[a]` → 固定寄存器
+    /// rax、`[i]` → 立即数（pr20314-2.c 的 12 输出 + 12 输入被算成 24 个）。
+    fn normalize_named_matching_constraint(raw: &str, names: &HashMap<String, usize>) -> String {
+        if !raw.contains('[') {
+            return raw.to_string();
+        }
+        let t = raw.trim();
+        let mut prefix = String::new();
+        let mut rest = t;
+        while let Some(c) = rest.chars().next() {
+            if matches!(c, '=' | '+' | '&' | '%') {
+                prefix.push(c);
+                rest = &rest[1..];
+            } else {
+                break;
+            }
+        }
+        for part in rest.split(',') {
+            let p = part.trim();
+            if let Some(after) = p.strip_prefix('[') {
+                if let Some((name, _)) = after.split_once(']') {
+                    if let Some(idx) = names.get(name) {
+                        return format!("{prefix}{idx}");
+                    }
+                }
+            }
+        }
+        raw.to_string()
+    }
+
     pub(crate) fn fixed_gp_of_constraint(raw: &str) -> Option<u8> {
         if let Some(eri) = Self::asm_parse_explicit_reg(raw) {
             return match eri.kind {
@@ -127,6 +161,11 @@ impl Codegen {
             };
         }
         let core = raw.trim_start_matches(['=', '+', '&', '%']);
+        // 具名匹配 `[name]` 不是固定寄存器：`[a]` 里的 `a` 是名字，
+        // 不能经下面 contains('a') 钉成 rax。
+        if core.starts_with('[') {
+            return None;
+        }
         if core.contains('{') || core.starts_with("@cc") {
             return None;
         }
@@ -480,6 +519,35 @@ impl Codegen {
                 inputs.iter().map(|e| format!("{}", crate::const_eval::ExprDebug(e))).collect::<Vec<_>>().join(" | "),
             );
         }
+        // 具名匹配约束 `[name]`（GCC `"[a]"` / `"[a],m"`）：名字解析成操作数的
+        // 全局下标（输出在前、输入在后），再归一化成数字匹配 `"N"` —— 后面
+        // `parse_asm_constraint_flags` 的 match_digit、`fixed_gp_of_constraint`、
+        // `asm_constraint_prefers_memory` 以及规划器都只认数字形式。不改写的话，
+        // `[a]` 会被按字母读成固定寄存器 rax、`[i]` 被读成立即数（pr20314-2.c
+        // 的 12 个输出 + 12 个 `[a]`..`[l]` 输入因此被算成 24 个 GP 操作数）。
+        let mut name_index: HashMap<String, usize> = HashMap::new();
+        for (i, n) in output_names.iter().enumerate() {
+            if let Some(n) = n.as_deref() {
+                name_index.entry(n.to_string()).or_insert(i);
+            }
+        }
+        for (i, n) in input_names.iter().enumerate() {
+            if let Some(n) = n.as_deref() {
+                name_index.entry(n.to_string()).or_insert(outputs.len() + i);
+            }
+        }
+        let norm_output_constraints: Vec<String> = output_constraints
+            .iter()
+            .map(|c| Self::normalize_named_matching_constraint(c, &name_index))
+            .collect();
+        let norm_input_constraints: Vec<String> = input_constraints
+            .iter()
+            .map(|c| Self::normalize_named_matching_constraint(c, &name_index))
+            .collect();
+        // 遮蔽形参：下面所有按约束字符串做判定的代码（fixed_regs / mem_scratch /
+        // 输出与输入主循环 / 写回段 / `+` 序号推进）一律看到归一化后的形式。
+        let output_constraints: &[String] = &norm_output_constraints;
+        let input_constraints: &[String] = &norm_input_constraints;
         let mut idx = 0usize;
         // 允许「静态地址直接展开成 `sym+off(%rip)`」的操作数标识：只有作为
         // `call *%N` / `jmp *%N` **目标**的才算（内核 paravirt 的

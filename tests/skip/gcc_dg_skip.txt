@@ -228,7 +228,174 @@ torture/pr128080.c
 # （`#if __OPTIMIZE__` 分支只在优化下用未定义符号当断言）。
 tree-ssa/builtin-sprintf.c
 
+# ── inline asm 伪指令（-c 通道必然失败）──
+#
+# 这批用例的 asm 模板是**从不执行的伪指令**（`xyzzy`、`wdr`、
+# `vrp.bug.always.true`、PowerPC 的 `cntlzw`、或只有 `%0` 的模板）。GCC 的
+# `dg-do compile` 只出汇编文本、不调 assembler，所以文本原样落进 .s 也算通过。
+# dcc 的 -c 必须在内存里编码每条指令才能写出 .o，这些行没有对应的 x86_64
+# 编码 —— 报 E0311 是正确行为（不是误编译）。`--asm-fallback=gas` 也救不了：
+# 真让 GAS 汇编同样会报 "no such instruction"。
+torture/asm-subreg-1.c
+torture/pr61772.c
+tree-ssa/pr108684-1.c
+tree-ssa/pr38699.c
+tree-ssa/pr49642-1.c
+tree-ssa/pr49642-2.c
+tree-ssa/pr71947-4.c
+tree-ssa/pr71947-5.c
+tree-ssa/ssa-copyprop-2.c
+tree-ssa/vrp51.c
+
+# tree-ssa/pr43491.c：`register long data_0 asm("rbp")` 把变量固定到 %rbp，
+# 而 dcc 的 %rbp 是帧指针/跳表基址的常驻号，不分配给变量（后端设计约束）。
+tree-ssa/pr43491.c
+
+# ── 测试树缺少 c-c++-common/torture 头文件 ──
+# 这些用例 include ../../c-c++-common/torture/*.h，而本地 GCC 测试树
+# 只含 gcc.dg，没有 c-c++-common 目录（环境缺失，不是编译缺陷）。
+torture/bitint-28.c
+torture/bitint-30.c
+torture/harden-cfr-noret-no-nothrow.c
+
+# torture/bitint-99.c：C2Y 的 931 位 _BitInt 枚举。dcc 的 _BitInt 只按
+# 8/16/32/64 档映射，且未定义 __BITINT_MAXWIDTH__（GCC 14+ 的值是
+# 8388608），于是 `#if ... >= 931` 把整个函数区预处理掉，`main` 里的调用
+# 在 -std=c2y 下按隐式声明报错。
+torture/bitint-99.c
+
+# ── 由 SSO/能力名恢复后新暴露的运行期缺陷 ──
+
+# 以下 7 个 bitint-* 的链接已能过（atomic 族已补全），但 _BitInt(N) 的
+# 窄位宽语义仍未实现：dcc 只按 0..8/9..16/17..32/33+ 映射到
+# char/short/int/long long（Type 不携带 N），于是 `_BitInt(17)` 的值
+# 不做 17 位截断/符号扩展，运行期 abort。真支持需给 Type 增加带位宽的
+# 变体并改所有 match 分支。
+torture/bitint-1.c
+torture/bitint-2.c
+torture/bitint-52.c
+torture/bitint-58.c
+torture/bitint-64.c
+torture/bitint-73.c
+torture/bitint-100.c
+
+# torture/builtin-math-7.c：COMPILETIME_TESTIT 要求编译器折叠复数常量
+# 乘/除（C99 Annex G 特殊值 + 精确舍入），dcc 无复数常量折叠能力，
+# link_error() 引用被保留，run 模式链接失败（compile 模式本来能过）。
+torture/builtin-math-7.c
+
+# torture/builtin-iseqsig-3.c：long double 的 __builtin_iseqsig 对 sNaN
+# 须置 FE_INVALID 并返回 0；dcc 的 double/float 已有实现，LD 的 x87
+# 比较路径未做信令 NaN 分类。
+torture/builtin-iseqsig-3.c
+
+# torture/fp-double-convert-float-1.c / fp-uint64-convert-double-2.c：
+# 依赖 fesetround(FE_UPWARD/DOWNWARD) 影响常量转换舍入。dcc 在编译期
+# 就把 double→float / uint64→double 常量转换折叠成 SSE 默认舍入，且不
+# 识别 -frounding-math；运行期 fesetround 改变不了已折叠的值。
+torture/fp-double-convert-float-1.c
+torture/fp-uint64-convert-double-2.c
+
+# torture/pr98219-1.c / pr98219-2.c：测 x86 `__attribute__((interrupt))` 的
+# 中断帧布局（main 里手工 push SS/RSP/RFLAGS/RIP 后 jmp 进 handler）。
+# dcc 既不支持 interrupt 属性（按普通 SysV ABI 传参，frame 取不到），也不
+# 支持 -muintr/UINTR 指令；且 include <x86gprintrin.h> 会把
+# pconfigintrin.h 的 `asm("pconfig")` 拉进来（gnu_inline 未使用函数当前
+# 仍会发射，命中 unknown-asm 诊断）。
+torture/pr98219-1.c
+torture/pr98219-2.c
+
 # ── 示例格式 (按需取消注释) ──
 # c/pr12345.c
 # vla-*.c
 # target/i386/avx-*.c
+
+# ── dg-do link：优化器验证族（link_error 引用必须在编译期消失）──
+#
+# 这一族的判据不是「跑出正确结果」，而是**链接成功**：函数体里
+# `if (条件) link_error();` 要求优化器证明条件不可达，从而把 external 调用
+# 删掉；dcc 保留下来的调用在链接期变成 undefined reference。
+# 本文件里 14 个同类用例 dcc 已能通过（builtin-convert-1/2/3、builtin-cproj-2、
+# builtin-ctype-1/2、builtin-sin-mpfr-1、builtin-wctype-1、torture/inline-2、
+# pr108076、pr26898-1、pr33848、pr66793、pr79732），说明链接路径本身可用；
+# 下面这些缺的是优化能力，逐族列出以便后续按族恢复。
+#
+# (a) libm/builtin 常量折叠（atan/cbrt/exp/log/pow/round/frexp/ldexp/...）：
+#     调用点参数是常量，GCC 的 builtin 折叠+死代码把 link_failure_* 删掉。
+torture/builtin-attr-1.c
+torture/builtin-cproj-1.c
+torture/builtin-explog-1.c
+torture/builtin-integral-1.c
+torture/builtin-frexp-1.c
+torture/builtin-isinf_sign-1.c
+torture/builtin-ldexp-1.c
+torture/builtin-logb-1.c
+torture/builtin-math-1.c
+torture/builtin-math-3.c
+torture/builtin-math-4.c
+torture/builtin-math-6.c
+torture/builtin-math-8.c
+torture/builtin-nonneg-1.c
+torture/builtin-minmax-1.c
+torture/builtin-noret-1.c
+torture/builtin-noret-2.c
+torture/builtin-modf-1.c
+torture/builtin-power-1.c
+torture/builtin-round-roundeven.c
+torture/builtin-round-roundevenf128.c
+torture/builtin-rounding-1.c
+torture/builtin-sqrt-cmp-1.c
+torture/builtin-symmetric-1.c
+# (b) VRP / 范围传播（含 vrp-from-cst-agg 的聚合常量范围）：
+tree-ssa/vrp-from-cst-agg-1.c
+tree-ssa/vrp-from-cst-agg-3.c
+tree-ssa/vrp-from-cst-agg-4.c
+tree-ssa/vrp-from-cst-agg-5.c
+tree-ssa/vrp-from-cst-agg-7.c
+tree-ssa/vrp-from-cst-agg-8.c
+tree-ssa/vrp12.c
+tree-ssa/vrp30.c
+tree-ssa/vrp39.c
+tree-ssa/vrp44.c
+tree-ssa/vrp45.c
+tree-ssa/vrp48.c
+tree-ssa/vrp49.c
+tree-ssa/vrp63.c
+tree-ssa/vrp64.c
+tree-ssa/vrp65.c
+tree-ssa/vrp68.c
+tree-ssa/vrp69.c
+tree-ssa/vrp76.c
+tree-ssa/vrp78.c
+tree-ssa/vrp80.c
+tree-ssa/vrp82.c
+tree-ssa/vrp85.c
+tree-ssa/vrp90.c
+tree-ssa/vrp114.c
+# 同族的常量传播/别名/循环/数学恒等折叠类：
+tree-ssa/20040721-1.c
+tree-ssa/20070302-1.c
+tree-ssa/alias-13.c
+tree-ssa/log_exp.c
+tree-ssa/loop-37.c
+tree-ssa/modref-10.c
+tree-ssa/pr14841.c
+tree-ssa/pr15791-1.c
+tree-ssa/pr15791-2.c
+tree-ssa/pr20913.c
+tree-ssa/pr21582.c
+tree-ssa/pr2480.c
+tree-ssa/pr27799.c
+tree-ssa/pr46076.c
+tree-ssa/return-value-range-1.c
+# (c) CCP/DCE/DSE/复制传播/FRE/LIM 消除最后一条 dead store 或调用：
+tree-ssa/ssa-ccp-33.c
+tree-ssa/ssa-copyprop-3.c
+tree-ssa/ssa-dce-7.c
+tree-ssa/ssa-dse-44.c
+tree-ssa/ssa-dse-45.c
+tree-ssa/ssa-fre-61.c
+tree-ssa/ssa-lim-5.c
+tree-ssa/pr100359.c
+# (d) 函数指针去虚拟化（`int (*fn)() = foo; if (fn()) ...` 需要 IPO/内联）：
+tree-ssa/inline-2.c

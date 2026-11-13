@@ -3601,6 +3601,66 @@ impl Codegen {
         ));
     }
 
+    /// `__attribute__((scalar_storage_order("big-endian")))` 结构体的标量字段：
+    /// 内存按大端存放、寄存器按小端解释 ⇒ 读入后翻转即为正确值（写回前同样翻转）。
+    /// 调用方保证 `reg` 里是 `size` 宽的整数位模式。1 字节无操作；2 字节用
+    /// `rol reg16, 8`；4/8 字节用 `bswap`。
+    ///
+    /// GCC 对 SSO 下的 `long double`（XFmode）自己就报 "sorry, unimplemented:
+    /// reverse storage order for XFmode"，所以 10/16 字节浮点不在支持范围。
+    pub fn emit_sso_byteswap(&mut self, reg: u8, size: usize) {
+        match size {
+            2 => {
+                self.emit_insn(&Insn::rol_reg_imm8_b16(reg, 8));
+            },
+            4 => {
+                self.emit_insn(&Insn::bswap_reg(
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    reg,
+                ));
+            },
+            8 => {
+                self.emit_insn(&Insn::bswap_reg(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    reg,
+                ));
+            },
+            _ => {},
+        }
+    }
+
+    /// 浮点标量（xmm0）的 SSO 位模式翻转。位模式按整数翻转，不解释为数值，
+    /// 所以不会被 sNaN 触发 FP 异常。rcx 只是借道：先把原值压栈保存，
+    /// 避免踩掉写入路径里作为目标地址的 rcx。
+    pub fn emit_sso_byteswap_xmm0(&mut self, ty: &Type) {
+        let (w, size) = match ty {
+            Type::Float => (crate::codegen::shared::asm_operand::Width::B32, 4usize),
+            Type::Double => (crate::codegen::shared::asm_operand::Width::B64, 8usize),
+            _ => return,
+        };
+        self.push(1); // 保存 rcx（写入路径 = 目标地址）
+        self.emit_insn(&Insn::gpr_xmm(false, w, 1, 0)); // movd/movq rcx, xmm0
+        self.emit_sso_byteswap(1, size);
+        self.emit_insn(&Insn::gpr_xmm(true, w, 1, 0)); // movd/movq xmm0, rcx
+        self.pop(1);
+    }
+
+    /// SSO 下 16 字节整数（`__int128` / `_BitInt(65..128)`）：值模型是
+    /// `(lo, hi) = (低 64 位, 高 64 位)`。内存大端 b0..b15 下，正确的低半是
+    /// b8..b15（小端加载后需 bswap）、高半是 b0..b7（同样 bswap），即
+    /// 「交换两半 + 各自 bswap」。两步都是自逆操作，读入与写回共用。
+    pub fn emit_sso_byteswap_i128(&mut self, lo: u8, hi: u8) {
+        // 交换两半用栈中转：写入路径 rcx 是目标地址，读取路径 lo 可能就是
+        // rcx/rdx，任何固定临时寄存器都可能踩到活跃值。
+        if lo != hi {
+            self.push(lo);
+            self.mov(lo, hi);
+            self.pop(hi);
+        }
+        self.emit_sso_byteswap(lo, 8);
+        self.emit_sso_byteswap(hi, 8);
+    }
+
     pub fn flip_sign_xmm(&mut self, xmm: u8, ty: &Type) {
         let mask: u64 = if matches!(ty, Type::Float) {
             0x8000_0000

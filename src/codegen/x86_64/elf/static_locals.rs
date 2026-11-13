@@ -275,7 +275,15 @@ impl Codegen {
                 },
             );
         }
-        // 返回是否需要运行时初始化
-        initialized && !has_init
+        // 返回是否需要运行时初始化。
+        // 0 字节对象（GCC 零长数组 `T x[] = { };`、空 flex 数组等）没有可写字节：
+        // 静态化失败也无所谓，报「需要运行时初始化」只会让发射器把整个聚合先合成
+        // 到帧里再写全局（`gen_static_local_init` 的合成复合字面量）—— 白占一个
+        // 晚分配槽，预算又扫不到它（tree-ssa/ssa-dse-10 的
+        // `static const struct encodedFiletime otherTimes[] = { };` 即此）。
+        // 判据必须问 `info.ty.size()` 而不是 `sz`：上面为了段内布局把 0 抬成了
+        // 1 字节（`.max(1)`），`sz` 在这里已经看不见零尺寸。
+        let zero_sized = info.ty.size() == 0;
+        initialized && !has_init && !zero_sized
     }
 }

@@ -784,6 +784,10 @@ const VECTOR_BINOPS: &[BinOp] = &[
 const VECTOR_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::BitNot, UnOp::Not];
 
 /// 与 codegen 复数路径一致的二元运算符集合。
+///
+/// `AndAnd`/`OrOr` 在列：C11 6.5.13p1 / 6.5.14p1 允许任何**标量**作逻辑
+/// 操作数，复数也是标量。真值判据由 `emit_truth_flags` 的 `Type::Complex`
+/// 那支给（实/虚部同为零才算假），不经过任何复数算术。
 const COMPLEX_BINOPS: &[BinOp] = &[
     BinOp::Add,
     BinOp::Sub,
@@ -791,6 +795,8 @@ const COMPLEX_BINOPS: &[BinOp] = &[
     BinOp::Div,
     BinOp::EqEq,
     BinOp::Ne,
+    BinOp::AndAnd,
+    BinOp::OrOr,
 ];
 
 /// 与 codegen 复数路径一致的一元运算符集合。

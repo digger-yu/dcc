@@ -1282,6 +1282,20 @@ impl Codegen {
             self.store_xmm64_stack(0, off);
         }
     }
+    /// [`Self::gen_float_store_at`] 的反向动作: 从帧槽 `off` 把值装回值通道
+    /// (SSE 内型 → xmm0, `long double` → x87 st(0), `_Float128` → 整 16 字节).
+    pub(crate) fn gen_float_load_at(&mut self, off: i64, ty: &Type) {
+        if matches!(ty, Type::Float128) {
+            self.load_xmm128_stack(0, off);
+            return;
+        }
+        if matches!(ty, Type::LongDouble) {
+            self.emit_x87_fld_at(13, off as i32, ty);
+            return;
+        }
+        let is_float = matches!(ty, Type::Float);
+        self.load_stack_xmm(0, off, if is_float { 4 } else { 8 }, is_float);
+    }
     pub(crate) fn load_bits_from_slot(&mut self, ty: &Type, src_off: i64, dst: u8) {
         match ty {
             Type::Vector(_, _) => {

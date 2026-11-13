@@ -1106,6 +1106,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
     target.kernel_code_model = cfg.kernel_code_model;
     target.auto_var_init_zero = cfg.auto_var_init_zero;
+    target.fp_int_builtin_inexact = cfg.fp_int_builtin_inexact;
     target.set_stack_protector(cfg.stack_protector);
     target.stack_protector_strong = cfg.stack_protector_strong;
     target.unwind_tables = cfg.unwind_tables;
@@ -2661,6 +2662,7 @@ fn emit_native_program(
     }
     target.kernel_code_model = cfg.kernel_code_model;
     target.auto_var_init_zero = cfg.auto_var_init_zero;
+    target.fp_int_builtin_inexact = cfg.fp_int_builtin_inexact;
     target.set_stack_protector(cfg.stack_protector);
     target.stack_protector_strong = cfg.stack_protector_strong;
     target.unwind_tables = cfg.unwind_tables;

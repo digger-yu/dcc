@@ -552,15 +552,24 @@ impl Codegen {
         let expr_ty = expr.ty();
         let target_ty =
             self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty.clone(), *is_arrow));
-        let field_info = match &target_ty {
-            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+        // `__attribute__((scalar_storage_order("big-endian")))`：本结构体的**直接标量
+        // 字段**按大端存放（位域已在布局阶段镜像到高位起始）。
+        let sso = match &target_ty {
+            Type::Struct(_, _, _, r) | Type::Union(_, _, _, r) => *r,
+            _ => false,
+        };
+        // 字段表留着给位域容器定宽（`bitfield_unit_size_in` 需要看到同单元
+        // 的全部位域）；匿名 struct/union 的字段在嵌套表里，顶层表仍按 offset 匹配。
+        let (struct_fields, field_info) = match &target_ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => (
+                fields.as_slice(),
                 find_field(fields, &field.name).map(|(f, extra)| {
                     let mut fc = f.clone();
                     fc.offset += extra;
                     fc
-                })
-            },
-            _ => None,
+                }),
+            ),
+            _ => (&[][..], None),
         };
         // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
         // pr82210): 偏移已加到 dst, 跳过静态偏移加法
@@ -642,7 +651,7 @@ impl Codegen {
                     // 位域读取: 加载容器 → 右移 → 掩码
                     // 容器宽度取真实存储单元（可能大于声明类型: 小类型位域被打包进
                     // 大单元的 高半时），否则只加载低字节再右移会把字段抹成 0。
-                    let container_size = f.bitfield_unit_size();
+                    let container_size = f.bitfield_unit_size_in(struct_fields);
                     // 加载容器值：自反 ModRM（同一个号既在 reg 又在 r/m）+ rm==4/5
                     // 的 SIB/ disp8 规则，全部收收在 `emit_load_self_typed` 里（单一真源，
                     // 理由见那个入口的注释）。
@@ -650,6 +659,11 @@ impl Codegen {
                     if matches!(container_size, 1 | 2 | 4 | 8) {
                         // 位域容器一律按无符号取回（符号扩展由下面的位宽自己管）。
                         self.emit_load_self_typed(container_size, false, dst);
+                    }
+                    // SSO 大端：容器按大端解释后再移位（布局已把小端语系的
+                    // bit_offset 镜像到高位起始，两者合起来与 GCC 一致）。
+                    if sso {
+                        self.emit_sso_byteswap(dst, container_size);
                     }
                     // 右移 bit_offset 位
                     if f.bit_offset > 0 {
@@ -779,6 +793,12 @@ impl Codegen {
                         // binary128 同理：movups 整 16 字节，只读低 8 字节会丢高半。
                         self.emit_seg(seg);
                         self.emit_load_scalar_float_at(&f.ty, dst);
+                        // SSO 大端的 float/double：位模式按整数翻转（不解释数值）。
+                        // long double / binary128 与 GCC 同类（对 XFmode 本就
+                        // 报 unsupported），不处理。
+                        if sso {
+                            self.emit_sso_byteswap_xmm0(&f.ty);
+                        }
                     } else if matches!(f.ty, Type::Int128 | Type::UInt128) {
                         // __int128 字段: 值模型 = (dst = 低 64, rdx = 高 64),
                         // 与 Ident/全局路径 (`gen_int128_load`) 同构。旧的
@@ -787,6 +807,9 @@ impl Codegen {
                         // (pr92904: 联合里读 `u.b` 得 404370 而非真值)。
                         self.emit_seg(seg);
                         self.gen_int128_load_at(dst, dst);
+                        if sso {
+                            self.emit_sso_byteswap_i128(dst, 2);
+                        }
                     } else {
                         let is_signed = !matches!(
                             &f.ty,
@@ -804,6 +827,11 @@ impl Codegen {
                         if matches!(size, 1 | 2 | 4 | 8) {
                             self.emit_load_self_typed(size, is_signed, dst);
                         }
+                        // SSO 只作用于整数/浮点标量：GCC 对 SSO 结构体的**指针**
+                        // 字段不反转（实测 gcc 14：`char *p` 内存仍为小端）。
+                        if sso && !matches!(f.ty, Type::Ptr(_)) {
+                            self.emit_sso_byteswap(dst, size);
+                        }
                     }
                 }
             } else {
@@ -816,11 +844,17 @@ impl Codegen {
                     // 同上：单一真源，long double 走 `fld tbyte`，binary128 走 movups。
                     self.emit_seg(seg);
                     self.emit_load_scalar_float_at(ty, dst);
+                    if sso {
+                        self.emit_sso_byteswap_xmm0(ty);
+                    }
                 } else if matches!(ty, Type::Int128 | Type::UInt128) {
                     // 同上：字段信息缺失时 __int128 也要按两半加载
                     // (与上方 field_info 分支同构)。
                     self.emit_seg(seg);
                     self.gen_int128_load_at(dst, dst);
+                    if sso {
+                        self.emit_sso_byteswap_i128(dst, 2);
+                    }
                 } else {
                     let is_signed = !matches!(
                         ty,
@@ -837,6 +871,10 @@ impl Codegen {
                     // （以前两处各抄一遍字节，就是「同一个事实有两份副本」的现场）。
                     if matches!(size, 1 | 2 | 4 | 8) {
                         self.emit_load_self_typed(size, is_signed, dst);
+                    }
+                    // 同上：指针字段不参与 SSO 字节序反转。
+                    if sso && !matches!(ty, Type::Ptr(_)) {
+                        self.emit_sso_byteswap(dst, size);
                     }
                 }
             }

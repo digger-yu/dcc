@@ -35,6 +35,7 @@ pub mod incremental;
 pub mod ipa_modref;
 pub mod ipa_sra;
 pub mod ir;
+pub mod libm_builtins;
 pub mod link;
 pub mod linker_script;
 pub mod location;

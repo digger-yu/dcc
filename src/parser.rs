@@ -1403,6 +1403,38 @@ impl<'a> Parser<'a> {
         }
         Some(s)
     }
+    /// 解析 `_BitInt` 之后的 `(` 整数常量表达式 `)`，返回位宽（求值失败按 32 兜底）。
+    ///
+    /// C23 6.7.2p8：宽度是**整数常量表达式**。GCC 用例里出现 `_BitInt(N + 7)`
+    /// （宏展开后是 `8 + 7`）、`_BitInt(sizeof(x) * 8)` 这类形态。旧实现在三个
+    /// declspec 循环里各复制了一份「只认单个 Number」的读法，表达式一来就按 32
+    /// 兜底并把 `+` 留在原地 —— 随后整条声明按语法错终止（torture/bitint-83.c）。
+    /// 宽度在本后端只影响底层类型分档（≤8/≤16/≤32/更宽），所以求值失败不报错。
+    fn parse_bitint_width(&mut self) -> u32 {
+        if self.cur.kind != TokKind::LParen {
+            return 32;
+        }
+        self.advance();
+        let width = match self.parse_expr_bp(2) {
+            Some(e) => crate::const_eval::eval(&e)
+                .ok()
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(32),
+            None => 32,
+        };
+        // 兜底：把到 `)` 的残余吃掉，别把括号留给调用者（否则声明解析会在一个
+        // 本该闭合的位置报错）；遇 `;`/`,`/文件尾则直接交回。
+        while !matches!(
+            self.cur.kind,
+            TokKind::RParen | TokKind::Eof | TokKind::Semi | TokKind::Comma
+        ) {
+            self.advance();
+        }
+        if self.cur.kind == TokKind::RParen {
+            self.advance();
+        }
+        width
+    }
     /// 解析 __attribute__((...)) 并提取属性信息
     fn parse_attributes(&mut self) -> ParsedAttrs {
         let mut attrs = ParsedAttrs::default();
@@ -1549,8 +1581,22 @@ impl<'a> Parser<'a> {
                         self.advance();
                         if self.cur.kind == TokKind::LParen {
                             self.advance();
+                            // GCC 允许实参是任意常量表达式：`alias(("foo"))` 里的
+                            // `("foo")` 是带括号的字符串常量表达式（tree-ssa/pr56727）。
+                            // 旧写法只认裸字面量，碰到第二层 `(` 就地放弃，留下的
+                            // `(` 让属性列表以「expected ';'」提前终止。
+                            let mut depth = 0usize;
+                            while self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                depth += 1;
+                            }
                             if let Some(alias) = self.parse_concatenated_string_lit() {
                                 attrs.alias_name = Some(alias);
+                            }
+                            for _ in 0..depth {
+                                if self.cur.kind == TokKind::RParen {
+                                    self.advance();
+                                }
                             }
                             if self.cur.kind == TokKind::RParen {
                                 self.advance();
@@ -2281,6 +2327,17 @@ impl<'a> Parser<'a> {
                 }
                 return base;
             }
+            // libm 数学内建的统一判据：`__builtin_<name>[f|l]` 的返回类型。
+            // 这里覆盖的范围比下面的手写 match 宽得多（acos/exp2/nearbyint/
+            // hypot/ldexp/cabs/cimag/csqrt/...）；手写 match 里已有的条目值
+            // 与本表一致，谁先命中都得到同一结果。缺了这条判据时，未登记的
+            // 数学内建会走 W1015「assuming int」，浮点结果被当整数搬运/截断
+            // —— `tree-ssa/ldexp.c` 的 `ldexp` 就是因此静默算错。
+            // 名字表与 codegen 的 libm 转发共用 `crate::libm_builtins`，
+            // 不允许两边各写一份（曾经 fmod 只有一处登记，半程报错半程算错）。
+            if let Some(t) = crate::libm_builtins::result_type(name.name.as_str()) {
+                return t;
+            }
             match name.name.as_str() {
                 "__builtin_fma" => return Type::Double,
                 "__builtin_fmaf" => return Type::Float,
@@ -2369,6 +2426,9 @@ impl<'a> Parser<'a> {
                 "__builtin_object_size" | "__builtin_strlen" => {
                     return Type::ULong
                 }
+                // 返回 uint32_t 的 CRC-32 续算族
+                "__builtin_crc32_data8" | "__builtin_crc32_data16" | "__builtin_crc32_data32"
+                | "__builtin_crc32_data64" => return Type::UInt,
                 // 返回 float 的 builtin
                 "__builtin_modff" | "__builtin_fmodf" |
                 "__builtin_fabsf" |
@@ -2646,7 +2706,11 @@ impl<'a> Parser<'a> {
             base.ty()
         };
         match aggregate {
-            Type::Struct(ref name, ref fields, _, false)
+            // 第 4 位是 `reverse_sso`（`scalar_storage_order`）：成员类型的
+            // 推导与字节序无关，不能把 SSO 结构体排斥在外 —— 旧写法只接
+            // `false`，SSO 结构体的每个成员都被抹成 `int`（后续赋值按 4 字节
+            // 截断：实测 `char *p` 字段只写入低 32 位）。
+            Type::Struct(ref name, ref fields, _, _)
             | Type::Union(ref name, ref fields, _, false) => {
                 // 仅当嵌入字段为空（前向声明）时才查 struct_defs；
                 // 匿名 struct 名同为 ""，不能覆盖已嵌入的正确字段。
@@ -4147,7 +4211,7 @@ impl<'a> Parser<'a> {
                 // 单独的 struct/union/enum 定义: 发射类型定义声明以便 IR 层保留类型信息 (5.1 修复)
                 let span = self.cur.span.clone();
                 let type_decl = match &ty {
-                    Type::Struct(name, fields, _, false) => {
+                    Type::Struct(name, fields, _, _) => {
                         let tag_name = name.strip_prefix("struct ").unwrap_or(name);
                         Some(Decl::StructDef(crate::ast::StructDef {
                             name: Ident {
@@ -4261,7 +4325,7 @@ impl<'a> Parser<'a> {
             {
                 let span = self.cur.span.clone();
                 let type_decl = match &ty {
-                    Type::Struct(name, fields, _, false) => {
+                    Type::Struct(name, fields, _, _) => {
                         let tag_name = name.strip_prefix("struct ").unwrap_or(name);
                         Some(Decl::StructDef(crate::ast::StructDef {
                             name: Ident {
@@ -7228,23 +7292,7 @@ impl<'a> Parser<'a> {
                 // 用 base 类型 + 标志位, 让 resolve_base 统一处理 signed/unsigned
                 TokKind::Ident if self.cur.text == "_BitInt" => {
                     self.advance();
-                    let width = if self.cur.kind == TokKind::LParen {
-                        self.advance();
-                        let w = if self.cur.kind == TokKind::Number {
-                            self.cur.text.parse::<u32>().unwrap_or(32)
-                        } else {
-                            32
-                        };
-                        if matches!(self.cur.kind, TokKind::Number) {
-                            self.advance();
-                        }
-                        if self.cur.kind == TokKind::RParen {
-                            self.advance();
-                        }
-                        w
-                    } else {
-                        32
-                    };
+                    let width = self.parse_bitint_width();
                     // 映射到基础类型, signed/unsigned 由 is_unsigned 标志决定
                     match width {
                         0..=8 => {
@@ -7485,7 +7533,6 @@ impl<'a> Parser<'a> {
                 } else {
                     struct_align
                 };
-                let fields_rc = Arc::new(fields);
                 // 记录 may_alias 类型属性供后续使用
                 if may_alias {
                     self.decl_attrs.may_alias = true;
@@ -7497,6 +7544,37 @@ impl<'a> Parser<'a> {
                     Some("little-endian") => host_be,
                     _ => false,
                 };
+                // SSO 大端: 位域在存储单元内**从最高位向下**分配, 而
+                // `layout_struct*` 按小端（自低位向高位）算出 bit_offset。
+                // 二者差一次容器内的镜像:
+                //     bit_offset_be = unit_bits - bit_offset_le - width
+                // 运行期读写容器时再按大端解释（bswap）, 与 GCC 一致。
+                // 实测对齐 (gcc 14, sso4.c): `unsigned a:3; unsigned b:5;
+                // unsigned c:24;` 的 a 在 byte0 bit5..7、b 在 byte0 bit0..4、
+                // c 在 byte1..3 大端。
+                if reverse_sso {
+                    // 同一存储单元的字段共享容器宽度（混装时取最大声明类型:
+                    // `uint64_t x:47; unsigned y:15` 的 y 在 8 字节单元内）。
+                    let mut unit_bits_of = std::collections::HashMap::new();
+                    for f in fields.iter() {
+                        if f.bit_width.is_some() {
+                            let b = (f.ty.size() * 8) as u32;
+                            let e = unit_bits_of.entry(f.offset).or_insert(b);
+                            *e = (*e).max(b);
+                        }
+                    }
+                    for f in fields.iter_mut() {
+                        if let Some(bw) = f.bit_width {
+                            if bw > 0 {
+                                let unit_bits = *unit_bits_of
+                                    .get(&f.offset)
+                                    .unwrap_or(&((f.ty.size() * 8) as u32));
+                                f.bit_offset = unit_bits - f.bit_offset - bw;
+                            }
+                        }
+                    }
+                }
+                let fields_rc = Arc::new(fields);
                 // 匿名 struct/union 不进 struct_defs：它没有可供引用的 tag 名，
                 // 以空串为键登记只会污染 `typedef struct {} X;` 这类空类型的回查。
                 if !nm.is_empty() {
@@ -7597,23 +7675,7 @@ impl<'a> Parser<'a> {
                         },
                         TokKind::Ident if self.cur.text == "_BitInt" => {
                             self.advance();
-                            let width = if self.cur.kind == TokKind::LParen {
-                                self.advance();
-                                let w = if self.cur.kind == TokKind::Number {
-                                    self.cur.text.parse::<u32>().unwrap_or(32)
-                                } else {
-                                    32
-                                };
-                                if matches!(self.cur.kind, TokKind::Number) {
-                                    self.advance();
-                                }
-                                if self.cur.kind == TokKind::RParen {
-                                    self.advance();
-                                }
-                                w
-                            } else {
-                                32
-                            };
+                            let width = self.parse_bitint_width();
                             match width {
                                 0..=8 => {
                                     b = Some(Type::Char);
@@ -7948,23 +8010,7 @@ impl<'a> Parser<'a> {
                 // _BitInt(N): C23 定宽整数类型 (也在第一个 loop 中处理,但 unsigned 在第二个 loop)
                 TokKind::Ident if self.cur.text == "_BitInt" => {
                     self.advance();
-                    let width = if self.cur.kind == TokKind::LParen {
-                        self.advance();
-                        let w = if self.cur.kind == TokKind::Number {
-                            self.cur.text.parse::<u32>().unwrap_or(32)
-                        } else {
-                            32
-                        };
-                        if matches!(self.cur.kind, TokKind::Number) {
-                            self.advance();
-                        }
-                        if self.cur.kind == TokKind::RParen {
-                            self.advance();
-                        }
-                        w
-                    } else {
-                        32
-                    };
+                    let width = self.parse_bitint_width();
                     match width {
                         0..=8 => {
                             base = Some(Type::Char);
@@ -13026,6 +13072,44 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                    // __builtin_convertvector(expr, type): 第二个实参是**类型名**
+                    // （GCC / clang 扩展），不是表达式。普通实参循环把它当表达式
+                    // 解析，于是在 `__attribute__` 处报 "expected ')'" 并把
+                    // `vector_size` 当隐式函数（torture/pr123144.c）。
+                    // 目标类型存进第二个「实参」占位（Expr::Int 的 ty）—— codegen
+                    // 只读它的 `.ty()`，常量占位不产生任何副作用。
+                    if matches!(&callee_expr, Expr::Ident { name, .. } if name.name == "__builtin_convertvector") {
+                        let src = self.parse_expr_bp(2)?;
+                        if !self.expect(TokKind::Comma, "','") {
+                            return None;
+                        }
+                        let mut dst_ty = self.parse_type()?;
+                        // 宏 `BS_VEC(type, n)` 展开后属性跟在类型名之后；
+                        // `parse_type()` 不消费它，按 typedef 声明路径的做法
+                        // 在此独立应用 vector_size。
+                        if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                            let attrs = self.parse_attributes();
+                            if let Some(vsize) = attrs.vector_size {
+                                let elem_size = dst_ty.size().max(1);
+                                dst_ty = Type::Vector(Box::new(dst_ty.into()), vsize / elem_size);
+                            }
+                        }
+                        if !self.expect(TokKind::RParen, "')'") {
+                            return None;
+                        }
+                        let ty = dst_ty.clone();
+                        e = Expr::Call {
+                            callee: Box::new(callee_expr),
+                            args: vec![src, Expr::Int {
+                                v: 0,
+                                span: sp.clone(),
+                                ty: dst_ty,
+                            }],
+                            span: sp.clone(),
+                            ty,
+                        };
+                        continue;
+                    }
                     let mut args = vec![];
                     if self.cur.kind != TokKind::RParen {
                         loop {
@@ -13108,15 +13192,48 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                    // 结果类型 = 首参数类型的一族（"类型与值一起原样传出"）。
+                    // `call_result_type` 只看得到 callee，拿不到实参，所以在这里补：
+                    //   * `__builtin_assoc_barrier(x)`：阻止重排的透明障碍，语义就是 x；
+                    //   * `__builtin_stdc_rotate_left/right(x, n)`：C23 泛型循环移位，
+                    //     结果类型 = x 的类型（位宽由它决定）；
+                    //   * `__builtin_popcountg(x)`：C23 泛型 popcount，返回 int，
+                    //     但缺了这条会落进 W1015（无实害，但产物类型走 int 分支）。
+                    // 缺这些臂时，`tree-ssa/trapping-1.c` 的 assoc_barrier 被当
+                    // int 处理，浮点值经 rax 截断。
+                    if let Expr::Ident { name, .. } = &callee_expr {
+                        match name.name.as_str() {
+                            "__builtin_assoc_barrier"
+                            | "__builtin_stdc_rotate_left"
+                            | "__builtin_stdc_rotate_right" => {
+                                if let Some(a) = args.first() {
+                                    call_ty = a.ty();
+                                }
+                            },
+                            "__builtin_popcountg" => call_ty = int_t(),
+                            _ => {},
+                        }
+                    }
                     // Warn for unknown __builtin_* return types
                     if let Expr::Ident { name, .. } = &callee_expr {
                         if name.name.starts_with("__builtin_")
                             && !matches!(callee_expr.ty(), Type::Func(_, _) | Type::Ptr(_))
+                            // libm 数学内建（含传统 f/l 后缀与复数族）的返回类型
+                            // 已由 `crate::libm_builtins` 统一给出；名单里不必
+                            // 再逐个列名（以前每加一个内建都要双改，漏一处就报
+                            // 「assuming int」，而那个警告本身会把返回类型改成
+                            // int，是真实缺陷而非噪声）。
+                            && crate::libm_builtins::result_type(name.name.as_str()).is_none()
                             && !(matches!(
                                 name.name.as_str(),
                                 "__builtin_fma"
                                     | "__builtin_fmaf"
                                     | "__builtin_fmal"
+                                    // CRC-32 族：返回 uint32_t（call_result_type 已给出）。
+                                    | "__builtin_crc32_data8"
+                                    | "__builtin_crc32_data16"
+                                    | "__builtin_crc32_data32"
+                                    | "__builtin_crc32_data64"
                                     | "__builtin_shufflevector"
                                     | "__builtin_shuffle"
                                     | "__builtin_convertvector"
@@ -13126,6 +13243,12 @@ impl<'a> Parser<'a> {
                                     | "__builtin_ceil"
                                     | "__builtin_floor"
                                     | "__builtin_round"
+                                    // long double 变体同上：`call_result_type` 已给出
+                                    // LongDouble，漏列只会让已知返回类型的内建报 W1015
+                                    // （builtin-fp-int-inexact.c 实测 ceill/floorl/roundl 三条）。
+                                    | "__builtin_ceill"
+                                    | "__builtin_floorl"
+                                    | "__builtin_roundl"
                                     | "__builtin_powl"
                                     | "__builtin_pow"
                                     | "__builtin_powf"

@@ -61,6 +61,9 @@ pub struct Target {
     pub sse: bool,
     pub kernel_code_model: bool,
     pub auto_var_init_zero: bool,
+    /// ceil/floor/round/trunc 内建是否允许置 FE_INEXACT（C23 要求精确）。
+    /// 默认 true（GCC 的 `-ffp-int-builtin-inexact` 默认值）。
+    pub fp_int_builtin_inexact: bool,
     pub stack_protector: bool,
     /// `-fstack-protector-strong`: 插桩范围按 GCC 的 strong 判据逐函数收窄,
     /// 而不是「所有函数都插」。见 `x86_64::emit::functions::compile_func` 的准入判据。
@@ -221,6 +224,7 @@ impl Target {
             sse: is_x86_64,
             kernel_code_model: false,
             auto_var_init_zero: false,
+            fp_int_builtin_inexact: true,
             stack_protector: false,
             stack_protector_strong: false,
             unwind_tables: true,

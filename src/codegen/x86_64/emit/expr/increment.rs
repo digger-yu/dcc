@@ -417,12 +417,18 @@ impl super::super::super::Codegen {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).and_then(|(f, extra)| {
                             f.bit_width.map(|bw| {
+                                // SSO 大端：容器读写时按字节序翻转（位序已在布局阶段镜像）。
+                                let sso = match &target_ty {
+                                    Type::Struct(_, _, _, r) | Type::Union(_, _, _, r) => *r,
+                                    _ => false,
+                                };
                                 (
                                     bw,
                                     f.bit_offset,
                                     f.offset + extra,
-                                    f.bitfield_unit_size(),
+                                    f.bitfield_unit_size_in(fields),
                                     Self::is_signed_int(&f.ty),
+                                    sso,
                                 )
                             })
                         })
@@ -432,7 +438,7 @@ impl super::super::super::Codegen {
             } else {
                 None
             };
-            if let Some((bw, bit_off, field_off, container_size, signed)) = bf_info {
+            if let Some((bw, bit_off, field_off, container_size, signed, sso)) = bf_info {
                 // Bitfield inc/dec: read-modify-write on container
                 self.gen_bitfield_inc_dec(
                     lv,
@@ -441,6 +447,7 @@ impl super::super::super::Codegen {
                     field_off,
                     container_size,
                     signed,
+                    sso,
                     dst,
                     is_pre,
                     is_inc,
@@ -560,6 +567,7 @@ impl super::super::super::Codegen {
         field_off: usize,
         container_size: usize,
         signed: bool,
+        sso: bool,
         dst: u8,
         is_pre: bool,
         is_inc: bool,
@@ -662,6 +670,10 @@ impl super::super::super::Codegen {
                 ));
             },
             _ => {},
+        }
+        // SSO 大端：容器按大端解释后再提取位域值。
+        if sso {
+            self.emit_sso_byteswap(0, container_size);
         }
         if bit_off > 0 {
             // shr rax, imm8 (P11: Shift typed 总是 Some). 基线 raw_bytes 用
@@ -919,6 +931,10 @@ impl super::super::super::Codegen {
             },
             _ => {},
         }
+        // SSO 大端：容器按大端解释（写回前面再翻回内存字节序）。
+        if sso {
+            self.emit_sso_byteswap(1, container_size);
+        }
         // Clear target bits
         let bf_mask = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
         let inv_mask = !(bf_mask << bit_off);
@@ -985,6 +1001,10 @@ impl super::super::super::Codegen {
         // Store container back. 基线 raw: addr 在 rax(0), 合并值在 rcx(1):
         //   sz=4: 89 08 = mov %ecx, (%rax);  sz=2: 66 89 01 = mov %ax,(%rcx) 特例见下
         //   sz=1: 88 08 = mov %cl,(%rax);    sz=8: 48 89 01 = mov %rcx,(%rcx) 特例见下
+        // SSO 大端：写回前把解码值翻成内存字节序。
+        if sso {
+            self.emit_sso_byteswap(1, container_size);
+        }
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, addr_slot)); // rax = addr
         match container_size {
             4 => {

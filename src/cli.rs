@@ -112,6 +112,11 @@ pub struct Config {
     pub sse: bool,
     pub kernel_code_model: bool,
     pub auto_var_init_zero: bool, // -ftrivial-auto-var-init=zero
+    /// `-ffp-int-builtin-inexact`（GCC 默认开）/ `-fno-fp-int-builtin-inexact`：
+    /// ceil/floor/round/trunc 内建是否允许因舍入而置 FE_INEXACT。C23 F.10.6.1 起
+    /// 要求这四个内建精确，GCC 用这个开关切换；默认仍允许不精确以兼容旧代码。
+    /// dcc 侧落地为 roundsd/roundss 的 imm8[2]（SPE：抑制精度异常）。
+    pub fp_int_builtin_inexact: bool,
     pub stack_protector: bool, // -fstack-protector / -fstack-protector-all / -fstack-protector-strong
     /// `-fstack-protector-strong`：插桩范围按 GCC 的 strong 判据**逐函数**判定
     /// （数组局部 / 局部地址被取 / VLA），而不是把每个函数都插桩。
@@ -1514,6 +1519,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut sse = true;
     let mut kernel_code_model = false;
     let mut auto_var_init_zero = false;
+    // 三态：None = 跟语言标准走（C23 起 F.10.6.1 要求精确），Some 为显式开关。
+    let mut fp_int_builtin_inexact: Option<bool> = None;
     let mut stack_protector = false;
     let mut stack_protector_strong = false;
     let mut unwind_tables = true;
@@ -1620,6 +1627,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-O1" => opt = 1,
             "-O2" => opt = 2,
             "-O3" => opt = 3,
+            // -Og：GCC 的「调试友好」级别（O1 的一个子集，不做跨过程/激进变换）。
+            // dcc 没有单独的调试优化管道，接受 -Og 并映射到 O1 —— 与 GCC 的
+            // 实际强度一致；拒绝这个 flag 会让只写了 `{ dg-options "-Og" }` 的
+            // 用例整份编不过（tree-ssa/ssa-copyprop-2.c）。
+            "-Og" => opt = 1,
             "-Ofast" => {
                 opt = 3;
                 fast_math = true;
@@ -2599,6 +2611,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-mno-apx" => cpu_feature_overrides.apx_f = Some(false),
             "-mcmodel=kernel" => kernel_code_model = true,
             "-ftrivial-auto-var-init=zero" => auto_var_init_zero = true,
+            "-fno-fp-int-builtin-inexact" => fp_int_builtin_inexact = Some(false),
+            "-ffp-int-builtin-inexact" => fp_int_builtin_inexact = Some(true),
             "-fstack-protector" | "-fstack-protector-all" => {
                 stack_protector = true;
                 stack_protector_strong = false;
@@ -3364,6 +3378,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sse,
             kernel_code_model,
             auto_var_init_zero,
+            fp_int_builtin_inexact: fp_int_builtin_inexact
+                .unwrap_or(!matches!(std, StdMode::C23 | StdMode::Gnu23)),
             stack_protector,
             stack_protector_strong,
             unwind_tables,
@@ -3502,6 +3518,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sse,
             kernel_code_model,
             auto_var_init_zero,
+            fp_int_builtin_inexact: fp_int_builtin_inexact
+                .unwrap_or(!matches!(std, StdMode::C23 | StdMode::Gnu23)),
             stack_protector,
             stack_protector_strong,
             unwind_tables,

@@ -339,6 +339,23 @@ pub struct ResolvedOperand {
 // 约束解析
 // ---------------------------------------------------------------------------
 
+/// 具名匹配约束 `[name]`（GCC 语法）：输入侧写成 `"[a]"` 表示「与名为 a 的
+/// 操作数同一寄存器/位置」，也可带备选如 `"[a],m"`。
+///
+/// 返回名字（去掉 `[` `]` 与前导 `=`/`+`/`&`/`%` 修饰）。不是具名匹配返回 None。
+///
+/// 为什么必须在所有字母判定之前拦：旧实现按字母扫约束，`[a]` 会被当成固定
+/// 寄存器 `a`(=rax)，`[i]` 被当成立即数 —— pr20314-2.c 的 12 个 `"=r"` 输出 +
+/// 12 个 `"[a]"..."[l]"` 输入因此被算成 24 个 GP 操作数。
+pub fn matching_constraint_name(c: &str) -> Option<&str> {
+    let t = c.trim();
+    let t = t.trim_start_matches(['=', '+', '&', '%']);
+    let t = t.trim_start();
+    let t = t.strip_prefix('[')?;
+    let end = t.find(']')?;
+    Some(&t[..end])
+}
+
 /// 约束是否把操作数**当内存对象**（`"m"` / 带 `m` 且没有寄存器备选 / `"+m"`）。
 ///
 /// 单一真源：x86_64 发射层的两个副本（`asm/constraint.rs`、`asm/expansion.rs`）
@@ -347,6 +364,10 @@ pub struct ResolvedOperand {
 /// 错的那一侧会把 `movl %0,%1` 写进一个帧槽而不是 MMIO（报告 §5.27）。
 pub fn constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
     if constraint.is_empty() {
+        return false;
+    }
+    // 具名匹配 = 复用寄存器，不当作内存操作数。
+    if matching_constraint_name(constraint).is_some() {
         return false;
     }
     let letters: Vec<char> = constraint
@@ -375,6 +396,10 @@ pub fn constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
 /// 「必须把实参代回操作数」的位置 —— 两处口径必须一致，否则一边当常量、
 /// 另一边当寄存器，内联就只能修好一半。
 pub fn constraint_is_immediate_only(constraint: &str) -> bool {
+    // 具名匹配不是立即数（`[i]` 里的 `i` 是名字，不是约束字母）。
+    if matching_constraint_name(constraint).is_some() {
+        return false;
+    }
     const IMM: &[char] = &[
         'i', 'n', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'X', 'E', 'F', 'G', 'H',
     ];
@@ -412,6 +437,9 @@ pub fn immediate_letter_range(letter: char) -> Option<(i128, i128)> {
 
 /// 约束里有没有「任意常量」类字母（`i`/`n`）：有它才允许符号/重定位立即数。
 pub fn constraint_takes_any_immediate(constraint: &str) -> bool {
+    if matching_constraint_name(constraint).is_some() {
+        return false;
+    }
     constraint
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
@@ -462,6 +490,12 @@ pub fn immediate_text_fits(constraint: &str, text: &str) -> bool {
 pub fn parse_single_constraint(c: &str) -> ConstraintKind {
     let c = c.trim();
     if c.is_empty() {
+        return ConstraintKind::Other;
+    }
+    // 具名匹配 `[name]`: 名字到操作数下标的映射在 `resolve_asm_operands` 里建；
+    // 这里只能报 Other，绝不能落到下面的字母表 —— `[a]` 会被 contains('a')
+    // 误判成固定寄存器 rax。
+    if matching_constraint_name(c).is_some() {
         return ConstraintKind::Other;
     }
     // memory / cc clobber
@@ -703,9 +737,25 @@ pub fn resolve_asm_operands(
     let mut used_regs: Vec<u8> = Vec::new();
     let n_outputs = output_constraints.len();
 
+    // 具名匹配约束 `[name]` → 同名操作数的全局下标（输出在前、输入在后）。
+    let mut name_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, n) in output_names.iter().enumerate() {
+        if let Some(n) = n.as_deref() {
+            name_index.entry(n).or_insert(i);
+        }
+    }
+    for (i, n) in input_names.iter().enumerate() {
+        if let Some(n) = n.as_deref() {
+            name_index.entry(n).or_insert(n_outputs + i);
+        }
+    }
+    let named_kind = |c: &str| -> Option<ConstraintKind> {
+        matching_constraint_name(c).and_then(|n| name_index.get(n)).map(|&i| ConstraintKind::Matched(i))
+    };
+
     // 第一遍: 处理输出
     for (i, c) in output_constraints.iter().enumerate() {
-        let kind = parse_single_constraint(c);
+        let kind = named_kind(c).unwrap_or_else(|| parse_single_constraint(c));
         let mut op = ResolvedOperand {
             index: i,
             kind: kind.clone(),
@@ -744,7 +794,7 @@ pub fn resolve_asm_operands(
 
     // 第二遍: 处理输入 (含匹配约束)
     for (i, c) in input_constraints.iter().enumerate() {
-        let kind = parse_single_constraint(c);
+        let kind = named_kind(c).unwrap_or_else(|| parse_single_constraint(c));
         let mut op = ResolvedOperand {
             index: n_outputs + i,
             kind: kind.clone(),

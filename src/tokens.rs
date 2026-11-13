@@ -953,6 +953,13 @@ impl<'a> Lexer<'a> {
                 {
                     self.bump();
                     self.bump();
+                    // C23 6.4.4.1 允许 bit-precise-int-suffix 后接
+                    // unsigned-suffix: `1wbu` / `1WBU` 是合法常量。
+                    // 漏这一口时 token 停在 `1wb`，后面的 `u` 变成独立
+                    // 标识符 (`expected '}', got Ident` —— torture/bitint-1.c)。
+                    if matches!(self.peek(), Some(b'u') | Some(b'U')) {
+                        self.bump();
+                    }
                 }
                 if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
                     self.bump();
@@ -1322,6 +1329,11 @@ pub fn strip_int_suffix(s: &str) -> &str {
     loop {
         let n = t.len();
         if n >= 3 && t[n - 3..].eq_ignore_ascii_case("uwb") {
+            t = &t[..n - 3];
+            continue;
+        }
+        // `wb` + `u`（C23 允许两种先后顺序：`1uwb` 与 `1wbu`）。
+        if n >= 3 && t[n - 3..].eq_ignore_ascii_case("wbu") {
             t = &t[..n - 3];
             continue;
         }

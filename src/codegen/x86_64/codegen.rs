@@ -1684,6 +1684,44 @@ impl Codegen {
         }
     }
 
+    /// 文件作用域同名对象的声明合并（C11 6.9.2p2）：同一 TU 里一个对象可以有
+    /// 任意多个 tentative definition（`int g;`），外加至多一个带初始化器的定义。
+    /// 它们描述的是同一个对象——只分配一次存储，初值取那个真定义。
+    ///
+    /// 旧实现逐个 `Decl::Var` 分配存储并 `insert` 到 `globals_raw`：后者覆盖前者，
+    /// 存储槽也跟着换。于是 `static int g; static int g = 1; static int g;` 落成两份
+    /// 存储，符号指向最后那个零初始化槽，`g` 读到 0（gcc 读到 1）。TLS 版同理，
+    /// 对应 GCC 用例 torture/tls/thr-init-2.c。
+    ///
+    /// 返回「该由哪一次声明分配存储」的下标集合。规则：带初始化器的定义优先；
+    /// 都只是 tentative 时取最后一个（与旧行为一致，避免无谓的布局漂移）。
+    fn effective_global_defs(prog: &Program) -> HashSet<usize> {
+        let mut chosen: HashMap<&str, usize> = HashMap::new();
+        for (i, decl) in prog.decls.iter().enumerate() {
+            let Decl::Var(v) = decl else { continue };
+            // 纯声明（`extern int x;`）不分配存储，两条路径都另有处理，不参与挑选。
+            if v.is_extern && v.init.is_none() {
+                continue;
+            }
+            let seen = chosen.get(v.name.name.as_str()).copied();
+            match seen {
+                None => {
+                    chosen.insert(v.name.name.as_str(), i);
+                },
+                Some(pi) => {
+                    // 前一次已带初始化器时保留它（重复定义由诊断负责），否则后者接管：
+                    // tentative→tentative 取最后一个，tentative→真定义 必须取真定义。
+                    let prev_has_init =
+                        matches!(&prog.decls[pi], Decl::Var(p) if p.init.is_some());
+                    if !prev_has_init {
+                        chosen.insert(v.name.name.as_str(), i);
+                    }
+                },
+            }
+        }
+        chosen.values().copied().collect()
+    }
+
     /// ET_EXEC 模式: 生成可直接执行的 ELF
     fn compile_exec(&mut self, prog: &Program) {
         // IFUNC / CPUID 合成只在 ET_REL 路径实现（resolver 需要重定位与动态链接器
@@ -1709,9 +1747,14 @@ impl Codegen {
             }
         }
         // 收集全局变量 → rodata / .tdata(TLS)
-        for decl in &prog.decls {
+        let effective = Self::effective_global_defs(prog);
+        for (decl_idx, decl) in prog.decls.iter().enumerate() {
             if let Decl::Var(v) = decl {
                 if v.is_extern {
+                    continue;
+                }
+                // 同一对象的另一次声明：存储已由选中的那次（带初值的那次）分配。
+                if !effective.contains(&decl_idx) {
                     continue;
                 }
                 let sz_raw = v.ty.size().max(1);
@@ -2067,7 +2110,8 @@ impl Codegen {
         }
         // Phase 1: 生成代码, 收集数据
         // 收集全局变量 → .data / .bss (或自定义 section)
-        for decl in &prog.decls {
+        let effective = Self::effective_global_defs(prog);
+        for (decl_idx, decl) in prog.decls.iter().enumerate() {
             if let Decl::Var(v) = decl {
                 // Phase 3.2: 判据读 `v.home`（IR 位置表已解析出来的家），不再独立判
                 // `register_name.is_some()` —— 同一事实只有一处。用户文本名仍由
@@ -2097,6 +2141,10 @@ impl Codegen {
                     // extern）就是被这一步吃掉，testfixture 链接不过。
                     // 登记口径与块作用域 extern 声明共用一份（`register_extern_object`）。
                     self.register_extern_object(&v.name.name, &v.ty);
+                    continue;
+                }
+                // 同一对象的另一次声明：存储已由选中的那次（带初值的那次）分配。
+                if !effective.contains(&decl_idx) {
                     continue;
                 }
                 if v.is_thread_local {

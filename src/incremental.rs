@@ -371,6 +371,7 @@ mod tests {
             sse: true,
             kernel_code_model: false,
             auto_var_init_zero: false,
+            fp_int_builtin_inexact: false, // 夹具 std=Gnu23 ⇒ C23 默认精确
             stack_protector: false,
             stack_protector_strong: false,
             unwind_tables: true,

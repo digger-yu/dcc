@@ -37,9 +37,16 @@ fn rhs_pure_stage() -> bool {
 }
 
 /// 帧临时槽回读（`mov <disp>(%r13), %<reg>`）的 gas 文本，上面两处回读共用一份。
+///
+/// 两个细节都不能省：
+///   * `REG64` 表里的名字**已带 `%`**，不能再拼一个 —— 旧写法 `format!("mov %{}, {}")`
+///     在 -S 里渲染成 `mov %%rax, -16(%r13)`，gas 直接报 `bad register name`
+///     (torture/pr54436.c、pr56195.c 的 dg-do assemble 因此无法汇编)。
+///   * 这条指令是**回读**（`mov_rm_mem` 从槽里装寄存器），GAS 语序是
+///     `disp(%r13), %reg`；旧写法把方向写反了，-S 文本与 -c 字节不一致。
 fn gas_load_from_temp_slot(dst: u8, slot_off: i32) -> String {
     use crate::codegen::x86_64::emit::gas::{mem_disp as gas_mem_disp, REG64 as GAS_REG64};
-    format!("mov %{}, {}", GAS_REG64[(dst & 15) as usize], gas_mem_disp(13, slot_off as i64))
+    format!("mov {}, {}", gas_mem_disp(13, slot_off as i64), GAS_REG64[(dst & 15) as usize])
 }
 
 impl Codegen {
@@ -61,6 +68,32 @@ impl Codegen {
                 _ => return cur,
             }
         }
+    }
+
+    /// `&&`/`||` 的操作数：求值到 dst，并发出「真/假」标志位（供上层 jcc 消费）。
+    ///
+    /// 整数与指针沿用 `test dst64, dst64`；`__int128` 须先把高半（rdx）并进
+    /// dst，否则「高 1 低 0」被误判为 0。浮点值与 `_Complex` 的 rvalue 却不在
+    /// GP 寄存器里：浮点在 xmm0，复数在「内存对 + xmm0=实部 + rax=槽地址」——
+    /// 对 GP 寄存器 test 读到的是无关量（复数尤其：槽地址恒非零，于是
+    /// `c || x` 恒真，torture/pr117138 即此）。C11 6.5.13p2 / 6.5.14p2 只要求
+    /// 「与 0 比较」，直接复用 `emit_truth_flags` 的既有判据（已含 NaN 视为真、
+    /// 复数实虚部同为零的语义）。
+    fn gen_logic_operand_flags(&mut self, e: &Expr, dst: u8) {
+        self.gen_expr_decay(e, dst);
+        if matches!(e.ty(), Type::Float | Type::Double | Type::Complex(_)) {
+            self.emit_truth_flags(&e.ty());
+            return;
+        }
+        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+        if matches!(e.ty(), Type::Int128 | Type::UInt128) {
+            // or dst64, rdx (REX.W 09 /r, r/m=dst reg field=rdx(2))
+            let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
+            self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
+        }
+        // test dst64, dst64 (REX.W 85 /r, reflexive ModRM)
+        let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
+        self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
     }
 
     /// 语句表达式的最后一个 item 是表达式语句时，把它的值放进 dst。
@@ -241,36 +274,13 @@ impl Codegen {
                 if matches!(op, BinOp::AndAnd | BinOp::OrOr) {
                     let l_false = self.fresh_label();
                     let l_end = self.fresh_label();
-                    self.gen_expr_decay(l, dst);
-                    // P1-4: int128 操作数的高 64 位在 rdx, 与 dst(low) 或合并后
-                    // 再 test, 否则高 1 低 0 的 __int128 会被误判为 0.
                     use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                     use crate::codegen::x86_64::emit::gas::REG8 as GAS_REG8;
-                    if matches!(l.ty(), Type::Int128 | Type::UInt128) {
-                        // or dst64, rdx (REX.W 09 /r, r/m=dst reg field=rdx(2))
-                        let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                        self.emit_insn(
-                            &Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas),
-                        );
-                    }
-                    // test dst64, dst64 (REX.W 85 /r, reflexive ModRM)
-                    let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                    self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
+                    self.gen_logic_operand_flags(l, dst);
                     match op {
                         BinOp::AndAnd => {
                             self.jmp_rel32(&l_false, JumpKind::Je);
-                            self.gen_expr_decay(r, dst);
-                            if matches!(r.ty(), Type::Int128 | Type::UInt128) {
-                                let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                                self.emit_insn(
-                                    &Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2)
-                                        .with_gas(or_gas),
-                                );
-                            }
-                            let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(
-                                &Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas),
-                            );
+                            self.gen_logic_operand_flags(r, dst);
                             // setne dst_low: 结果写入 dst 的低 8 位, 而非固定 al.
                             // `0F 95 /r` 的目的在 **r/m** ⇒ dst>=8 需要 REX.B.
                             let setne_gas = format!("setne {}", GAS_REG8[(dst & 15) as usize]);
@@ -292,18 +302,7 @@ impl Codegen {
                         },
                         BinOp::OrOr => {
                             self.jmp_rel32(&l_false, JumpKind::Jne);
-                            self.gen_expr_decay(r, dst);
-                            if matches!(r.ty(), Type::Int128 | Type::UInt128) {
-                                let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                                self.emit_insn(
-                                    &Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2)
-                                        .with_gas(or_gas),
-                                );
-                            }
-                            let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(
-                                &Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas),
-                            );
+                            self.gen_logic_operand_flags(r, dst);
                             let setne_gas = format!("setne {}", GAS_REG8[(dst & 15) as usize]);
                             self.emit_insn(&Insn::setcc_reg(CondCode::Ne, dst).with_gas(setne_gas));
                             let movzb_gas = format!(
@@ -529,7 +528,11 @@ impl Codegen {
                                     5 => "shr",
                                     _ => "sar",
                                 };
-                                let gas = format!("{mnem} {}, {v}", GAS_REG64[(dst & 15) as usize]);
+                                // GAS 语序：移位量在前、且要带 `$` 立即数前缀。
+                                // 旧写法 `{mnem} %reg, {v}` 把 -S 渲染成
+                                // `shr %rax, 16`，gas 报 `operand type mismatch`
+                                // (torture/pr54436.c 的 dg-do assemble)。
+                                let gas = format!("{mnem} ${v}, {}", GAS_REG64[(dst & 15) as usize]);
                                 self.emit_insn(
                                     &Insn::shift_reg_imm8_c1_b64(op_field, dst, v as u8)
                                         .with_gas(gas),
@@ -1842,15 +1845,23 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty =
                         self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
-                    let field_info = match &target_ty {
-                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                    // `scalar_storage_order("big-endian")`：本结构体的直接标量字段按大端存。
+                    let sso = match &target_ty {
+                        Type::Struct(_, _, _, r) | Type::Union(_, _, _, r) => *r,
+                        _ => false,
+                    };
+                    // 字段表留着给位域容器定宽（`bitfield_unit_size_in` 需要看到同单元
+                    // 的全部位域：SSO 大端镜像后单个字段的 end 不再覆盖整个单元）。
+                    let (struct_fields, field_info) = match &target_ty {
+                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => (
+                            fields.as_slice(),
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
                                 fc
-                            })
-                        },
-                        _ => None,
+                            }),
+                        ),
+                        _ => (&[][..], None),
                     };
                     let is_bitfield = field_info.as_ref().is_some_and(|f| f.bit_width.is_some());
                     // 2. 计算目标地址
@@ -1921,7 +1932,7 @@ impl Codegen {
                         let bw = f.bit_width.unwrap();
                         // 容器宽度取真实存储单元（与读取路径 `bitfield_unit_size` 同
                         // 一真源），写回才能不抹掉同单元邻位域。
-                        let container_size = f.bitfield_unit_size();
+                        let container_size = f.bitfield_unit_size_in(struct_fields);
                         let bit_off = f.bit_offset;
                         // 按嵌套深度计算帧槽偏移 (避免嵌套位域 RMW 互相覆盖).
                         // 走 LayoutMap::bf_rmw_slot 取 BF_RMW 专用带, 不再从 -8/-16
@@ -2001,6 +2012,10 @@ impl Codegen {
                                 .expect("typed-opcode: mov_ext_mem");
                             },
                             _ => {},
+                        }
+                        // SSO 大端：容器按大端解释（位域偏移已在布局阶段镜像）。
+                        if sso {
+                            self.emit_sso_byteswap(0, container_size);
                         }
                         // 保存容器值到帧临时槽2: [r13 + val_off]
                         self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, val_off));
@@ -2117,6 +2132,9 @@ impl Codegen {
                             },
                             _ => {},
                         }
+                        if sso {
+                            self.emit_sso_byteswap(1, container_size);
+                        }
                         // 清除目标位: inv_mask = ~(((1<<bw)-1) << bit_off)
                         let mask: u64 = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
                         let inv_mask = !(mask << bit_off);
@@ -2135,6 +2153,11 @@ impl Codegen {
                         // or rcx, rax
                         self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, 1, 0))
                             .expect("typed-opcode: alu_rm_reg_reg");
+                        // SSO 大端：容器写回前翻成内存字节序（rcx 此处只是搬运值，
+                        // 下方 2200+ 会重新从内存解码取表达式值）。
+                        if sso {
+                            self.emit_sso_byteswap(1, container_size);
+                        }
                         // 加载地址: rdx = [r13 + addr_off]
                         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off)); // mov rdx, [r13+addr_off]
                                                                                               // 存储容器 (结果在 rcx 中)
@@ -2271,6 +2294,10 @@ impl Codegen {
                                     .expect("typed-opcode: mov_ext_mem");
                                 },
                                 _ => {},
+                            }
+                            // SSO 大端：容器按大端解释后再提取位域值。
+                            if sso {
+                                self.emit_sso_byteswap(2, container_size);
                             }
                             // shr rdx, bit_off
                             if bit_off > 0 {
@@ -2519,23 +2546,59 @@ impl Codegen {
                                             | Type::Float128
                                     ) {
                                         self.emit_seg(self.lvalue_seg_prefix(lv));
+                                        // SSO 大端 float/double：写入前翻转位模式；
+                                        // 写后翻回，赋值表达式的值（xmm0）仍是解码值。
+                                        let sso_rev = sso
+                                            && matches!(fty, Type::Float | Type::Double);
+                                        if sso_rev {
+                                            self.emit_sso_byteswap_xmm0(fty);
+                                        }
                                         self.emit_store_scalar_float_at(&r.ty(), fty, 1);
+                                        if sso_rev {
+                                            self.emit_sso_byteswap_xmm0(fty);
+                                        }
                                     // 单一真源：收浮影子副本
                                     } else {
+                                        // SSO 大端整型：值在 rax（16 字节在
+                                        // rax:rdx），写前翻转、写后翻回。
+                                        // 指针字段不参与（与 GCC 实测一致）。
+                                        let is128 = matches!(fty, Type::Int128 | Type::UInt128);
+                                        let sso_rev = sso && !matches!(fty, Type::Ptr(_));
+                                        if sso_rev {
+                                            if is128 {
+                                                self.emit_sso_byteswap_i128(0, 2);
+                                            } else {
+                                                self.emit_sso_byteswap(0, size);
+                                            }
+                                        }
                                         self.emit_store_scalar_int_at(
                                             size,
                                             1,
                                             0,
                                             self.lvalue_seg_prefix(lv),
                                         );
+                                        if sso_rev {
+                                            if is128 {
+                                                self.emit_sso_byteswap_i128(0, 2);
+                                            } else {
+                                                self.emit_sso_byteswap(0, size);
+                                            }
+                                        }
                                     }
                                 } else {
+                                    let sso_rev = sso && !matches!(assign_l_ty, Type::Ptr(_));
+                                    if sso_rev {
+                                        self.emit_sso_byteswap(0, size);
+                                    }
                                     self.emit_store_scalar_int_at(
                                         size,
                                         1,
                                         0,
                                         self.lvalue_seg_prefix(lv),
                                     );
+                                    if sso_rev {
+                                        self.emit_sso_byteswap(0, size);
+                                    }
                                 }
                             }
                             // store 只写内存；赋值表达式的值（已按字段类型归约）

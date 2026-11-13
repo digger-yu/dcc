@@ -1655,16 +1655,20 @@ impl Codegen {
                     }
                     if let Some(bw) = bit_w {
                         // ── 位域字段初始化: 读-改-写 ──
-                        // 计算容器大小: 扫描同 offset 的所有位域,
+                        // 计算容器大小: 扫描同 offset 的**全部**位域,
                         // 取 ceil(total_bits/8) 与 max_ty_size 的较大值,
                         // 再对齐到 {1,2,4,8} (下游 load/store switch
                         // 只处理这四种大小).
+                        //
+                        // 不能只看本字段/后续字段：SSO 大端的位偏移已在布局阶段
+                        // 镜像，单元里靠后的字段镜像后反而落在低位（16 位单元里
+                        // 的 `char c1:1` 在 bit3），按它自己推会把容器缩成 1 字节、
+                        // 读写落在单元前半段（gcc.c-torture 20230630-2/4.c）。
+                        // 小端单元内 end 单调递增，全量扫描与旧结果一致。
                         let container_size = {
                             let mut max_ty_size = sz;
                             let mut bits_end = bit_o + bw;
-                            let mut fi = field_idx + 1;
-                            while fi < fields.len() {
-                                let nf = &fields[fi];
+                            for nf in fields.iter() {
                                 if nf.bit_width.is_some() && nf.offset == off {
                                     let ts = nf.ty.size();
                                     if ts > max_ty_size {
@@ -1674,9 +1678,6 @@ impl Codegen {
                                     if end > bits_end {
                                         bits_end = end;
                                     }
-                                    fi += 1;
-                                } else {
-                                    break;
                                 }
                             }
                             let bytes_for_container = bits_end.div_ceil(8);
@@ -1815,6 +1816,11 @@ impl Codegen {
                             },
                             _ => {},
                         }
+                        // SSO 大端：内存中的容器按大端存放，先翻成解码值再参与
+                        // 位域 RMW（位序已由 parser 在布局阶段镜像）。
+                        if reverse_sso {
+                            self.emit_sso_byteswap(0, container_size);
+                        }
                         // 保存容器值 → 容器槽
                         self.emit_insn(&Insn::mov_rm_mem(
                             false,
@@ -1853,13 +1859,9 @@ impl Codegen {
                             }
                         }
                         // 左移到位置: shl rax, bit_o
-                        // 对于 reverse_sso: 反转位域在容器内的位置
-                        let effective_bit_o = if reverse_sso {
-                            let container_bits = (container_size * 8) as u32;
-                            container_bits - bit_o - bw
-                        } else {
-                            bit_o
-                        };
+                        // SSO 大端的位序镜像已在 布局阶段（parser）完成，
+                        // 这里直接用镜像后的 `bit_o`，不能再次反转。
+                        let effective_bit_o = bit_o;
                         if effective_bit_o > 0 {
                             // shl rax, imm8: 48 C1 E0 ib (accumulator /4).
                             self.emit_insn(&Insn::shift_reg_imm8_c1_b64(
@@ -1934,31 +1936,21 @@ impl Codegen {
                             13,
                             addr_off,
                         )); // mov rdx, [r13+addr_off]
-                            // 存储容器 (如果是最后一个位域且 reverse_sso, 需要先字节序反转)
-                            // 检查是否还有后续位域在同一容器
-                        let has_more_bitfields_in_container = {
-                            let mut fi = field_idx;
-                            let mut found_more = false;
-                            while fi < fields.len() {
-                                let f = &fields[fi];
-                                if f.bit_width.is_some() && f.offset == off {
-                                    // 这是同一容器的位域
-                                    if fi >= field_idx {
-                                        found_more = true;
-                                        break;
-                                    }
-                                } else if f.offset != off {
-                                    break;
-                                }
-                                fi += 1;
-                            }
-                            found_more
-                        };
-                        if reverse_sso && !has_more_bitfields_in_container {
-                            // 最后一个位域: 字节序反转整个容器
-                            // 注意: reverse_sso 改变位域在容器中的打包方向,
-                            // 不仅仅是字节序反转。完整实现需要修改位域布局逻辑。
-                            // 当前实现: 反转容器中的字节序 (近似处理)
+                        // 存储容器
+                        // SSO 大端：写回前统一把解码值翻成内存字节序。旧写法按
+                        // “是否本容器最后一个位域”判断，多字段同容器时前面的
+                        // 赋值只进容器槽不落内存，后续位域从内存重载时丢掉它。
+                        // 每次 RMW 都从内存重载，反复翻转是自洽的。
+                        if reverse_sso {
+                            // 从容器槽重载解码值，翻转成内存字节序后再存
+                            self.emit_insn(&Insn::mov_rm_mem(
+                                true,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                1,
+                                13,
+                                val_off,
+                            )); // mov rcx, [r13+val_off]
+                            self.emit_sso_byteswap(1, container_size);
                             match container_size {
                                 2 => {
                                     self.emit_insn(&Insn::mov_rm_mem(
@@ -2042,7 +2034,7 @@ impl Codegen {
                                     )); // mov [rdx], rcx
                                 },
                                 _ => {
-                                    // 其他大小: 不反转 (1字节无需反转)
+                                    // 1 字节容器无需字节序翻转，直接存
                                     match container_size {
                                         4 => {
                                             self.emit_insn(&Insn::new(

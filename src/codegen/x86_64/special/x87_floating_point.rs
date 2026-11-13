@@ -969,12 +969,16 @@ impl Codegen {
 
     /// x87 fstp st(0): 彈出棧頂 (不存儲)
     pub fn emit_x87_fstp_st0(&mut self) {
-        // fstp st(0): DD D9
+        // `fstp st(0)` 是 DD **D8**。DD D9 是 `fstp st(1)` ——
+        // 它是「存到 st(1) 再弹」，弹出后栈顶仍是原 st(0) 的副本，
+        // **栈深度不减**；早先按 D9 发射，每次 fucomip/complex 收尾都漏一层
+        // x87 栈，8 次后溢出成 indefinite，比较结果静默错乱
+        // (torture/type-generic-1.c 的 `__builtin_isunordered (ld, 0)`)。
         self.emit_insn(&Insn::new(
             X86_64Opcode::X87 {
                 op: X87Op::Fixed {
                     escap: 0xDD,
-                    modrm: 0xD9,
+                    modrm: 0xD8,
                 },
                 mem: None,
             },
@@ -1117,6 +1121,27 @@ impl Codegen {
                 op: X87Op::Fixed {
                     escap: 0xDF,
                     modrm: 0xE9,
+                },
+                mem: None,
+            },
+            &[],
+        ));
+    }
+
+    /// x87 浮点绝对值: st(0) = |st(0)|（fabs, D9 E1）。
+    ///
+    /// `long double` 的符号位在 80-bit 对象的第 9 字节 bit7，而 SSE 的掩码
+    /// 只能改低 64 位：对 tbyte 做 `andpd` 会清掉**尾数的显式整数位**（值
+    /// 直接减半），符号位原封不动——旧 `__builtin_fabsl` 就是这么把
+    /// -3.5L 变成 -3.5L、把 ±2^n 变成 ±2^(n-1) 的。x87 的 fabs 直接作用于
+    /// 寄存器里的扩展精度值，没有这个编码宽度问题。
+    pub fn emit_x87_abs(&mut self) {
+        // fabs: D9 E1
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed {
+                    escap: 0xD9,
+                    modrm: 0xE1,
                 },
                 mem: None,
             },

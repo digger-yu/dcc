@@ -1660,6 +1660,33 @@ impl Field {
         let needed = (end_bits as usize + 7) / 8;
         needed.max(self.ty.size()).next_power_of_two().min(8)
     }
+
+    /// 同 [`Field::bitfield_unit_size`]，但能看见**同单元的全部字段**。
+    ///
+    /// 位域的存储单元宽度是单元的属性，不是单个字段的：
+    /// `scalar_storage_order` 大端在布局阶段把 `bit_offset` 镜像到高位起始
+    /// 后，单元里原本靠后的字段会落到低位（16 位单元里的 `char c1:1` 镜像到
+    /// bit3），只按它自己推容器会缩成 1 字节，读写就落在单元的前半段、覆掉
+    /// 别的字段的位（gcc.c-torture 的 20230630-2.c / 20230630-4.c）。
+    ///
+    /// 同 offset 的位域必然同单元，取最高 end 即为单元宽度。小端布局里
+    /// 单元内 end 单调递增，该值与逐字段扫描结果一致，故统一适用。
+    pub fn bitfield_unit_size_in(&self, fields: &[Field]) -> usize {
+        let bw = self.bit_width.unwrap_or(0);
+        let mut max_ty_size = self.ty.size();
+        let mut bits_end = self.bit_offset + bw;
+        for g in fields {
+            if g.bit_width.is_some() && g.offset == self.offset {
+                max_ty_size = max_ty_size.max(g.ty.size());
+                bits_end = bits_end.max(g.bit_offset + g.bit_width.unwrap_or(0));
+            }
+        }
+        let bytes_for_container = (bits_end as usize).div_ceil(8);
+        bytes_for_container
+            .max(max_ty_size)
+            .next_power_of_two()
+            .min(8)
+    }
 }
 
 #[derive(Debug, Clone)]

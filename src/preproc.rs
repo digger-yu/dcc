@@ -1545,22 +1545,14 @@ pub fn preprocess(
         },
     );
     // likely/unlikely 分支提示
-    pp.macros.insert(
-        "likely".to_string(),
-        MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "(x)".to_string(),
-            variadic: false,
-        },
-    );
-    pp.macros.insert(
-        "unlikely".to_string(),
-        MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "(x)".to_string(),
-            variadic: false,
-        },
-    );
+    //
+    // 曾经在这里无条件预定义 `likely(x) → (x)` / `unlikely(x) → (x)`。
+    // 这不属于 ISO C 也不属于 GCC 的预定义宏：它们永远由使用方的头文件
+    // 自己定义（Linux 内核 `include/linux/compiler.h`、glibc 的
+    // `sys/cdefs.h` 用 `__glibc_likely`）。预定义会直接污染用户命名空间：
+    // gcc.dg 的 `tree-ssa/counts-1.c` 自己写了 `void unlikely (void)`，
+    // 调用点被展开成 `()`，报「expected expression, got RParen」；
+    // 内核源码里同名的静态函数/宏也会踩到。删除后与 gcc 行为一致。
     // MODULE_LICENSE/AUTHOR/DESCRIPTION/ALIAS 等模块宏
     // 展开为 .modinfo section 的字符串变量
     pp.macros.insert("MODULE_LICENSE".to_string(), MacroDef {

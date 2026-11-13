@@ -80,7 +80,7 @@ impl Codegen {
         } else {
             None
         };
-        // gen_builtin 已完整物化 complex 返回的 builtin (conj 系列):
+        // gen_builtin 已完整物化 complex 返回的 builtin (conj/complex 系列):
         // result_off 含实/虚部, xmm0=实部 — 下方统一物化须跳过,
         // 否则 movq 打包 store 会覆盖虚部 (20020411-1)
         let mut complex_builtin_done = false;
@@ -95,7 +95,7 @@ impl Codegen {
                 // 已成功处理 __builtin_* 函数
                 if matches!(
                     name_name.as_str(),
-                    "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl"
+                    "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl" | "__builtin_complex"
                 ) {
                     complex_builtin_done = true;
                 }

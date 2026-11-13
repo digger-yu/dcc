@@ -515,6 +515,11 @@ fn constraint_allows_type(
     if core.is_empty() {
         return true;
     }
+    // 具名匹配 `[name]`（含 `[name],m` 备选）：字母是名字不是约束，`[f]` 里的
+    // `f` 并非 x87 约束。类型约束由被匹配的目标操作数自己把关，这里直接放过。
+    if shared::asm_constraints::matching_constraint_name(core).is_some() {
+        return true;
+    }
     if core.starts_with("@cc") {
         return ty.is_int();
     }

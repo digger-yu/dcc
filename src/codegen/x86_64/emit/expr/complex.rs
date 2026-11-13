@@ -816,16 +816,24 @@ impl Codegen {
             self.gen_expr(e, Self::EVAL_BASE);
         }
         // 基址：lvalue 在 rax；rvalue 在 r13+result_off。逐分量 fld（按源内型）
-        // 后 fstp tbyte 到 dst。两次加载之间不能依赖 rax：fld 不破坏 rax。
+        // 后 fstp tbyte 到 dst。
+        //
+        // **先把两个分量都读进 x87 寄存器，再写 dst**：dst 是 sret 区向下
+        // 分配的临时槽，而 rvalue 源的 result_off 是帧底那条带——两者可以
+        // 重叠（实测 `_Complex long double c = mk(a, b);`：result_off=-152，
+        // dst=-136 恰好就是源虚部槽）。旧顺序「读实部→写 dst→读虚部」把
+        // 虚部源先踩成实部，于是 `__imag__ c` 读到实部（builtin-complex-1
+        // 的 comparecl abort）。x87 栈有 8 项，压两枚再弹两枚没有代价。
         let (base_reg, real_base) = if is_lvalue {
             (0u8, 0i64)
         } else {
             (13u8, self.complex_result_off())
         };
         self.emit_x87_fld_at(base_reg, real_base as i32, &src_inner);
-        self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
         self.emit_x87_fld_at(base_reg, (real_base + src_isz) as i32, &src_inner);
+        // st0=imag 先落 dst+16（弹掉后实部升到 st0），再落实部。
         self.emit_x87_fstp_at(13, dst as i32 + 16, &Type::LongDouble);
+        self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
         dst
     }
 
@@ -1027,7 +1035,11 @@ impl Codegen {
             self.emit_lea_r13(0, self.complex_result_off());
             self.emit_store(0, save, 8);
         }
-        for part in 0..2i64 {
+        // 分量按**逆序**搬：dst 是 sret 区向下分配的临时槽，与 rvalue 源的
+        // result_off（帧底带）可以部分重叠（实测 `_Complex _Float128 c =
+        // mk(...)` 的 dst 恰好压在源虚部槽上）。先搬 part1 到 dst+16，再读
+        // part0 写 dst；因为 dst > result_off，这一步序不会踩到尚未读的源。
+        for part in (0..2i64).rev() {
             // 每分量重取基址: 拓宽调用的 callee 不保证保留 rax
             self.load_stack(0, save);
             self.load_f128_component(0, (part * src_isz) as i32, &src_inner);
