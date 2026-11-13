@@ -779,3 +779,55 @@ fn va_arg_prologue_omits_xmm_under_mno_sse() {
         );
     }
 }
+
+/// 32B 结构体 (`_Complex long double` 成员) 按值传参 + `va_arg` + 标量→复数
+/// 字面量转换全链: compat/struct-by-value-18 的最小缩影。
+///
+/// 修复前三重叠加: (a) `gen_expr_complex_lit` 每个复数字面量漏 1 枚 x87 栈项
+/// (第 8 项回绕后写 indefinite `-nan`); (b) 标量→`_Complex long double` 的
+/// 显式转换没有实现，`(CL)1` 读到从未写过的复数带; (c) 两者共同使
+/// `check (g1, (CL)1)` 的实/虚部与形参不符而 abort。
+#[test]
+#[cfg(unix)]
+fn complex_ld_struct_by_value_and_va_arg() {
+    let src = r#"
+typedef _Complex long double CL;
+typedef struct { CL a; } S;
+static void check (S x, CL y) {
+    if (__real__ x.a != __real__ y || __imag__ x.a != __imag__ y)
+        __builtin_abort ();
+}
+static void __attribute__((noinline)) test (S s1, S s2, S s3) {
+    check (s1, (CL)1); check (s2, (CL)2); check (s3, (CL)3);
+}
+static void __attribute__((noinline)) testva (int n, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start (ap, n);
+    for (int i = 0; i < n; i++) {
+        S t = __builtin_va_arg (ap, S);
+        check (t, (CL)(i + 1));
+    }
+    __builtin_va_end (ap);
+}
+S g1, g2, g3;
+int main (void) {
+    g1.a = 1.0L; g2.a = 2.0L; g3.a = 3.0L;
+    check (g1, (CL)1); check (g2, (CL)2); check (g3, (CL)3);
+    test (g1, g2, g3);
+    testva (3, g1, g2, g3);
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("complex-ld-struct-by-value-va", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "complex LD struct-by-value/va_arg compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "complex LD struct-by-value/va_arg mismatch (rc={rc})"
+    );
+}

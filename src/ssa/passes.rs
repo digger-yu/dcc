@@ -3681,7 +3681,7 @@ pub fn gvn(func: &mut Function) -> bool {
                 if dest.name().starts_with("__dcc_") {
                     continue;
                 }
-                let Some(key) = val_key(&bbm.insts[idx].kind, &defs) else {
+                let Some(key) = val_key(&bbm.insts[idx].kind, &defs, &dest.ty) else {
                     // 不纯/不可编号: 它本身是一次写或调用 ⇒ 本块内可用表作废
                     if inst_is_side_effecting(&bbm.insts[idx].kind) {
                         local.clear();
@@ -3882,7 +3882,22 @@ fn collect_var_table(func: &Function) -> HashMap<String, SsaVar> {
 
 /// 纯运算的表达式形状; `None` = 不参与值编号 (有副作用、读内存但带 volatile、
 /// 戒指数等无法保证重复执行语义一致的形态)。
-fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
+///
+/// 结果是**数组类型**的指令一律不编号: 那种值在 IR 里是「子对象的别名」(地址, 见
+/// `ssa_ident_expr` 的说明: 本 IR 里数组值有两种存储语义, 不能按类型一刀切衰减),
+/// 把它归一到另一个名字上, 会让重建侧把原本只作基址内联的临时值**物化成变量**
+/// (多出第二个使用者 ⇒ 不再内联), 而它的声明类型仍是数组 ⇒ 之后的 `[i]` 按
+/// 「数组对象在自己的槽里」取址, 读到的却是槽里存的地址。实测 torture
+/// `pr38048-2.c` (`det += a[j][0] + a[j][1]`): -O2 把 `a[j][0]` 读成指针本身的
+/// 低 4 字节, `inv_J` 由 15 变 3。
+fn val_key(
+    k: &InstKind,
+    _defs: &HashMap<String, InstKind>,
+    dest_ty: &Type,
+) -> Option<ValKey> {
+    if matches!(dest_ty, Type::Array(..)) {
+        return None;
+    }
     match k {
         InstKind::Bin { op, l, r } => {
             // 除/模可能陷阱: 多执行一次会新增可观察行为, 仅当已命中同样形状时
@@ -3901,7 +3916,25 @@ fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
         InstKind::Load { e, ty, is_volatile } if !is_volatile => {
             Some(ValKey::Load(format!("{}:{}", operand_identity(e), type_tag_of(ty)?)))
         },
-        InstKind::MemberLoad { obj, field, ty, .. } => {
+        InstKind::MemberLoad {
+            obj,
+            obj_ty,
+            field,
+            ty,
+            ..
+        } => {
+            // 位域读不能编号: 结果的「位域性」是 codegen 做宽度截断的唯一依据
+            // (整数算术/移位的尾部要按字段宽度掩码)。把它归一到另一个名字上就等于
+            // 先物化成一个普通临时值, 下游再看不到字段宽度。实测 torture
+            // `pr34971.c` (`(x.b<<8) + (x.b>>32)`, b 是 40 位位域): -O2 把两次读
+            // 归一后移位跳过 40 位掩码, `0x10000000100 + 1` 直接与 `0x101` 比较而 abort。
+            if let Type::Struct(_, fields, _, _) = obj_ty {
+                if crate::ast::find_field(fields, field)
+                    .is_some_and(|(f, _)| f.bit_width.is_some())
+                {
+                    return None;
+                }
+            }
             Some(ValKey::Member(operand_identity(obj), field.clone(), type_tag_of(ty)?))
         },
         InstKind::IndexLoad { arr, idx, ty, .. } => {
@@ -4194,15 +4227,33 @@ fn is_dead_store(
 /// 正的逃逸是取出的地址被「非直接访存地址」的位置消费: 当参数递给出参、存进内存、
 /// 作为返回值、参与指针算术、进 asm、或经 phi 流通到任意路径。
 fn escaping_bases(func: &Function) -> HashSet<String> {
+    // 本函数自己的具名对象（局部 + 形参）。用于识别「地址被存进一个具名对象」。
+    let locals = local_object_names(func);
     let mut addr_of_dest: HashMap<String, String> = HashMap::new();
+    let mut escape = HashSet::new();
     for bb in func.blocks.values() {
         for inst in &bb.insts {
             if let (Some(d), InstKind::AddrOf { base }) = (&inst.dest, &inst.kind) {
                 addr_of_dest.insert(d.name(), base.clone());
+                // 【地址被存进具名对象】`p = &b` 在 IR 里是 `p.3 = AddrOf{b}`，
+                // 而 `p` 本身是具名对象（重建按基名塌缩，运行期谁都能从 `p` 读到
+                // 这个地址）。把 `b` 算作逃逸。
+                //
+                // 不这样判时，分支里三个 `p.N = AddrOf{…}` 只要在本块内没有使用者
+                // （join 处没有 phi，`*p = …` 读的是基名）就看不见 —— 于是 `b` 不算
+                // 逃逸，DSE 把 `b = 3` 当死写删掉。实测 torture `20041019-1.c`：
+                //     if (i<5) p=&a; else if (i>8) p=&b; else p=&c;
+                //     *p = 10;  b = 3;  return *p + 2;      /* i=10 时应得 5 */
+                // -O2 下 `b = 3` 被删，`*p + 2` 得 12。
+                //
+                // 取帧内地址后立即当落点用的形状（`arr[i]` 的 `_taddr = AddrOf{arr}`）
+                // dest 是临时名、不在 locals 里，不会被这条规则误伤。
+                if locals.contains(&d.base) {
+                    escape.insert(base.clone());
+                }
             }
         }
     }
-    let mut escape = HashSet::new();
     // 一个名字被“可逃位置”引用 ⇒ 其基址逃逸。
     let mut mark = |name: &str, escape: &mut HashSet<String>| {
         if let Some(base) = addr_of_dest.get(name) {

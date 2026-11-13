@@ -179,6 +179,54 @@ impl Codegen {
                 return;
             }
         }
+        // ── 标量 → _Complex (C6.3.1.8p1): 实部 = 转换后的标量, 虚部 = +0 ───
+        // 旧实现在这条轴上没有任何臂, 两种坏法:
+        //   1) 源与目标恰好同宽 (`double` → `_Complex float` 都是 8B) 被
+        //      [`Self::gen_same_size_bitcast`] 当成对象表示重铸接走 —— 语义是
+        //      数值转换而非位拷贝, 且该路径要向量临时带, 在没有向量带的函数里
+        //      直接触发 `vec_temp` 断言 (实测 `f((CF)d)` 编译期 panic);
+        //   2) 其余尺寸落末尾 `_ => {}` 什么也不发, 消费端去读
+        //      `complex_result_off()` 里从未写过的带 (实测 `(T)1` 作实参:
+        //      `_Complex float/double` 实部恒 0, `_Complex long double` 读到
+        //      x87 indefinite `-nan`)。
+        // compat/struct-by-value-18 的 `checkScld1 (g1sScld1, (Sclcd1)1)` 即此。
+        // 动作与下面 `_Complex → _Complex` 同源: 按目标复数类型赋值一次
+        // (标量源的虚部补 +0 由 `gen_aggregate_assign_to` 承担, 与 `=` 共用),
+        // 再按 complex rvalue 约定交付 (rax = 复数结果带地址)。
+        if let Type::Complex(ref dst_c) = ty {
+            // 只接管浮点内型的目标: 整数内型 `_Complex int` 的 rvalue 交付走
+            // 既有的 GP 双字约定 (`rax` 即值对), 与复数结果带不是同一条轴。
+            let src_is_scalar = (Self::is_integer_type(&src_ty)
+                && !matches!(src_ty, Type::Int128 | Type::UInt128))
+                || matches!(src_ty, Type::Float | Type::Double | Type::LongDouble);
+            if src_is_scalar
+                && matches!(
+                    dst_c.base,
+                    Type::Float | Type::Double | Type::LongDouble
+                )
+            {
+                // 目标直接就是帧底的**复数结果带** (`complex_result_off`): 它本来
+                // 就是本函数内 complex rvalue 的交付位置 (binop/字面量/Call 返回
+                // 都写这里), 不需要再申请一个临时槽再搬一次。
+                // 帧预算的静态扫描 (`sret_bytes_expr` 的 leaf 登记) 只按「一次
+                // 复杂物化」32B 给这条叶子记账 —— 多申请一个槽会当场 E1128
+                // (实测 `CL h = (CL)d;` 预算 32B、实际要 96B)。
+                let band_off = self.complex_result_off();
+                let cdst = AggDst::Local {
+                    off: band_off,
+                    vla: None,
+                };
+                self.gen_aggregate_assign_to(&cdst, ty, e);
+                // 收尾与 `_Complex → _Complex` 同一约定 (f/d 把实部重载回
+                // xmm0、rax = 复数带地址); `dst` 已在带上, 那次 rep movsb 是
+                // 源==目的的空搬, 保留它避免另开一条交付路径。
+                self.finish_complex_assign_value(&cdst, ty);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                return;
+            }
+        }
         // ── _Complex → _Complex: 逐分量算术转换 (C6.3.1.8p4) ────────────────
         // 复数的**元素类型参与值表示**, 不像对象表示那样可整体位拷贝/位重铸:
         // `_Complex float` 拓宽到 `_Complex double` 必须对实部、虚部各做一次

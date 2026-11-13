@@ -6471,6 +6471,22 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             },
+            // __builtin_isalpha / iscntrl / isspace ... : GCC 的字符分类内建,
+            // 语义就是同名 libc 函数 (同样受 locale 影响, glibc 导出真实符号).
+            // 直接转发; 之前只认 __builtin_isdigit, 其余名字在 -O0 下报 E0018
+            // (pr115137 的 __builtin_iscntrl 因 -O2 把循环体折掉而侥幸通过).
+            "__builtin_isalnum" | "__builtin_isalpha" | "__builtin_isblank"
+            | "__builtin_iscntrl" | "__builtin_isgraph" | "__builtin_islower"
+            | "__builtin_isprint" | "__builtin_ispunct" | "__builtin_isspace"
+            | "__builtin_isupper" | "__builtin_isxdigit" | "__builtin_tolower"
+            | "__builtin_toupper" => {
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                self.emit_sysv_call(Some(libc_name), None, args, None);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
             // __builtin_isdigit: check if value is a digit (0-9).
             // Equivalent to ((unsigned)(x - '0')) < 10.
             "__builtin_isdigit" => {
@@ -6734,16 +6750,21 @@ impl Codegen {
                 true
             },
             // __builtin_abort: 转发到 libc abort()
+            //
+            // 用 `call_label_noreturn`：abort 不返回，调用点之后本路径不会再读家里的值，
+            // 所以不需要 caller-saved 家的保存窗口。用普通 `call_label` 会在「函数有延伸池家」
+            // 时撞上 E1136 而整 TU 编不过 —— 实测 `tests/gcc-torture/.../execute/pr68841.c`
+            // -O2：`__builtin_abort()` 变成内部错误（-O0/-O1 正常，-O0 起该函数没有延伸池家）。
             "__builtin_abort" => {
-                self.call_label("abort");
+                self.call_label_noreturn("abort");
                 true
             },
-            // __builtin_exit: 转发到 libc exit()
+            // __builtin_exit: 转发到 libc exit()（同样不返回）
             "__builtin_exit" => {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], 7); // rdi = status
                 }
-                self.call_label("exit");
+                self.call_label_noreturn("exit");
                 true
             },
             // __builtin_copysign: 转发到 libc copysign()

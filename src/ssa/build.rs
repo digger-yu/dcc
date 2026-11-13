@@ -1373,18 +1373,18 @@ impl Builder {
             },
             Expr::AddrOf { e, span, ty } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
-                    // `&ident` 的 dest 类型必须带出**函数指针**的指真类型。旧实现恒
-                    // `Ptr(void)` (上面的 `ty: _` 把 AddrOf 节点自己的类型丢了), 把
-                    // `&func` 的类型抹掉: 重建端 `inst_to_expr_resolved` 的内层 Ident
-                    // 因此拿到 `Void` 而非 `Func`, 而 `collect_free_idents` 只对
-                    // `Type::Func` 跳过注册 —— 函数名被 `register_var` 收进 `var_map`
-                    // 当普通局部, codegen 于是把 `&func` 发成 `lea 局部槽(%r13)`, 即
-                    // 一个从未赋值的槽的**地址**, 而不是函数符号地址。实测形状: Lua
-                    // liolib 的 `p->closef = &io_noclose` 把栈地址存进函数指针字段,
-                    // GC 终结器 `aux_close` 的 `(*cf)(L)` 跳栈段错误。AddrOf 节点自己的
-                    // ty 就是 `Ptr(pointee)`, 函数情形原样带出; 其余维持既有行为。
+                    // `&ident` 的 dest 类型必须带出**指真类型**。旧实现恒 `Ptr(void)`
+                    // (只给函数指针开了口子), 把「`base` 到底是什么类型」这一件信息抹掉。
+                    // 除了函数名作右值那种情形, 还有一个更常见的后果：**指针算术丢缩放**。
+                    // 实测 `unsigned long x; return &x + 1;` 在 -O2 下：`_taddr_1` 的类型是
+                    // `Ptr(void)`，`_tbin_2 = Add` 的左操作数 `l.ty()` 于是不是 Ptr(ULong)，
+                    // codegen 的 `ptr ± n 步进 sizeof(*ptr)` 只看见 `Ptr(void)`（步长 1）——
+                    // 返回 `&x + 1` 字节而不是 `&x + 8`（torture `920922-1.c` 即此形，
+                    // `f(&x) != &x + 0x81`）。重建端本来就以 dest 类型为唯一真源
+                    // （[`expr_rebuild::addr_of_ty`]/[`addr_of_pointee_ty`]），所以这里
+                    // 原样带出 `AddrOf` 节点自己的 `Ptr(pointee)` 就是对的。
                     let addr_ty = match ty {
-                        Type::Ptr(inner) if matches!(inner.base, Type::Func(_, _)) => ty.clone(),
+                        Type::Ptr(_) => ty.clone(),
                         _ => Type::Ptr(Box::new(QualType::new(Type::Void))),
                     };
                     let dest = target.unwrap_or_else(|| self.fresh("addr", addr_ty, span));
@@ -1678,11 +1678,29 @@ impl Builder {
                 }
                 result
             },
-            Expr::SizeofTy { ty, .. } => Operand::Int(ty.size() as i128),
+            Expr::SizeofTy { ty, .. } => {
+                // VLA 的 `sizeof` 是**运行期**值（C11 6.5.3.4p2）：维度表达式里的局部变量
+                // 在 IR 里已经是 SSA 值，这里折常量只能拿到 `Type::size()` 的静态口径。
+                // 实测 torture `20040411-1.c` / `20040423-1.c`：
+                //     typedef int c[i+2];   return sizeof (c) * 3;   /* i=20 ⇒ 264 */
+                // -O2（唯一跑 SSA 的档）折成 `8 * 3`，-O0/-O1 正确。整函数退回 AST
+                // 通道，由 codegen 按维度表达式发射（与 `offsetof` 运行期下标同一条退路）。
+                if ty.has_vla() {
+                    self.unsupported("sizeof of VLA type");
+                    return Operand::Int(0);
+                }
+                Operand::Int(ty.size() as i128)
+            },
             Expr::SizeofExpr { e, .. } => match e.as_ref() {
                 // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
                 Expr::String { data, .. } => Operand::Int(data.len() as i128),
-                _ => Operand::Int(e.ty().size() as i128),
+                _ => {
+                    if e.ty().has_vla() {
+                        self.unsupported("sizeof of VLA-typed expression");
+                        return Operand::Int(0);
+                    }
+                    Operand::Int(e.ty().size() as i128)
+                },
             },
             Expr::AlignofTy { ty, .. } => Operand::Int(ty.align() as i128),
             Expr::AlignofExpr { e, .. } => Operand::Int(e.ty().align() as i128),
@@ -2393,7 +2411,7 @@ pub fn build_from_func_analysis(f: &FuncDecl) -> Option<Function> {
 
 fn build_from_func_mode(f: &FuncDecl, analysis_only: bool) -> Option<Function> {
     let probe = build_ssa(f, HashSet::new(), analysis_only)?;
-    let addr_taken: HashSet<String> = probe
+    let mut addr_taken: HashSet<String> = probe
         .blocks
         .values()
         .flat_map(|bb| bb.insts.iter())
@@ -2402,6 +2420,17 @@ fn build_from_func_mode(f: &FuncDecl, analysis_only: bool) -> Option<Function> {
             _ => None,
         })
         .collect();
+    // `PreservedDecl` 冻结的声明初始化式从不 lower，它的 `&x` 不在探针 `AddrOf`
+    // 里 —— 只读上面那一份，被它取址的局部就会被当成「没被取过址」而 SSA 化。
+    // 实测 torture `pr115033.c` (`int r = 1; func t = {&r};` 经指针参数间接写 `r`):
+    // 初值被当常量传播，`if (r)` 折叠成恒真直接 `ud2`。复合字面量同理。
+    for inst in probe.blocks.values().flat_map(|bb| bb.insts.iter()) {
+        if let InstKind::PreservedDecl { var } = &inst.kind {
+            if let Some(init) = &var.init {
+                addr_taken.extend(crate::ast_gvn::expr_addr_escaped_names(init));
+            }
+        }
+    }
     if addr_taken.is_empty() {
         return Some(probe);
     }

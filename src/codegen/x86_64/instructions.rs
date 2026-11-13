@@ -2715,8 +2715,171 @@ impl Codegen {
         }
     }
 
+    // ========================================================================
+    // TLS (`__thread` / `_Thread_local`) 变量访问：ET_REL 的 local-exec 形态
+    // ========================================================================
+    //
+    // ET_REL 对 TLS 符号发「RIP 相对 + PC32」是错的：host ld 把 PC32 对
+    // STT_TLS 解析成**模板对象**（.tdata）的静态地址，所有线程因此读写同一份
+    // 存储 —— 线程局部性完全丢失，而且链接器不给任何诊断。实测
+    // `gcc.dg/torture/tls/tls-test.c`：主线程读到子线程写的 10，两个线程
+    // 拿到的 `&a` 相等。
+    //
+    // local-exec（GCC `-fno-pic` 的同形物）的机器形态是 `%fs:` 段前缀 +
+    // **绝对** disp32（ModRM.rm=100 后跟 SIB=0x25），重定位 R_X86_64_TPOFF32，
+    // 链接器算 S + A - TP。`host_ld` 对可执行文件一律 `-no-pie`，这条模型在
+    // 默认产物里总是可解析；链接成共享对象时才需要 IE/GD，那时 ld 会显式报错，
+    // 不再是静默错编。
+    //
+    // 为什么取址不能直接给 LEA 贴 `%fs:`：LEA 不参与段基址，`lea %fs:x` 得到
+    // 的是 x 本身（gas 也只给 "ineffectual" 警告）。所以取址先
+    // `mov %fs:0, %reg` 取出线程指针，再 lea 相对它。
+
+    pub(crate) fn is_tls_global(&self, resolved: &str) -> bool {
+        self.globals_raw.get(resolved).map(|g| g.is_tls).unwrap_or(false)
+    }
+
+    /// `[64][66][REX]<opcode> <modrm> 25 <disp32>`，并把 disp32 登记成 TPOFF32。
+    /// `prefix` 由调用方拼（操作数尺寸 0x66 / mandatory prefix F3、F2 / REX）；
+    /// 0x64 恒在最前 —— legacy prefix 区里段前缀先于 0x66 与 REX。
+    fn emit_tls_rel_stub(&mut self, prefix: &[u8], opcode: &[u8], reg_field: u8, resolved: &str) {
+        let mut b: Vec<u8> = Vec::with_capacity(prefix.len() + opcode.len() + 6);
+        b.push(0x64); // FS segment override
+        b.extend_from_slice(prefix);
+        b.extend_from_slice(opcode);
+        b.push(0x04 | ((reg_field & 7) << 3)); // mod=00, rm=100 → 后跟 SIB
+        b.push(0x25); // SIB: base=101(无) index=100(无) → 纯 disp32
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        self.emit_insn(&Insn::raw_bytes(&b));
+        self.pending_tls_rels.push((self.pos() - 4, resolved.to_string()));
+    }
+
+    /// TLS 标量读：结果与普通全局同一套宽度/符号扩展约定。
+    fn emit_tls_rel_load(&mut self, reg: u8, resolved: &str, sz: usize, is_signed: bool) {
+        let rex_r: u8 = if reg >= 8 { 0x04 } else { 0 };
+        match sz {
+            1 => {
+                let p: Vec<u8> = if rex_r != 0 { vec![0x40 | rex_r] } else { vec![] };
+                self.emit_tls_rel_stub(&p, &[0x0F, if is_signed { 0xBE } else { 0xB6 }], reg, resolved);
+            },
+            2 => {
+                let mut p = vec![0x66];
+                if rex_r != 0 {
+                    p.push(0x40 | rex_r);
+                }
+                self.emit_tls_rel_stub(&p, &[0x0F, if is_signed { 0xBF } else { 0xB7 }], reg, resolved);
+            },
+            4 if is_signed => {
+                // movsxd r64, m32
+                self.emit_tls_rel_stub(&[0x48 | rex_r], &[0x63], reg, resolved);
+            },
+            4 => {
+                let p: Vec<u8> = if rex_r != 0 { vec![0x40 | rex_r] } else { vec![] };
+                self.emit_tls_rel_stub(&p, &[0x8B], reg, resolved);
+            },
+            _ => {
+                self.emit_tls_rel_stub(&[0x48 | rex_r], &[0x8B], reg, resolved);
+            },
+        }
+    }
+
+    /// TLS 标量写：宽度按对象尺寸，值寄存器在 ModRM.reg。
+    fn emit_tls_rel_store(&mut self, reg: u8, resolved: &str, sz: usize) {
+        let rex_r: u8 = if reg >= 8 { 0x04 } else { 0 };
+        match sz {
+            1 => {
+                // 8 位寄存器必须存在 REX 才能编到 %spl..%dil；恒带 0x40|R 无害。
+                self.emit_tls_rel_stub(&[0x40 | rex_r], &[0x88], reg, resolved);
+            },
+            2 => {
+                let mut p = vec![0x66];
+                if rex_r != 0 {
+                    p.push(0x40 | rex_r);
+                }
+                self.emit_tls_rel_stub(&p, &[0x89], reg, resolved);
+            },
+            4 => {
+                let p: Vec<u8> = if rex_r != 0 { vec![0x40 | rex_r] } else { vec![] };
+                self.emit_tls_rel_stub(&p, &[0x89], reg, resolved);
+            },
+            _ => {
+                self.emit_tls_rel_stub(&[0x48 | rex_r], &[0x89], reg, resolved);
+            },
+        }
+    }
+
+    /// TLS 标量取址（`&tls_var`）：`mov %fs:0, %reg` + `lea disp32(%reg), %reg`。
+    /// 两步都用 `reg` 自己，不占 rax —— 调用方可能正持有 rax 的值。
+    fn emit_tls_rel_addr(&mut self, reg: u8, resolved: &str) {
+        // mov %fs:0, %reg  (REX.W|R, 8B, modrm=reg,rm=100, SIB=0x25, disp32=0)
+        let mut b = vec![0x64u8, 0x48 | if reg >= 8 { 0x04 } else { 0 }];
+        b.push(0x8B);
+        b.push(0x04 | ((reg & 7) << 3));
+        b.push(0x25);
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        self.emit_insn(&Insn::raw_bytes(&b));
+        // lea disp32(%reg), %reg  (REX.W|R|B, 8D, mod=10)
+        // dest 在 ModRM.reg（REX.R）、base 在 ModRM.rm（REX.B）—— 同一个寄存器
+        // 两个字段都要扩展。只置 REX.B 会编成 `lea disp(%r8), %rax`（reg=8 时
+        // 实测：rax 被覆写成线程指针偏移 0，随后读 arr[0] 落到 TLS 块头部）。
+        let reb = if reg >= 8 { 0x05 } else { 0 };
+        let mut b = vec![0x48 | reb];
+        b.push(0x8D);
+        b.push(0x80 | ((reg & 7) << 3) | (reg & 7));
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        self.emit_insn(&Insn::raw_bytes(&b));
+        self.pending_tls_rels.push((self.pos() - 4, resolved.to_string()));
+    }
+
+    /// TLS 浮点读（st0 通道）：`fld %fs:disp32`，宽度 4/8/10。
+    pub(crate) fn emit_tls_rel_x87_load(&mut self, resolved: &str, width: u8) {
+        match width {
+            4 => self.emit_tls_rel_stub(&[], &[0xD9], 0, resolved),
+            10 => self.emit_tls_rel_stub(&[], &[0xDB], 5, resolved),
+            _ => self.emit_tls_rel_stub(&[], &[0xDD], 0, resolved),
+        }
+    }
+
+    /// TLS 浮点写（st0 通道）：`fstp %fs:disp32`，宽度 4/8/10。
+    pub(crate) fn emit_tls_rel_x87_store(&mut self, resolved: &str, width: u8) {
+        match width {
+            4 => self.emit_tls_rel_stub(&[], &[0xD9], 3, resolved),
+            10 => self.emit_tls_rel_stub(&[], &[0xDB], 7, resolved),
+            _ => self.emit_tls_rel_stub(&[], &[0xDD], 3, resolved),
+        }
+    }
+
+    /// TLS 的 movss/movsd/movups（`to_mem` 选 0x11）。binary128 用无前缀的
+    /// movups 整块搬运（mandatory prefix 会让 movss/movsd 只读 4/8 字节）。
+    pub(crate) fn emit_tls_rel_sse(
+        &mut self,
+        xmm: u8,
+        resolved: &str,
+        is_float: bool,
+        is_binary128: bool,
+        to_mem: bool,
+    ) {
+        let mut p: Vec<u8> = Vec::new();
+        if !is_binary128 {
+            p.push(if is_float { 0xF3 } else { 0xF2 });
+        }
+        if xmm >= 8 {
+            p.push(0x44);
+        }
+        self.emit_tls_rel_stub(&p, &[0x0F, if to_mem { 0x11 } else { 0x10 }], xmm, resolved);
+    }
+
     pub fn emit_global_addr(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
+        // TLS：ET_REL 必须走 local-exec 形态（`%fs:` + TPOFF32）。
+        // 这里没有第二个选择 —— RIP 相对的 LEA 取到的是**模板对象**的静态地址
+        // （链接后 .tdata 的 vaddr），而每个线程的副本在各自 TLS 块里。实测
+        // `gcc.dg/torture/tls/tls-test.c`：两个线程 `&a` 相等、主线程直接看到
+        // 子线程写入的值。
+        if self.relocatable && self.is_tls_global(&resolved) {
+            self.emit_tls_rel_addr(reg, &resolved);
+            return;
+        }
         // 取址（LEA）**不发**段前缀，即使符号本体带 `__seg_gs`/`__seg_fs` —— 这不是保守，
         // 是硬件事实：LEA 不做内存访问，段重叠前缀对它的结果是空操作（gas 直接警告
         // “segment override on `lea' is ineffectual”；实测 `lea %fs:g(%rip)` 与不带前缀的
@@ -2753,15 +2916,23 @@ impl Codegen {
 
     pub fn emit_global_load(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
-        // 段限定与 TLS 是两条独立的轴：下面 `is_tls` 决定的是**重定位种类**
-        // (pending_tls_rels vs pending_data_rels)，本行决定的是**指令字节**；
-        // 一个符号可以同时带其中之一，也可能只有段（非 TLS 的 per-cpu 对象）。
-        self.emit_global_seg(&resolved);
         let (sz, is_tls, _off, is_signed) = self
             .globals_raw
             .get(&resolved)
             .map(|g| (g.size, g.is_tls, g.offset, Self::is_signed_int(&g.ty)))
             .unwrap_or((8, false, 0, false));
+        // TLS（ET_REL）：`%fs:` + SIB 绝对 disp32 + TPOFF32。
+        // 不能走下面的 `mov a(%rip)` + PC32：host ld 对 STT_TLS 符号的 PC32
+        // 解析成模板地址，多线程丢失线程局部性且无任何诊断。
+        // 这里必须提前返回 —— 段前缀与 SIB 形态都和 RIP 相对的不兼容。
+        if is_tls && self.relocatable {
+            self.emit_tls_rel_load(reg, &resolved, sz, is_signed);
+            return;
+        }
+        // 段限定与 TLS 是两条独立的轴：下面 `is_tls` 决定的是**重定位种类**
+        // (pending_tls_rels vs pending_data_rels)，本行决定的是**指令字节**；
+        // 一个符号可以同时带其中之一，也可能只有段（非 TLS 的 per-cpu 对象）。
+        self.emit_global_seg(&resolved);
         let tls_exec = is_tls && !self.relocatable;
         // 目标寄存器在 ModRM.reg 上，扩展它的是 REX.R(0x04) 而不是 REX.B(0x01)。
         // 写成 0x41 会同时干两件事：reg 字段留在低 8 个（值被写进 %eax），而 r/m 的
@@ -2848,7 +3019,13 @@ impl Codegen {
                 );
             }
         }
-        // 同 load：段前缀只改指令字节，`is_tls` 只改重定位种类，两条轴不合并。
+        // 同 load：ET_REL 的 TLS 走 local-exec，形态与 RIP 相对完全不同。
+        let is_tls = self.is_tls_global(&resolved);
+        if is_tls && self.relocatable {
+            let sz = self.globals_raw.get(&resolved).map(|g| g.size).unwrap_or(8);
+            self.emit_tls_rel_store(reg, &resolved, sz);
+            return;
+        }
         self.emit_global_seg(&resolved);
         let (sz, is_tls, _off) = self
             .globals_raw
@@ -3521,25 +3698,14 @@ impl Codegen {
             return;
         }
         if expr_is_float {
-            // 浮点表达式结果已在 xmm0
-            // 但如果表达式类型与目标类型不匹配，需要转换
-            // 例如: double 表达式赋值给 float 变量，需要 cvtsd2ss
-            if matches!(elem_ty, Type::Float) && matches!(src_ty, Type::Double) {
-                // double -> float: cvtsd2ss xmm0, xmm0
-                self.emit_insn(&Insn::simd_arith_reg(
-                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
-                    crate::codegen::x86_64::opcode::SimdWidth::SD,
-                    0,
-                    0,
-                ));
-            } else if matches!(elem_ty, Type::Double) && matches!(src_ty, Type::Float) {
-                // float -> double: cvtss2sd xmm0, xmm0
-                self.emit_insn(&Insn::simd_arith_reg(
-                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
-                    crate::codegen::x86_64::opcode::SimdWidth::SS,
-                    0,
-                    0,
-                ));
+            // 源是标量浮点时，精度/通道转换统一走 `emit_float_precision_convert`：
+            // 它按 `float_in_st0` 判「值在哪」（long double 恒在 x87 st(0)，其余在
+            // xmm0），同通道 float↔double 与跨通道 st(0)↔xmm0 都在那一处。
+            // 旧写法只列 double↔float，`double d = <long double 表达式>` 因此一条
+            // 指令都不发 —— 声明初始化把 st(0) 的返回值当 xmm0 存（-O0 即错值）。
+            // Complex/Imaginary 源保持旧行为（结果在 xmm0，无需标量精度转换）。
+            if matches!(src_ty, Type::Float | Type::Double | Type::LongDouble) {
+                self.emit_float_precision_convert(src_ty, elem_ty);
             }
             return;
         }

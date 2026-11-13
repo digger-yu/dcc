@@ -535,24 +535,43 @@ impl Codegen {
                                         .with_gas(gas),
                                 );
                             }
-                            // 与通用路径尾部一致：32 位有符号 Shl 要符号扩展回 64 位。
+                            // 与通用路径尾部**逐条对齐**：`shl r64` 是 64 位移位，凡是
+                            // 32 位结果都必须截断回 32 位 —— 有符号配 `movsxd`，无符号配
+                            // `mov dst32,dst32`（零扩展）。
+                            //
+                            // 这里以前只补了有符号那一支，无符号的 32 位 `Shl` 把高位
+                            // 垃圾留给了后面的运算：`unsigned int f(unsigned a){return
+                            // a * 65536 / 8;}` 在 `-O0` 就错 —— `a*65536` 折成 `shl $16`
+                            // 走本快速路径，结果是 `a << 16`（64 位）再 `shr $3`，本应
+                            // 先回绕到 32 位。torture `991202-3.c`（gcc 侧 0，dcc 侧
+                            // 536870912）就是这个形状，且与优化级别无关。
                             let res_ty = e.ty();
                             if res_ty.size() == 4
                                 && res_ty.is_int()
                                 && matches!(*op, BinOp::Shl)
-                                && Self::is_signed_int(&res_ty)
                             {
                                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
-                                let gas = format!(
-                                    "movsxd {}, {}",
-                                    GAS_REG32[(dst & 15) as usize],
-                                    GAS_REG64[(dst & 15) as usize]
-                                );
-                                self.emit_insn(
-                                    &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
-                                        .with_gas(gas),
-                                )
-                                .expect("typed-opcode: mov_ext");
+                                if Self::is_signed_int(&res_ty) {
+                                    let gas = format!(
+                                        "movsxd {}, {}",
+                                        GAS_REG32[(dst & 15) as usize],
+                                        GAS_REG64[(dst & 15) as usize]
+                                    );
+                                    self.emit_insn(
+                                        &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
+                                            .with_gas(gas),
+                                    )
+                                    .expect("typed-opcode: mov_ext");
+                                } else {
+                                    let gas = format!(
+                                        "mov {}, {}",
+                                        GAS_REG32[(dst & 15) as usize],
+                                        GAS_REG32[(dst & 15) as usize]
+                                    );
+                                    let _ = self.emit_insn(
+                                        &Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas),
+                                    );
+                                }
                             }
                             return;
                         }
@@ -1232,8 +1251,14 @@ impl Codegen {
                         // Without cvtsd2ss, movss would store the raw
                         // lower 32 bits of the double, not the float
                         // representation.
-                        if matches!(l_ty, Type::Float | Type::Double)
-                            && matches!(&r_ty, Type::Float | Type::Double)
+                        //
+                        // LongDouble 必须在列：它的值在 x87 st(0)（见
+                        // `float_in_st0`），与 xmm0 是两个寄存器组，
+                        // `double d = f(...)`（f 返 long double）需要一次
+                        // `fstpl` 板手。旧写法只列 Float|Double，这类赋值
+                        // 在 -O0 就把调用返回值当 double 从 xmm0 读。
+                        if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
+                            && matches!(&r_ty, Type::Float | Type::Double | Type::LongDouble)
                         {
                             self.emit_float_precision_convert(&r_ty, l_ty);
                         }
@@ -3778,6 +3803,15 @@ impl Codegen {
                         }
                     } else if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(dst, &name.name);
+                    } else if self.current_func_is_nested
+                        && self.upvar_offsets.contains_key(&name.name)
+                    {
+                        // 嵌套函数里 `&外层变量`: 必须走静态链（gen_lvalue_addr 的
+                        // upvar 分支，含 VLA/VM struct 的元数据槽二次加载）。
+                        // 旧代码落到下面的 `stack_home_off` —— 子帧 var_map 里没有
+                        // 这个名字，它会**在本帧懒分配一个同名槽**，于是 `&b` 指向
+                        // 自己的帧：pr8081 的 `return *(block *)&b;` 拷回本帧垃圾。
+                        self.gen_lvalue_addr(e, dst);
                     } else if let Some(&off) = self.vla_offsets.get(&name.name) {
                         // VLA/VM struct 变量: 取地址 = 数据区基址 (元数
                         // 据槽), 与数组名衰减语义一致 (C11 6.5.3.2: &

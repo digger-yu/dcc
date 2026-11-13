@@ -458,6 +458,32 @@ impl Codegen {
         // 2. 目标地址 → rdi (reg 7)
         self.load_stack(7, sret_off);
         // 3. rep movsq + rep movsb 拷贝
+        self.emit_agg_copy_to_sret_ty(&declared_ret, sz);
+    }
+
+    /// 按**声明返回类型**发 sret 拷贝：VM struct/union（含 VLA 字段）的对象
+    /// 大小是运行时值，`Type::size()` 对 VLA 维只能退化（`char val[n]` 退成
+    /// 8 字节），定长拷贝会截断返回对象 —— pr8081 的 `return *(block *)&b;`
+    /// 只拷 8 字节，调用方读 `val[9]` 是垃圾。
+    fn emit_agg_copy_to_sret_ty(&mut self, ret_ty: &Type, sz: usize) {
+        if ret_ty.has_vla() {
+            // 本帧声明点绑定槽优先（C11 6.2.4p7）；嵌套函数的绑定槽住在父帧，
+            // 本帧 `vm_struct_size_slots` 已在 compile_func 开头清空，此时按运行时
+            // sizeof 重算（维度表达式经静态链读 upvar）。
+            if let Some(slot) = self.vm_size_slot(ret_ty) {
+                self.emit_mov_mem_r13(1, slot);
+            } else {
+                // 用 rax 当累加器，**不能**用 r11：`load_upvar` 把 r11 当静态链
+                // scratch（`mov r11,<链>`），维度表达式一旦捕获外层变量
+                // （`char val[size]` 里的 size），r11 就从「累计大小」变成
+                // 「父帧地址」（pr8081 实测 `add r11,r10` 后 rcx=父帧+10）。
+                self.gen_sizeof_runtime(ret_ty, 0);
+                self.mov(1, 0);
+            }
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
+            return;
+        }
         self.emit_agg_copy_to_sret(sz);
     }
 

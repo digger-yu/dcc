@@ -5425,3 +5425,402 @@ int main(void) {
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "inline-after-type result wrong (rc={rc})");
 }
+
+/// `_Complex long double` 复数字面量 (纯虚 `1.0iL`) 的 x87 栈平衡。
+///
+/// `gen_expr_complex_lit` 曾在把实部/虚部写进复数结果带之后，再 `fldt`
+/// 一次实部当作「结果通道」。`long double` 的值通道是 x87 st(0)，但复数的
+/// 分量握手全走内存对，没有任何消费方会把这一项弹掉 —— 每求值一个复数字面量
+/// 就永久漏 1 枚 x87 栈项，第 8 项回绕后 `fstpt` 开始写出 indefinite
+/// (0xFFFFC000…) 即 `-nan`。compat/struct-by-value-18 的
+/// `checkScld1 (g1sScld1, (Sclcd1)1)` 因前面 6 个字面量赋值而读到 -nan。
+#[test]
+#[cfg(unix)]
+fn complex_ld_literal_keeps_x87_stack_balanced() {
+    let src = r#"
+typedef _Complex long double CL;
+CL g;
+int main(void) {
+    CL a, b, c, d, e, f, r;
+    a = 1.0iL; b = 2.0iL; c = 3.0iL; d = 4.0iL; e = 5.0iL; f = 6.0iL;
+    r = a + b + c + d + e + f;
+    if ((int)__real__ r != 0) return 1;
+    if ((int)__imag__ r != 21) return 2;
+    g = r;
+    if ((int)__imag__ g != 21) return 3;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("complex-ld-literal-x87-balance", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "complex LD literal compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "complex LD literal leaked x87 stack (rc={rc})");
+}
+
+/// 标量 → `_Complex` 显式转换 (C99 6.3.1.8p1): 实部 = 转换后的标量, 虚部 = +0。
+///
+/// 旧实现没有这条臂，两种坏法: `double` → `_Complex float` 同宽 8B，被
+/// `gen_same_size_bitcast` 当成对象表示重铸接走 (且该路径要向量临时带，没有
+/// 向量带的函数里直接触发 `vec_temp` 断言)；其余尺寸落 `_ => {}` 什么也不发，
+/// 消费端去读 `complex_result_off()` 里从未写过的带 (`_Complex long double`
+/// 读到 x87 indefinite `-nan`)。变量源还会在 `gen_complex_ld_materialize` 里
+/// 被 `gen_lvalue_addr(Cast)` 穿透成「标量变量的地址当 32 字节复数对读」。
+#[test]
+#[cfg(unix)]
+fn scalar_to_complex_cast_converts_components() {
+    let src = r#"
+typedef _Complex float CF;
+typedef _Complex double CD;
+typedef _Complex long double CL;
+int main(void) {
+    int i = 7;
+    double d = 2.5;
+    CF f = (CF)1;
+    CD g = (CD)i;
+    CL h = (CL)d;
+    CL k = (CL)i;
+    if ((int)__real__ f != 1 || (int)__imag__ f != 0) return 1;
+    if ((int)__real__ g != 7 || (int)__imag__ g != 0) return 2;
+    if ((int)__real__ h != 2 || (int)__imag__ h != 0) return 3;
+    if ((int)__real__ k != 7 || (int)__imag__ k != 0) return 4;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("scalar-to-complex-cast", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "scalar->_Complex cast compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "scalar->_Complex cast produced wrong components (rc={rc})");
+}
+
+/// `long double` → `double`/`float` 的隐式转换（赋值与声明初始化两条路径）。
+///
+/// `long double` 的值通道是 x87 `st(0)`，`double` 是 xmm0 —— 两个寄存器组。
+/// `emit_float_precision_convert` 曾把 LongDouble 当成「以 double 存在 xmm0」，于是
+/// `double d = g(x);`（g 返 long double）一条转换都不发，按 double 从 xmm0 读返回值。
+/// 赋值臂与声明初始化臂各有自己的判据，两处都必须真的发 `fstpl`，所以两档都测。
+#[test]
+#[cfg(unix)]
+fn long_double_to_sse_conversion_in_assign_and_init() {
+    let src = r#"
+long double scale(long double x) { return x * 3.5L; }
+int main(void) {
+    double d;
+    d = scale(2.0L);
+    if (d != 7.0) return 1;
+    double e = scale(-1.5L);
+    if (e != -5.25) return 2;
+    float f = scale(2.0L);
+    if (f != 7.0f) return 3;
+    float g;
+    g = scale(-2.0L);
+    if (g != -7.0f) return 4;
+    long double l = scale(2.0L);
+    if (l != 7.0L) return 5;
+    long double m = 0.1;
+    if ((double)m != 0.1) return 6;
+    return 0;
+}
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("long-double-to-sse", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: long double implicit conversion wrong (rc={rc})");
+    }
+}
+
+/// `InitList` 初始化式里的 `&x` 必须进入 SSA 的取址集合。
+///
+/// `func t = {&r};` 因为初始化列表被 `PreservedDecl` 冻结、初始化式从不 lower，
+/// 探针 IR 里看不到 `&r` —— 只读 IR 的 `addr_taken` 会把 `r` 当成可 SSA 化的
+/// 纯标量：初值 1 常量化、`if (r)` 折叠成恒真（torture pr115033 的 `ud2`）。
+#[test]
+#[cfg(unix)]
+fn initlist_addr_of_marks_object_memory_only() {
+    let src = r#"
+typedef struct func { int *a; } func;
+typedef struct mapped_iterator { func F; } mapped_iterator;
+__attribute__((noinline)) void ff(func *t) { *(t->a) = 0; }
+__attribute__((noinline)) mapped_iterator map_iterator(func F) {
+    mapped_iterator t = {F};
+    return t;
+}
+void map_to_vector(func *F) {
+    mapped_iterator t = map_iterator(*F);
+    ff(&t.F);
+}
+int main(void) {
+    int r = 1;
+    func t = {&r};
+    map_to_vector(&t);
+    return r;
+}
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("initlist-addr-escape", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: indirect write lost (rc={rc})");
+    }
+}
+
+/// 位域读不参与 GVN 值编号：字段宽度是 codegen 做 40/24 位掩码的唯一依据。
+///
+/// 把两次 `x.b` 归一到同一个名字等于先物化成普通临时值，下游再也看不到位域宽度，
+/// `(x.b<<8) + (x.b>>32)` 的 40 位旋转表达式会跳过尾部掩码（torture pr34971）。
+#[test]
+#[cfg(unix)]
+fn gvn_keeps_bitfield_reads_distinct() {
+    let src = r#"
+struct foo { unsigned long long b : 40; } x;
+int main(void) {
+    x.b = 0x0100000001ULL;
+    if ((x.b << 8) + (x.b >> 32) != 0x0000000101ULL) return 1;
+    x.b = 0x0100000000ULL;
+    if ((x.b << 8) + (x.b >> 32) != 0x0000000001ULL) return 2;
+    return 0;
+}
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("gvn-bitfield-distinct", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: bitfield rotate lost width mask (rc={rc})");
+    }
+}
+
+/// 数组类型的 `IndexLoad` 结果不参与 GVN 值编号。
+///
+/// 归并后临时值被物化成 `int[2]` 变量，下游把槽里的**地址**当数组对象读
+/// （`lea` + `movsxd`），`inv_J(mat)` 从首元素地址解引用（torture pr38048-2）。
+#[test]
+#[cfg(unix)]
+fn gvn_skips_array_typed_index_results() {
+    let src = r#"
+static int inv_J(int a[][2]) {
+    int j, det = 0;
+    for (j = 0; j < 2; ++j) det += a[j][0] + a[j][1];
+    return det;
+}
+int main(void) {
+    int mat[2][2];
+    mat[0][0] = 1; mat[0][1] = 2; mat[1][0] = 4; mat[1][1] = 8;
+    return inv_J(mat) == 15 ? 0 : 1;
+}
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("gvn-array-index", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: array-typed load merged by GVN (rc={rc})");
+    }
+}
+
+/// 软件流水不得接纳调度区内含调用的循环。
+///
+/// 现有依赖模型只给调用定序、不建模「实参跨轮搬运」：实参的生产被排出本行而调用
+/// 留在本行时，kernel 每一轮都会重算上一轮的实参（torture 20080424-1 每次调用都
+/// 拿到 i=0 的地址，`bar` 里的 `g[i++]` 与期望不符）。
+#[test]
+#[cfg(unix)]
+fn pipelining_rejects_loops_with_calls() {
+    let src = r#"
+int g[48][3][3];
+void __attribute__((noinline)) bar(int x[3][3], int y[3][3]) {
+    static int i;
+    if (x != g[i + 8] || y != g[i++]) __builtin_abort();
+}
+static inline void __attribute__((always_inline)) foo(int x[][3][3]) {
+    for (int i = 0; i < 8; i++) {
+        int k = i + 8;
+        bar(x[k], x[k - 8]);
+    }
+}
+int main(void) { foo(g); return 0; }
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("pipeline-call-reject", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: pipelined loop reused stale call args (rc={rc})");
+    }
+}
+
+/// 内层循环的出口区不得吞掉「跳回外层头块」的尾巴。
+///
+/// `for(;c;--c){ for(...); ... }` 里内层循环的发射区域曾一路吞到 `for.step`，
+/// 而 `for.step` 的真分支指回**外层**头块；重建按内层 loop_ctx 把它发成
+/// `break`（只退一层），外层循环第一圈就落出、`b` 只减一次（torture pr104814）。
+#[test]
+#[cfg(unix)]
+fn nested_loop_exit_not_shared_across_outer_header() {
+    let src = r#"
+short a = 0;
+static long b = 0;
+int c = 7;
+char d = 0;
+short *e = &a;
+long f = 0;
+unsigned long foo(unsigned long h, long j) { return j == 0 ? h : h / j; }
+int main(void) {
+    for (; c; --c) {
+        for (int i = 0; i < 7; ++i)
+            ;
+        long m = foo((unsigned long)f, --b);
+        d = ((char)m | *e) <= 43165;
+    }
+    return b == -7 ? 0 : 1;
+}
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("nested-loop-exit", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: inner loop exit escaped outer header (rc={rc})");
+    }
+}
+
+/// `__thread` 必须是**真的**线程局部，且聚合 TLS 对象要有初值。
+///
+/// 旧实现只做了半套：符号类型 STT_TLS、.tdata/.tbss 段、pending_tls_rels
+/// 都在，但唯一活跃的产物路径（`-c` + host ld）对 TLS 符号发的是
+/// `mov a(%rip)` + `R_X86_64_PC32` —— 链接后指向 .tdata **模板**。两个后果
+/// 都是静默的：子线程写入的值主线程能直接看到（线程局部性丢失），两个线程
+/// 的 `&a` 相等。同时 `compile_rel` 的聚合分支 `global_init_bytes` 对
+/// InitList 返回 None，于是「分配了 offset 却一个字节也不 push」，相邻对象
+/// 拿到同一个 offset，.tdata 里也没有它们的初值。
+///
+/// 判据用子线程写完、主线程读原值：单线程跑一遍旧代码也是绿的，必须有
+/// 第二个线程才能区分「模板直连」与 local-exec。
+#[test]
+#[cfg(unix)]
+fn thread_local_is_per_thread_and_aggregates_initialized() {
+    let src = r#"
+#include <pthread.h>
+__thread char c8 = -3;
+__thread unsigned char u8 = 250;
+__thread short s16 = -1000;
+__thread unsigned short u16 = 60000;
+__thread int i32 = -123456;
+__thread unsigned int u32 = 4000000000u;
+__thread long l64 = -1234567890123L;
+__thread unsigned long ul64 = 12345678901234567890UL;
+__thread float f32 = 1.5f;
+__thread double d64 = 2.25;
+__thread long double ld80 = 3.125L;
+__thread int arr[4] = {1, 2, 3, 4};
+struct S { int a; long b; };
+__thread struct S st = {7, 8};
+__thread int tbss_int;            /* .tbss：不占 .tdata 字节 */
+static int fails;
+static void *thr(void *arg) {
+    int k = *(int *)arg;
+    c8 += k; u8 += k; s16 += k; u16 += k; i32 += k; u32 += k;
+    l64 += k; ul64 += k; f32 += k; d64 += k; ld80 += k;
+    arr[0] += k; st.a += k; st.b += k; tbss_int = k;
+    return 0;
+}
+int main(void) {
+    pthread_t t; int k = 100;
+    if (pthread_create(&t, 0, thr, &k)) return 99;
+    pthread_join(t, 0);
+    if (c8 != -3) fails |= 1;
+    if (u8 != 250) fails |= 2;
+    if (s16 != -1000) fails |= 4;
+    if (u16 != 60000) fails |= 8;
+    if (i32 != -123456) fails |= 16;
+    if (u32 != 4000000000u) fails |= 32;
+    if (l64 != -1234567890123L) fails |= 64;
+    if (ul64 != 12345678901234567890UL) fails |= 128;
+    if (f32 != 1.5f) fails |= 256;
+    if (d64 != 2.25) fails |= 512;
+    if (ld80 != 3.125L) fails |= 1024;
+    if (arr[0] != 1 || arr[3] != 4) fails |= 2048;
+    if (st.a != 7 || st.b != 8) fails |= 4096;
+    if (tbss_int != 0) fails |= 8192;
+    int *p = &arr[2]; *p = 42;
+    if (arr[2] != 42) fails |= 16384;
+    long *q = &st.b; *q = 99;
+    if (st.b != 99) fails |= 32768;
+    return fails;
+}
+"#;
+    for opt in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("tls-per-thread", src, &["-pthread", opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: __thread lost thread-locality (fails={rc})");
+    }
+}
+
+/// 嵌套函数里的外层 **VM struct**（含 VLA 字段的结构体）必须经静态链访问。
+///
+/// 三个独立的坑，全部是 GNU 扩展（嵌套函数 + VLA struct）的交叉点：
+/// 1. `gen_lvalue_addr` 的 upvar 分支把元数据槽的二次加载编成 mod=00/rm=rbx，
+///    真正的 disp32 被后续指令流误读（pr8081 的 `&b` 直接 SIGSEGV）；
+/// 2. `AddrOf` 的 Ident 分支没有 upvar 臂，`&b` 落到 `stack_home_off` 在本帧
+///    懒分配同名槽 —— 取到的是自己帧的地址，返回垃圾；
+/// 3. `gen_sret_return` 用 `Type::size()` 定长拷贝，VM struct 退化成 8 字节
+///    （实测 `char val[10]` 只拷 8）—— 且改运行时时长时不能用 r11 当累加器
+///    （`load_upvar` 拿 r11 当静态链 scratch，会变成「父帧地址 + n」）。
+/// 夹具同时覆盖：外层 VM struct 的读（常量下标/运行期下标）、写、取址、
+/// 按值返回（`return b` 与 `return *(block *)&b` 两种源形状）。
+#[test]
+#[cfg(unix)]
+fn nested_function_reads_outer_vla_struct() {
+    let src = r#"
+int main(void) {
+    int size = 10;
+    typedef struct { char val[size]; } block;
+    block a, b, c;
+    int get0(void) { return b.val[0]; }
+    int get9(void) { return b.val[9]; }
+    int geti(int i) { return b.val[i]; }
+    block *addr(void) { return &b; }
+    void fill(void) { for (int i = 0; i < size; i++) b.val[i] = (char)(i + 1); }
+    block __attribute__((noinline)) copy_b(void) { return b; }
+    block __attribute__((noinline)) ret_frame(void) { return *(block *)&b; }
+    fill();
+    int fails = 0;
+    if (get0() != 1) fails |= 1;
+    if (get9() != 10) fails |= 2;
+    if (geti(4) != 5) fails |= 4;
+    if (addr() != &b) fails |= 8;
+    if (addr()->val[6] != 7) fails |= 16;
+    a = copy_b();
+    for (int i = 0; i < size; i++) if (a.val[i] != (char)(i + 1)) fails |= 32;
+    c = ret_frame();
+    for (int i = 0; i < size; i++) if (c.val[i] != (char)(i + 1)) fails |= 64;
+    return fails;
+}
+"#;
+    for opt in ["-O0", "-O1", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("nested-vm-struct", src, &[opt]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{opt}: compile failed: {stderr}");
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "{opt}: nested upvar of VM struct broken (fails={rc})");
+    }
+}

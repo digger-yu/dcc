@@ -1040,6 +1040,14 @@ pub struct FuncEmitChunk {
     pub pending_code_rels: Vec<PendingCodeRel>,
     pub pending_func_addr_rels: Vec<(u64, String, bool)>,
     pub pending_data_rels: Vec<(u64, String)>,
+    /// TLS（`__thread`）变量的 TPOFF32 引用（同 `Codegen` 同名字段）。
+    ///
+    /// **必须随 chunk 合并**: `-O2` 起默认走并行发射，worker 里的
+    /// `emit_tls_rel_*` 把 disp32 位置记在自己的 `pending_tls_rels` 上；
+    /// 不回程就是「指令已经是 `%fs:` 绝对寻址、重定位却丢了」—— disp32
+    /// 停在占位 0，所有 TLS 变量都读写线程指针偏移 0（实测 `-O2` 下
+    /// `__thread int a=5` 读回的是 TLS 块头部，多线程测试全红）。
+    pub pending_tls_rels: Vec<(u64, String)>,
     /// 尾字节表的具体形状见 `Codegen::pending_data_rel_tails`；chunk 合并时要跟着
     /// 基址重定位走，漏掉它等于让 `addl $imm, sym(%rip)` 又写偏一个立即数长度。
     pub pending_data_rel_tails: Vec<(u64, u8)>,
@@ -2103,8 +2111,25 @@ impl Codegen {
                         // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;),
                         // 避免 eval 截断为 int
                         let is_float = v.ty.is_real_float();
-                        if let Some(bytes) = global::global_init_bytes(init, sz, is_float, &v.ty) {
+                        // 聚合（InitList / 复合字面量）必须走 `eval_global_init`：
+                        // `global_init_bytes` 对它们返回 None，旧写法于是「分配了
+                        // offset 却一个字节也不 push」—— 下一个 TLS 对象拿到同一个
+                        // offset（实测 `int arr[4]` 与 `struct S st` 都是 0x40，
+                        // 互相覆盖），且 .tdata 里根本没有它们的初值。
+                        let bytes = Self::eval_global_init(self, v, sz, false)
+                            .or_else(|| global::global_init_bytes(init, sz, is_float, &v.ty));
+                        if let Some(bytes) = bytes {
+                            let n = bytes.len();
                             self.tdata_section.extend_from_slice(&bytes);
+                            // 初始化器只覆盖到部分字段时补零到对象尺寸，
+                            // 否则后续对象的 offset 会落到初始化数据中间。
+                            for _ in n..sz {
+                                self.tdata_section.push(0);
+                            }
+                        } else {
+                            for _ in 0..sz {
+                                self.tdata_section.push(0);
+                            }
                         }
                     }
                     self.globals_raw.insert(

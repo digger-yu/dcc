@@ -365,13 +365,17 @@ impl Codegen {
         // 一次 (oserror-1.4.1: 外层 unixLogError 的实参里又调 sqlite3CantopenError,
         // 内层 sub 多补 8 → call 处 rsp ≡ 8 → libtcl 的 movaps 崩)。
         // 静态路径的 sub/add 由 `emit_insn` 记账, 这里只需记住恢复点;
-        // 动态对齐路径 (`and rsp, mask` + `mov rsp, r10`) rsp 的临时值无法
-        // 静态表示, 一律在结尾按恢复点写回。
+        // 动态对齐路径 (`and rsp, mask`) rsp 的临时值无法静态表示, 一律在
+        // 结尾按恢复点写回。
         let shift_before = self.stack_shift;
         // 当 frame_align > 16 (例如 vector_size(32) 的 32 字节对齐参数),
         // 静态 sub frame_bytes 只能保证 rsp 16 对齐. 必须动态对齐 rsp 到
         // frame_align, 否则 force_mem 槽位的 32 对齐保证被破坏.
-        // r10 保存对齐前 rsp, r11 存放对齐 mask.
+        // 对齐前的 rsp 先放 r10, 再**落到出参区上方的空档** [stack, stage_base):
+        // r10 是 caller-saved, callee 可以随意改写 (pr117938 的 bar 返回后
+        // `mov %r10,%rsp` 把 rsp 恢复成垃圾 —— 调用后又调 printf 的用例直接
+        // SIGSEGV)。空档由 `stage_base = stack + 16` 留出, 不出现在任何
+        // 栈参数槽/暂存槽里, 被调方也踩不到 (它的入参区止于 [rsp, rsp+stack))。
         let dynamic_align = frame_align > 16;
         if dynamic_align {
             self.emit_insn(&Insn::mov_rm_reg(
@@ -388,6 +392,7 @@ impl Codegen {
                 4,  // rsp
                 11, // r11
             ));
+            self.store_rsp_qword(10, stack);
         } else {
             self.emit_sub_rsp(frame_bytes as i64);
         }
@@ -1304,7 +1309,9 @@ impl Codegen {
             }
         }
         if dynamic_align {
-            // mov rsp, r10 (恢复对齐前 rsp)
+            // 从出参区上方空档取回对齐前 rsp (不能用 r10: callee 已改写它),
+            // 再 mov rsp, r10 恢复.
+            self.load_rsp_qword(10, stack);
             self.emit_insn(&Insn::mov_rm_reg(
                 crate::codegen::shared::asm_operand::Width::B64,
                 4,  // rsp

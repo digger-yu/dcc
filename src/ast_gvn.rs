@@ -314,6 +314,23 @@ impl FnScope {
         }
         if let Some(body) = &f.body {
             collect_scope(body, &mut s);
+            // 【形参的地址逃逸】`collect_scope` 只在 `Decl` 那一支问 `is_addr_taken`，
+            // 形参不在那里 —— 于是「`&p` 交给被调者写」的形参从未进 `escaped`。
+            // 实测 torture `980701-1.c`：
+            //     unsigned char *saveptr = ptr;
+            //     if (ns_name_skip(&ptr, eom) == -1) return -1;
+            //     return (ptr - saveptr);            /* 该是负数，不是 0 */
+            // `coalesce_block` 把 `saveptr` 合并成 `ptr` 的活别名（判据里「没被取址」
+            // 那一项对形参恒真），`ptr - saveptr` 于是编成 `ptr - ptr = 0`，函数返回 0，
+            // 调用方误判成「没跳」。形参与 `Decl` 同一条判据：本函数体内出现过 `&p`
+            // 就按已逃逸处理（宁可少一次 coalesce，不能把被调者写回的值丢掉）。
+            for p in &f.params {
+                if let Some(n) = &p.name {
+                    if is_addr_taken(&n.name, body) {
+                        s.escaped.insert(n.name.clone());
+                    }
+                }
+            }
         }
         s
     }
@@ -415,6 +432,23 @@ fn is_addr_taken(name: &str, b: &Block) -> bool {
 pub fn addr_escaped_names(b: &Block) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     walk_addr_of(b, &mut |root: &str| {
+        out.insert(root.to_string());
+    });
+    out
+}
+
+/// 单个表达式里的取址根名集合 —— 给「表达式不经语句遍历」的消费者用。
+///
+/// 目前唯一的消费者是 SSA 构建：`InstKind::PreservedDecl` 冻结的声明初始化式
+/// （`InitList`/复合字面量）**从不 lower**，因此它的 `&x` 不会出现在探针 IR 的
+/// `AddrOf` 指令里。实测 torture `pr115033.c`：`int resultIsStatic = 1;`
+/// `func t = {&resultIsStatic};` 之后经 `ff(&t.F)` 间接写它，而 SSA 因为漏掉
+/// `&resultIsStatic` 的逸出，把初值 1 常量化、把条件折叠成恒真直接 `ud2`。
+///
+/// 仍然复用 [`walk_expr_addr_of`] 这一份穷举遍历，不另写一套判据。
+pub(crate) fn expr_addr_escaped_names(e: &Expr) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    walk_expr_addr_of(e, &mut |root: &str| {
         out.insert(root.to_string());
     });
     out

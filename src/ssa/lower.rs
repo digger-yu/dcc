@@ -431,6 +431,26 @@ pub(super) fn insert_loop_phis(func: &mut Function) {
     // For each back edge (latch → header), find variables defined in the
     // loop body and insert phi nodes at the header.
     let all_preds = collect_all_preds(func);
+    // 全函数「有定义者」的名字集合。`int j;`（无初始化式）只 `define` 了一个版本
+    // 却不发指令 —— `outside_defs` 扫的是指令 dest，看不到它。需要这份集合去认
+    // 「循环体里被读、却没有任何定义者」的那个版本（见下面 `None` 那一支）。
+    let defined_names: HashSet<String> = {
+        let mut s = HashSet::new();
+        for p in &func.params {
+            s.insert(p.name());
+        }
+        for bb in func.blocks.values() {
+            for inst in &bb.insts {
+                if let Some(d) = &inst.dest {
+                    s.insert(d.name());
+                }
+            }
+            for phi in &bb.phis {
+                s.insert(phi.dest.name());
+            }
+        }
+        s
+    };
     for (latch, header) in back_edges.clone() {
         // Collect loop body blocks: all blocks that can reach the latch
         // without going through the header (simplified: blocks dominated
@@ -516,8 +536,27 @@ pub(super) fn insert_loop_phis(func: &mut Function) {
                 continue;
             }
             let body_var = &body_defs[base];
-            let Some(entry_var) = outside_defs.get(base.as_str()) else {
-                continue;
+            let entry_var = match outside_defs.get(base.as_str()) {
+                Some(v) => v.clone(),
+                // 【循环前没有定义者】C 里就是「进循环时读的是未初始化的值」。
+                //
+                // 旧实现直接 `continue` ⇒ 循环体内对它的读还指着循环前那个版本，
+                // 而那个版本在 IR 里没有定义者；SCCP 于是把体内**唯一的**定义当成
+                // 所有路径上的值，把它代进体后半段的读。实测 torture `961004-1.c`：
+                //     for (i = 0; i < 2; i++) { if (k) { if (j != 2) abort(); }
+                //                               else { j = 2; k++; } }
+                // `j` 声明无初始化式，`if.then` 读的 `j.1` 无定义、`if.else` 写
+                // `j.2`，SCCP 删掉 `j.2` 并把它代进 `j.1` ⇒ 第一轮就走进 abort，
+                // 而 `k` 是全局、两条边都可达。
+                //
+                // phi 的 preheader 入值取「体内被读、全函数无人定义」的那个版本
+                // （就是声明处 `define` 过的那个版本，只是没发指令）。
+                None => match undefined_read_in_loop(func, &loop_bbs, base, &defined_names) {
+                    Some(v) => v,
+                    // 体内没有「读未定义版本」的形状（例如变量声明在循环体内、
+                    // 每轮先写后读）：不建 phi，保持原状。
+                    None => continue,
+                },
             };
             if entry_var.name() == body_var.name() {
                 continue;
@@ -555,6 +594,50 @@ fn bump_version(map: &mut HashMap<String, u32>, base: &str, v: u32) {
             }
         })
         .or_insert(v);
+}
+
+/// 循环体里**被读**、但全函数没有任何定义者的 `base` 版本 —— 即「进循环时的未知值」。
+///
+/// 这是 `insert_loop_phis` 的 `outside_defs` 在「变量声明无初始化式」时唯一能拿到的
+/// 入值：声明只 `Builder::define` 了一个版本号，没有对应指令，扫指令 dest 的表看不到它。
+///
+/// 多个候选在合法 C 里不该出现（循环前同名对象只有一个声明版本），出现时取**最小
+/// 版本号**，保证 phi 的入值与产物字节可复现（HashMap 迭代序不得外泄）。
+fn undefined_read_in_loop(
+    func: &Function,
+    loop_bbs: &[String],
+    base: &str,
+    defined: &HashSet<String>,
+) -> Option<SsaVar> {
+    let mut best: Option<SsaVar> = None;
+    let mut consider = |v: &SsaVar| {
+        if v.base != base || defined.contains(&v.name()) {
+            return;
+        }
+        if best.as_ref().map_or(true, |b| v.version < b.version) {
+            best = Some(v.clone());
+        }
+    };
+    for name in loop_bbs {
+        let Some(bb) = func.blocks.get(name) else {
+            continue;
+        };
+        for inst in &bb.insts {
+            for v in crate::ssa::ir::kind_operand_ssa_vars(&inst.kind) {
+                consider(&v);
+            }
+        }
+        for v in crate::ssa::ir::term_operand_ssa_vars(&bb.term) {
+            consider(&v);
+        }
+        // 嵌套 phi 的入值也可能是「循环前那个未定义版本」（内层循环头）。
+        for phi in &bb.phis {
+            for (v, _) in &phi.incoming {
+                consider(v);
+            }
+        }
+    }
+    best
 }
 
 /// P0-4 Phase 2: 在 label BB 入口插入 phi 节点.

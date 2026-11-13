@@ -1148,6 +1148,18 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     if nodes.iter().any(|i| !inst_is_materializable(&i.kind)) {
         return Err("调度区内有不可按迭代复制的指令（异常边/用户声明/asm 输出）");
     }
+    // 调度区里有调用 ⇒ 不做流水。调用是内存屏障, 现有依赖模型只给它**定序**, 不建模
+    // 「实参跨轮搬运」: 实参的生产被排出本行 (shift+1) 而调用点留在本行时, kernel 每一轮
+    // 都把上一轮算好的实参再去算一遍 —— 同一组实参被重复使用。实测 torture
+    // `20080424-1.c` (`for (i…) { int k = i+8; bar (x[k], x[k-8]); }`) -O2 下每次调用
+    // 都拿到 `i=0` 的地址, `bar` 里的 `g[i++]` 因而与期望不符直接 abort。不流水的代价只是
+    // 少优化, 所以整族直接拒收, 而不是给实参加一套跨轮格。
+    if nodes
+        .iter()
+        .any(|i| matches!(i.kind, InstKind::Call { .. } | InstKind::Invoke { .. }))
+    {
+        return Err("调度区内有调用（实参跨轮搬运会重复使用旧实参）");
+    }
     if nodes.len() > 64 {
         return Err("调度区超过 64 条指令（方案的准入上限）");
     }

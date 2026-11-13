@@ -365,6 +365,18 @@ impl Codegen {
             ty
         };
         if self.float_in_st0(effective_ty) {
+            // TLS（ET_REL）：`fld %fs:disp32`（local-exec）。RIP 相对形态在这里
+            // 读到的是模板，不是本线程副本 —— 见 instructions.rs 的 TLS 段注释。
+            let resolved_tls = self.resolve_global_key(name).to_string();
+            if self.relocatable && self.is_tls_global(&resolved_tls) {
+                let width: u8 = match effective_ty {
+                    Type::Float => 4,
+                    Type::LongDouble => 10,
+                    _ => 8,
+                };
+                self.emit_tls_rel_x87_load(&resolved_tls, width);
+                return;
+            }
             let (opcode, modrm) = match effective_ty {
                 Type::Float => (0xD9u8, 0x05u8),
                 Type::LongDouble => (0xDBu8, 0x2Du8),
@@ -417,6 +429,11 @@ impl Codegen {
         }
         ins.extend_from_slice(&[0x0F, 0x10, modrm, 0, 0, 0, 0]);
         let resolved = self.resolve_global_key(name).to_string();
+        // TLS（ET_REL）：`movs[sd] %fs:disp32`（binary128 用无前缀 movups）。
+        if self.relocatable && self.is_tls_global(&resolved) {
+            self.emit_tls_rel_sse(xmm, &resolved, is_float, is_float128, false);
+            return;
+        }
         self.emit_global_seg(&resolved);
         self.emit_insn(&Insn::raw_bytes(&ins));
         // disp32 总在 RIP 相对形态的最后 4 字节，所发射后的 `pos()-4` 就是它。
@@ -499,6 +516,26 @@ impl Codegen {
         } else {
             dst_ty
         };
+        // TLS（ET_REL）：按值通道选 `fstp %fs:disp32` 或 `movs[sd] %fs:disp32`。
+        // 必须在通道分叉之前判：两条通道的指令形态都要换。
+        let tls_resolved = self.resolve_global_key(name).to_string();
+        if self.relocatable && self.is_tls_global(&tls_resolved) {
+            if self.float_in_st0(effective_ty) {
+                // 同一前置：源操作数 → st(0)。
+                self.emit_operand_to_st0(src_ty, 0);
+                let width: u8 = match effective_ty {
+                    Type::Float => 4,
+                    Type::LongDouble => 10,
+                    _ => 8,
+                };
+                self.emit_tls_rel_x87_store(&tls_resolved, width);
+            } else {
+                let is_binary128 = matches!(effective_ty, Type::Float128);
+                let is_float = matches!(effective_ty, Type::Float);
+                self.emit_tls_rel_sse(0, &tls_resolved, is_float, is_binary128, true);
+            }
+            return;
+        }
         if self.float_in_st0(effective_ty) {
             // 源操作数 → st(0)（整数/f32/f64 经精确拓宽，long double 已在 st0）。
             self.emit_operand_to_st0(src_ty, 0);
@@ -553,6 +590,12 @@ impl Codegen {
     pub(crate) fn emit_global_float_store_from_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
         let resolved = self.resolve_global_key(name).to_string();
         let is_float = matches!(ty, Type::Float);
+        // TLS（ET_REL）：`movs[sd] %fs:disp32`。
+        if self.relocatable && self.is_tls_global(&resolved) {
+            let is_binary128 = matches!(ty, Type::Float128);
+            self.emit_tls_rel_sse(xmm, &resolved, is_float, is_binary128, true);
+            return;
+        }
         let mut rex = 0u8;
         if xmm >= 8 {
             rex |= 0x04;

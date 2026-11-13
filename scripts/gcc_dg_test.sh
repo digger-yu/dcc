@@ -222,16 +222,23 @@ parse_dg_directives() {
         #   制造出 4 个假 FAIL。
         # 其余同样看似"本平台应恒真"的名字暂不放回: 每个名单底下还门着一个
         # 真实缺陷, 放回要么让测试用例集变红, 要么得把缺陷写进 skip 清单变成假绿。
-        #   size32plus     vec-cvt-1.c 运行错值
+        #   size32plus     vec-cvt-1.c 已实测 -O0/-O1/-O2 全绿（原先的「运行错值」
+        #                 已不再复现）；该名字还门住其他未逐个复核的用例，整名放回
+        #                 会把未验证的用例一起拉进 gate，暂保持跳过。
         #   stdint_types   未实现 __builtin_bswap128
         #   label_values   缺 analyzer 兄弟头文件; malloc-1.c
         #   nonlocal_goto  pr97986-1.c 要嵌套函数跳 `__label__`
         #   int32plus      多个 crc-builtin-* 与 C23 位域用例
-        #   vect_* / lto / analyzer / tls / fpic 等本就与 dcc 无关或明确不支持
+        #   vect_* / lto / analyzer / fpic 等本就与 dcc 无关或明确不支持
         # 注：多个 dg-require-effective-target 共存时本函数只看第一个（head -1），
         # 所以如 pr127166-2.c (int32 && vect_int) 仍靠 vect_int 这一条被排除。
+        #
+        # 白名单里的 `tls` / `pthread` 是 dcc 已具备的能力名（不是平台三元组）：
+        # __thread 现已完整（ET_REL 一律 local-exec，`%fs:` + TPOFF32，聚合 TLS
+        # 对象在 .tdata 有真初值），宿主 glibc 提供 pthread，dg-options 的
+        # `-pthread` 也已放行 ⇒ torture/tls/tls-test.c 可真跑。
         case "$req_target" in
-            x86_64|x86|i?86|any|always|indirect_jumps|int32) ;;
+            x86_64|x86|i?86|any|always|indirect_jumps|int32|tls|pthread) ;;
             *)
                 echo "skip target:$req_target"
                 return
@@ -313,7 +320,7 @@ parse_dg_directives() {
             -ffreestanding|--coverage|-fprofile-arcs|\
             -pg|-p|\
             -g|-g0|-g1|-g2|-g3|\
-            -lm|-ldl|-lpthread|-lrt)
+            -lm|-ldl|-lpthread|-pthread|-lrt)
                 filtered="$filtered $opt"
                 ;;
             -ffunction-sections|-fdata-sections|-Wl,*)

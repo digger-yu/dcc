@@ -1246,9 +1246,38 @@ impl Codegen {
                 }
             },
             Expr::Call { .. } => {
-                // vector 返回值: gen_expr 已将 rax:rdx 存入槽 0
+                // vector 返回值有两条交付通道:
+                //   - <=16B: xmm0, gen_expr 已存入向量临时槽 0;
+                //   - >16B (sret): 结果在 gen_expr 分配的 sret 缓冲,
+                //     返回后 rax = 缓冲地址, **槽 0 里什么都没有**。
+                // 旧实现无条件按“值已在槽 0”搬运, `bar(...)[0]` 这类
+                // sret 向量结果的下标于是读到栈垃圾 (pr117938: 复合字面量
+                // 里的 `bar(...)[0]` 得 0xffffffff 而非 0)。
+                let mem_ret = Self::needs_memory_return(&e.ty());
                 self.gen_expr(e, Self::EVAL_BASE);
-                if temp_slot != 0 {
+                if mem_ret {
+                    // rax = sret 缓冲地址: 整块搬到目标槽
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                            rip_relative: false,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                6,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // mov rsi, rax
+                    self.emit_lea_r13(7, temp_off); // rdi = 临时槽
+                    self.mov_imm(1, vec_size as i128);
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
+                    // rep movsb
+                } else if temp_slot != 0 {
                     let src_off = self.vector_temp_base(0, vec_size);
                     let n_qwords = vec_size.div_ceil(8);
                     for q in 0..n_qwords {

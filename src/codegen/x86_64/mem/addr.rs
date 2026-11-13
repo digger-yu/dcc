@@ -55,10 +55,20 @@ impl Codegen {
                         }
                     }
                     if Self::type_has_vla(ty) {
-                        let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                        let modrm = 0x03 | ((dst & 7) << 3);
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                        self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
+                        // VLA/VM struct: 起源帧 [parent_off] 是元数据槽, 槽内容才是
+                        // 数据基址 (二次加载): mov dst, [dst + parent_off]。
+                        // 旧写法 `modrm = 0x03 | (dst<<3)` 是 mod=00/rm=rbx, 把本条
+                        // 编成 `mov dst,[rbx]`, 紧随的 disp32 又被当独立指令执行 ——
+                        // 嵌套函数读外层 VM struct (pr8081/nest1) 直接 SIGSEGV。
+                        // 与 `emit_ident_base_addr` 的同类分支同一个口径 (typed 构造,
+                        // 由编码器按偏移量选 disp8/disp32)。
+                        self.emit_insn(&Insn::mov_rm_mem(
+                            true,
+                            Width::B64,
+                            dst,
+                            dst,
+                            parent_off as i32,
+                        ));
                     } else {
                         if parent_off != 0 {
                             // add dst, imm32: 走 alu_rm_reg_imm32_b64 (恒 0x81 id)

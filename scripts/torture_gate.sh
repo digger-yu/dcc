@@ -19,12 +19,17 @@ check_set() {
     # 提取当前 FAIL 行: "  FAIL  name" 或 "  FAIL  name (runtime)/(compile)/(timeout)"
     grep '^  FAIL' "$log" | sed 's/^  FAIL  //' | sort > "$TMP/current.txt"
 
-    echo "=== $label: baseline=$(wc -l < "$base") current=$(wc -l < "$TMP/current.txt") ==="
+    # 基线允许写注释（# 开头）和空行做说明，比较前滤掉并按 comm 的要求排序。
+    # 空基线是合法状态：意味着「当前一条失败都不许有」，正是收紧后的目标。
+    sed 's/[[:space:]]*$//' "$base" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' \
+        | sort > "$TMP/base.txt"
+
+    echo "=== $label: baseline=$(wc -l < "$TMP/base.txt") current=$(wc -l < "$TMP/current.txt") ==="
 
     # 新增失败 = 当前有但基线没有
-    comm -23 "$TMP/current.txt" "$base" > "$TMP/added.txt"
+    comm -23 "$TMP/current.txt" "$TMP/base.txt" > "$TMP/added.txt"
     # 已修复 = 基线有但当前没有（好现象，仅提示）
-    comm -13 "$TMP/current.txt" "$base" > "$TMP/fixed.txt"
+    comm -13 "$TMP/current.txt" "$TMP/base.txt" > "$TMP/fixed.txt"
 
     if [[ -s "$TMP/added.txt" ]]; then
         echo "$label GATE: FAIL (new failures detected)"

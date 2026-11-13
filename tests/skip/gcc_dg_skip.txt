@@ -21,18 +21,25 @@
 # 多文件测试框架 — dg 需要配合其他 .c 文件
 # 这些测试涉及多个源文件，暂不处理
 
-# struct-by-value-18(_a) — _Complex long double 大结构体按值传递/返回。
-# 静态帧规划 (max_sret_bytes) 对“经 x87 的复杂 long double 结构体返回值槽”
-# 与运行期 alloc_sret_slot 的口径不一致, 会低估 sret 预留导致 E1128 压穿帧底。
-# 这是 dcc 帧规划器的已知缺口 (见 func_setup.rs 中 sret 水位扫描的建模注释),
-# 需要修正“复杂 long double 结构体返回值”的 sret 计数, 目前暂跳过。
-compat/struct-by-value-18_x.c
-compat/struct-by-value-18a_x.c
+# struct-by-value-18(_a) — 已恢复。三个叠加根因都已修好:
+#   1) `gen_expr_complex_lit` 对 `long double` 内型无条件把实部重载进值通道,
+#      而 LD 的值通道是 x87 st(0) —— 复数字面量每求值一次就永久漏 1 枚 x87
+#      栈项, 8 项回绕后 `fstpt` 写 indefinite (0xFFFFC000…) 即 -nan;
+#   2) 标量 → `_Complex` 的显式转换 (C99 6.3.1.8p1) 完全没有实现,
+#      `checkScld1 (g1sScld1, (Sclcd1)1)` 的 `(Sclcd1)1` 读到从未写过的复数带;
+#   3) `gen_complex_ld_materialize` 对标量源的 Cast 走了 `gen_lvalue_addr`
+#      捷径 (`Cast => gen_lvalue_addr(inner)`), 把 4 字节 int 变量的地址当
+#      32 字节复数对读。
+# 回归夹具: tests/integration/c_lang.rs 的
+# `complex_ld_literal_keeps_x87_stack_balanced` /
+# `scalar_to_complex_cast_converts_components` 与
+# tests/integration/c_abi_vararg.rs 的 `complex_ld_struct_by_value_and_va_arg`。
 
 # charset/asm4-6 — 这几个测试用虚构的汇编助记符 `foo` ("foo %0") 作为占位
 # 文本来检验执行字符集 (iconv IBM1047) 翻译. GCC 把 asm 串原样透传给汇编器,
-# 而 dcc 的 mini-asm 需要真正编码指令, `foo` 无可编码形式 —— 连 gas 也
-# 会拒绝. 属于 dcc 设计上不支持的场景 (非代码缺陷), 逐个跳过.
+# 而 dcc 的 mini-asm 需要真正编码指令, `foo` 无可编码形式 —— 已复核:
+# `--asm-fallback=gas` 让 as 接管后仍然报 `Error: no such instruction: 'foo %rax'`,
+# 即真实汇编器同样拒绝. 属于测试前提本身不可满足, 非 dcc 代码缺陷, 逐个跳过.
 charset/asm4.c
 charset/asm5.c
 charset/asm6.c
@@ -61,7 +68,9 @@ torture/dfp-default-init-3.c
 # 被 parse_int_lit 截成 0, 取模即除零 SIGFPE。真支持需要任意精度整数表示,
 # 与 TImode 同属"超 64 位宽整数"设计缺口, 暂跳过。
 torture/bitint-107.c
-# __hardbool
+# __hardbool — dcc 静默接受 `__attribute__((hardbool(...)))` (无诊断) 但按
+# 普通 `_Bool` 处理: 表示值不变成声明的 1/42 对, 比较/转换全部按 0/1 算,
+# 运行到断言就 abort (rc=134). 属于类型表示层设计缺口。
 torture/hardbool-ai.c
 torture/hardbool-i-5a.c
 torture/hardbool-ul-5a.c
@@ -79,9 +88,13 @@ torture/hardbool-us.c
 torture/hardbool-vi.c
 
 # inline-mem-move-1 — 依赖另一个套件 gcc.c-torture 的文件
-# (../../gcc.c-torture/execute/builtins/memmove.c, lib/main.c), 该套件文件
-# 在 gcc.dg 布局下不存在, 且 -finline-stringops=memmove 亦非 dcc 支持的 flag;
-# 属测试依赖/布局限制, 非 dcc 代码缺陷, 暂跳过。
+# (../../gcc.c-torture/execute/builtins/memmove.c, lib/main.c)。在完整 GCC 树
+# 布局下这些文件能解析到、程序也能跑通 (rc=0), 但 dg 的编译期断言
+# `scan-assembler-not {\mmemmove\M}` 要求 `-finline-stringops=memmove` 把
+# memmove 内联掉 —— dcc 不实现 stringop 内联, 仍发 5 个 PLT32 memmove 调用,
+# 该项必失败。属“可选优化未实现”, 非运行期代码缺陷。
+# (`__builtin_bcopy`/`__builtin_bzero` 原先不在 parser 的已知内建名单里, 会误发
+# W1015 "assuming int"; 二者实现本就在 special/builtins, 已补入名单止噪。)
 torture/inline-mem-move-1.c
 
 # __GIMPLE — GCC 内部 GIMPLE IR 测试语法 (`-fgimple` 下 `__GIMPLE()` 函数体
@@ -97,20 +110,37 @@ torture/pr86505.c
 # builtin-iseqsig-1 — 已恢复: dcc 对 __builtin_iseqsig 已有可用实现 (分类/
 # 信令 NaN 语义修好后不再依赖宿主 glibc 的 iseqsig 符号)。
 
-# __thread TLS — dcc 后端未实现线程局部存储 (__thread 变量未放进 TLS 段,
-# 主线程与子线程拿到同一地址), tls-test.c 据此判 FAIL。属设计不支持。
-torture/tls/tls-test.c
+# __thread TLS — 已恢复。旧实现只做了「半套」：符号类型 STT_TLS、.tdata/.tbss 段、
+# `pending_tls_rels` 都在，但唯一活跃的产物路径（-c + host ld）对 TLS 符号发的是
+# `mov a(%rip)` + R_X86_64_PC32，链接后指向 .tdata **模板**，于是所有线程读写
+# 同一份存储、两个线程的 `&a` 相等；实测 tls-test.c 主线程直接读到子线程写入的
+# 10。现在 ET_REL 一律走 local-exec 形态（`%fs:` 前缀 + SIB 绝对 disp32 +
+# R_X86_64_TPOFF32，取址用 `mov %fs:0` + lea），并补上了聚合 TLS 对象在
+# `.tdata` 里的初始化数据（原先 int arr[4] 与 struct S 拿到同一个 offset，
+# 互相覆盖）。回归夹具见 tests/integration/c_lang.rs 的
+# `thread_local_is_per_thread_and_aggregates_initialized`。
 
-# pr8081 — VLA 作为结构体成员 (char val[size], size 运行期确定) 并按值返回
-# 该结构体; dcc 的 VLA/变长结构体按值返回尚未实现, 拷贝结果错误。设计不支持。
-torture/pr8081.c
+# pr8081 — 已恢复：VLA 作为结构体成员（`char val[size]`）+ 嵌套函数按值返回。
+# 三处独立根因：(a) `gen_lvalue_addr` 的 upvar 二次加载编码把 modrm 写成
+# mod=00/rm=rbx，紧随的 disp32 被当独立指令执行（嵌套函数读外层 VM struct
+# 直接 SIGSEGV）；(b) `AddrOf` 的 Ident 分支缺 upvar 臂，`&b` 落到
+# `stack_home_off` 在本帧懒分配同名槽，取到自己的帧；(c) `gen_sret_return`
+# 按 `Type::size()` 定长拷贝，VM struct 退化成 8 字节，且运行时求长不能用
+# r11 当累加器（`load_upvar` 把 r11 当静态链 scratch）。
+# 回归夹具见 tests/integration/c_lang.rs 的
+# `nested_function_reads_outer_vla_struct`。
+# 已知残留限制（不在本 dg 用例覆盖内）：调用方给 sret 临时缓冲仍按静态
+# `ty.size()` 申请（含 16 字节圆整），运行时大小超过 16 字节的 VM struct 返回
+# 会溢出该缓冲（`int size = 1000` 的变体 SIGSEGV）—— 需要调用点动态栈分配
+# sret 缓冲区才能根治。
 
-# pr115137 — __builtin_iscntrl 等 ctype builtin 未实现, 暂跳过 (设计不支持)。
-torture/pr115137.c
+# pr115137 — 已恢复: ctype 系列 builtin (__builtin_isalnum/isalpha/isblank/
+# iscntrl/isgraph/islower/isprint/ispunct/isspace/isupper/isxdigit/tolower/
+# toupper) 已在 codegen 里转发到同名 libc 符号, -O0 可跑过。
 
-# pr117938 — 与 struct-by-value-18 同类的 sret 帧水位缺口 (E1128 压穿帧底),
-# <sret> 静态帧规划低估预留, 暂跳过待修正帧规划器。
-torture/pr117938.c
+# pr117938 — 已恢复: 根因不是 sret 帧水位, 而是两处 codegen 缺陷 —— 动态对齐
+# 调用路径把 rsp 溢进 caller-saved 的 r10 (被调用方一用就丢), 以及向量下标
+# 读写假设向量返回值恒在向量临时槽 0 (sret/内存返回时不是)。
 
 # ── shard4 修复时发现的设计缺口 (dcc 优化器/codegen 尚不具备相应能力) ──
 

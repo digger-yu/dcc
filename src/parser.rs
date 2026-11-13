@@ -13319,6 +13319,12 @@ impl<'a> Parser<'a> {
                                     | "__builtin_unreachable"
                                     | "__builtin_prefetch"
                                     | "__builtin_trap"
+                                    // `__builtin_bcopy`/`__builtin_bzero` 返回 void，真实现在
+                                    // `codegen::x86_64::special::builtins`（分别转发 memmove /
+                                    // memset），用例里只作语句使用 —— 与上面三件同理，这里列
+                                    // 的只是诊断口径，不改变 call_ty。
+                                    | "__builtin_bcopy"
+                                    | "__builtin_bzero"
                                     | "__builtin_isdigit"
                                     | "__builtin_strcmp"
                                     | "__builtin_extract_return_addr"

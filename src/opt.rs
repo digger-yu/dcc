@@ -52,6 +52,22 @@ const INLINE_MAX_DEPTH_FORCED: u32 = 24;
 
 static INLINE_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 
+/// `DCC_REBUILD_DUMP=1` 诊断窗口：打印 `rebuild_block` 产出的函数体 AST；
+/// `DCC_REBUILD_DUMP_FN=<名>` 只打印指定函数。与 `DCC_DUPARG_DUMP`/
+/// `DCC_MEMDBG` 同风格。重建后的 AST 是「IR 已走完、汇编已太远」的盲区：
+/// torture pr104814 的「`if(c) break else break` 被发在内层循环」就是靠它看到的。
+/// 用 `OnceLock` 缓存：本判据在**每个函数**的重建点上求值，`env::var` 每次都要拿锁。
+static REBUILD_DUMP: OnceLock<(bool, Option<String>)> = OnceLock::new();
+
+fn rebuild_dump_cfg() -> &'static (bool, Option<String>) {
+    REBUILD_DUMP.get_or_init(|| {
+        (
+            std::env::var("DCC_REBUILD_DUMP").is_ok(),
+            std::env::var("DCC_REBUILD_DUMP_FN").ok(),
+        )
+    })
+}
+
 fn inline_trace_enabled() -> bool {
     *INLINE_TRACE_ENABLED.get_or_init(|| {
         std::env::var("DCC_INLINE_TRACE")
@@ -722,6 +738,13 @@ fn run_ssa_passes(
                 // （克隆会把整棵 AST 再抄一份，正是要避免的那种开销）。
                 let orig_body = f.body.take();
                 let rebuilt = crate::ssa::rebuild_block(&ssa);
+                let (dump_on, dump_fn) = rebuild_dump_cfg();
+                if *dump_on && dump_fn.as_deref().map(|w| f.name.name == w).unwrap_or(true) {
+                    eprintln!(
+                        "==== [SSA REBUILD] {} ====\n{:#?}",
+                        f.name.name, rebuilt
+                    );
+                }
                 if std::env::var("DCC_DUPARG_DUMP").is_ok() {
                     dbg_dup_call_args(&f.name.name, &rebuilt);
                 }
@@ -2793,6 +2816,21 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                             span: span.clone(),
                         })
                     };
+                    // 【条件求值不能随分支一起丢】`?:` 的条件**总是先求值一次**
+                    // （C11 6.5.15p4）：条件本身带副作用（赋值/自增/调用）时，把三元
+                    // 折成选中分支等于把那次求值删掉。实测 `int y = (x = 0) ? 1 : 2;`
+                    // 在 -O1/-O2 让 x 停在 1（-O0 正常）。做法与 [`and_or_result`]
+                    // 同源：留成 `(cond, taken)`，值只看右侧。
+                    let e = if crate::semantics::discarded_value_needs_code(&cond) {
+                        Box::new(Expr::Comma {
+                            l: cond,
+                            r: e,
+                            span: span.clone(),
+                            ty: ty.clone(),
+                        })
+                    } else {
+                        e
+                    };
                     return fold_expr(*e, fenv_access);
                 }
             }
@@ -4020,16 +4058,27 @@ fn fold_branches_block(
                         span: span.clone(),
                     })
                 };
-                match taken {
-                    Stmt::Block { mut b, .. } => {
-                        fold_branches_block(&mut b.items, fenv_access, live_refs);
-                        for it in b.items.into_iter().rev() {
-                            items.insert(i, it);
-                        }
-                        continue;
-                    },
-                    other => items.insert(i, BlockItem::Stmt(other)),
+                // 【条件求值不能随未选中臂一起丢】与 `collapse_const_if_operand` /
+                // `range_if` 两支同一条做法：`if` 的条件总是先求值一次，它本身需要
+                // 发码时（赋值/自增/调用……）先留成一条语句，再接选中臂。
+                // 旧版直接只插选中臂，于是 `while ((x = 0));` 这类条件里的 store
+                // 被整条删除（实测 `while` / `for` 两支同此）。
+                let mut out: Vec<BlockItem> = Vec::new();
+                if crate::semantics::discarded_value_needs_code(&cond) {
+                    out.push(BlockItem::Stmt(Stmt::Expr {
+                        e: cond,
+                        span: span.clone(),
+                    }));
                 }
+                match taken {
+                    Stmt::Block { b, .. } => out.extend(b.items),
+                    other => out.push(BlockItem::Stmt(other)),
+                }
+                fold_branches_block(&mut out, fenv_access, live_refs);
+                for it in out.into_iter().rev() {
+                    items.insert(i, it);
+                }
+                continue;
             }
         } else if let Some(truth) = range_if.or(stmt_expr_if) {
             let item = items.remove(i);
@@ -4401,9 +4450,18 @@ fn fold_branches_stmt(
                     && !branch_drop_loses_live_label(body, live_refs)
                     && !expr_has_unresolved_constp(cond)
                 {
+                    // 循环体删了，但条件的那次求值还在：`while ((x = 0));`
+                    // 必须在折完后仍然写一次 x（与 `fold_if` 同一做法）。
+                    let mut items = Vec::new();
+                    if crate::semantics::discarded_value_needs_code(cond) {
+                        items.push(BlockItem::Stmt(Stmt::Expr {
+                            e: cond.clone(),
+                            span: span.clone(),
+                        }));
+                    }
                     *s = Stmt::Block {
                         b: Block {
-                            items: vec![],
+                            items,
                             span: span.clone(),
                         },
                         span: span.clone(),
@@ -4429,20 +4487,27 @@ fn fold_branches_stmt(
                         && !branch_drop_loses_live_label(body, live_refs)
                         && !expr_has_unresolved_constp(c)
                     {
+                        // 同 `while`：init 之后、循环之前还有一次条件求值。
+                        let mut items: Vec<BlockItem> = Vec::new();
                         if let Some(i) = init.take() {
-                            *s = Stmt::Expr {
+                            items.push(BlockItem::Stmt(Stmt::Expr {
                                 e: stmt_to_void_expr(*i),
                                 span: span.clone(),
-                            };
-                        } else {
-                            *s = Stmt::Block {
-                                b: Block {
-                                    items: vec![],
-                                    span: span.clone(),
-                                },
-                                span: span.clone(),
-                            };
+                            }));
                         }
+                        if crate::semantics::discarded_value_needs_code(c) {
+                            items.push(BlockItem::Stmt(Stmt::Expr {
+                                e: c.clone(),
+                                span: span.clone(),
+                            }));
+                        }
+                        *s = Stmt::Block {
+                            b: Block {
+                                items,
+                                span: span.clone(),
+                            },
+                            span: span.clone(),
+                        };
                         return;
                     }
                 }
@@ -5779,6 +5844,12 @@ struct LabelCtx {
     writes_at: HashMap<usize, std::collections::HashSet<String>>,
     /// 名字 → 最近一次「纯常量存储」发生在哪个项序号。
     store_at: HashMap<String, usize>,
+    /// 名字 → **本表覆盖到的这些层里**亲眼见到的 `goto` 条数。
+    ///
+    /// `FwdAxis::edges` 是**整函数**的条数（用于 [`FwdAxis::sole_in_edge`]），而本表只沿
+    /// 一条层链攒事实：`switch` 的每个 case 体都是从 [`forward_items`] 另起一张表，别的臂里
+    /// 的 `goto L` 在本层既数不到、也定不了位。两种条数不等就说明有本层看不见的进入边。
+    local_edges: HashMap<String, usize>,
     /// 函数里出现过 `goto *expr` ⇒ 落入点点不出来，退回「标号一律清表」。
     indirect: bool,
     /// 下一个可用序号。
@@ -5792,6 +5863,7 @@ impl LabelCtx {
             max_src: HashMap::new(),
             writes_at: HashMap::new(),
             store_at: HashMap::new(),
+            local_edges: HashMap::new(),
             indirect: false,
             next_seq: 0,
         }
@@ -5826,6 +5898,7 @@ impl LabelCtx {
                 self.writes_at.insert(seq, ws);
             }
             for n in names {
+                *self.local_edges.entry(n.clone()).or_insert(0) += 1;
                 self.min_src
                     .entry(n.clone())
                     .and_modify(|v: &mut usize| {
@@ -5925,7 +5998,16 @@ fn forward_items_with(
         // `goto *expr` 让落入点不可枚举，这时退回旧行为（[`LabelCtx::indirect`]）。
         if let BlockItem::Stmt(Stmt::Label { name, .. }) = it {
             if targets.jumped(&name.name) {
-                if lctx.indirect {
+                // 【本层看不见的进入边】整函数边数多于本层可见数 ⇒ 另有路径跳进来，而那条
+                // 路径上的位置本层比不出来（`min_src` 只是本层的最小值），它完全可能绕过了
+                // `x = C`。实测 `switch (c) { case 1: isz = 2; goto U;
+                // case 2: isz = 4; goto U; U: switch (isz) { … } }`：case 2 那一层只看得见
+                // 自己那条排在 `isz = 4` **之后**的 `goto U`，于是判「没绕过存储」把
+                // `isz` 代成 4 —— case 1 走进去就落进 case 4 的臂（-O1/-O2 错值，-O0 正常）。
+                // 定位不到就整表清掉（与 `indirect` 同一口径：宁可少折，不可错值）。
+                let seen = lctx.local_edges.get(&name.name).copied().unwrap_or(0);
+                let total = targets.edges.get(&name.name).copied().unwrap_or(0);
+                if lctx.indirect || total > seen {
                     known.clear();
                     vals.clear();
                 } else {

@@ -80,8 +80,37 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_float_precision_convert(&mut self, src_ty: &Type, dst_ty: &Type) {
-        // LongDouble is internally stored/computed as double in xmm0,
-        // so treat LongDouble same as Double for conversion purposes.
+        // 值所在的寄存器通道由 `float_in_st0` 唯一决定（a6 迁移后的不变量）：
+        // `long double` 恒在 x87 `st(0)`，SSE 目标下 float/double 在 xmm0。
+        // 旧注释「LongDouble is internally stored/computed as double in xmm0」与那条
+        // 约定相反：80-bit 值放不进 xmm0-f64，`gen_float_store` 也是用 `fstp tbyte`
+        // 才落得下 10 字节。照旧写法把 LongDouble 当成 Double，`double d = <ld 表达式>`
+        // 就一条转换指令都不发，直接按 double 从 xmm0 存 —— 实测 `d = g(x)`（g 返
+        // long double）在 -O0 就把返回值读成垃圾。
+        let src_st0 = self.float_in_st0(src_ty);
+        let dst_st0 = self.float_in_st0(dst_ty);
+        if src_st0 != dst_st0 {
+            // 跨寄存器组: st(0) → xmm0 / xmm0 → st(0)。
+            if src_st0 {
+                // `fstp` 的宽度就是那次 80→64/32 的硬件舍入（C 的赋值转换语义）。
+                if matches!(dst_ty, Type::Float) {
+                    self.emit_x87_to_xmm0_f32();
+                } else {
+                    self.emit_x87_to_xmm0();
+                }
+            } else {
+                // f32/f64 是 80-bit 的真子集，拓宽无损。
+                let from = if matches!(src_ty, Type::Float) {
+                    Type::Float
+                } else {
+                    Type::Double
+                };
+                self.emit_xmm0_to_st0(&from);
+            }
+            return;
+        }
+        // 同一通道内的精度差异（SSE 下 float↔double；x87 通道下两者都在 st(0)，
+        // 精度差异由下游的 fstp 宽度自然完成，无需指令）。
         let src_is_single = matches!(src_ty, Type::Float);
         let dst_is_single = matches!(dst_ty, Type::Float);
         if src_is_single == dst_is_single {

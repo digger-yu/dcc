@@ -211,6 +211,9 @@ impl Codegen {
             pending_code_rels: cg.pending_code_rels,
             pending_func_addr_rels: cg.pending_func_addr_rels,
             pending_data_rels: cg.pending_data_rels,
+            // TLS 的 TPOFF32 必须随 chunk 回程（与 `pending_data_rels` 同一条
+            // 理由）：不带回就只剩 `%fs:` 指令、disp32 全是 0。
+            pending_tls_rels: cg.pending_tls_rels,
             pending_data_rel_tails: cg.pending_data_rel_tails.into_iter().collect(),
             pending_sib_data_rels: cg.pending_sib_data_rels,
             pending_data_rels_with_off: cg.pending_data_rels_with_off,
@@ -431,6 +434,9 @@ impl Codegen {
         }
         for (pos, sym) in chunk.pending_data_rels {
             self.pending_data_rels.push((base + pos, sym));
+        }
+        for (pos, sym) in chunk.pending_tls_rels {
+            self.pending_tls_rels.push((base + pos, sym));
         }
         for (pos, tail) in chunk.pending_data_rel_tails {
             self.pending_data_rel_tails.insert(base + pos, tail);
@@ -857,6 +863,7 @@ mod tests {
             pending_code_rels: vec![],
             pending_func_addr_rels: vec![],
             pending_data_rels: vec![],
+            pending_tls_rels: vec![],
             pending_data_rel_tails: vec![],
             pending_sib_data_rels: vec![],
             pending_data_rels_with_off: vec![],

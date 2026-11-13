@@ -141,8 +141,18 @@ impl Codegen {
                     self.gen_float_store_at(result_off, &inner);
                     self.gen_float_imm_load(*imag, &inner); // xmm0 = 虚部
                     self.gen_float_store_at(result_off + inner_sz, &inner);
-                    // 实部重新载入 xmm0 (结果约定)
-                    self.gen_float_imm_load(*real, &inner);
+                    // 实部重新载入结果通道 (结果约定)。SSE 内型 (f/d/_Float128)
+                    // 这一步是 `movss/movsd/movupd xmm0, [rip+c]`，无副作用；
+                    // `long double` 的值通道是 **x87 st(0)**，`gen_float_imm_load`
+                    // 发的是 `fldt`（压栈），而这里没有任何消费方会把 st(0) 弹掉
+                    // —— 分量握手全走 result_off 内存对。于是每求值一个复数字面量
+                    // 就永久漏 1 枚 x87 栈项（8 项满后回绕，后续 `fstpt` 写出
+                    // 0xFFFFC000… 的 indefinite 值）。实测 `_Complex long double`
+                    // s3.c = 11+12i 的虚部读到 -nan；连续 6 个复数字面量赋值后
+                    // 触发（compat/struct-by-value-18 的 testva 第三分量）。
+                    if !self.float_in_st0(&inner) {
+                        self.gen_float_imm_load(*real, &inner);
+                    }
                 } else {
                     // 整数内型 (_Complex int/short/char):
                     // 实部/虚部按类型宽度存储, 避免 store_stack(8B)

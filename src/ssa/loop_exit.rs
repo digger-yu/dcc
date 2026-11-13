@@ -171,7 +171,12 @@ pub(super) fn resolve_loop_exit_stub(
 /// 生长规则单调: 只有 `ExitClass::Inline` (自带语句 + 全部前驱都已在区域内) 的目标并入
 /// 区域, 而「前驱都在区域内」只会随区域变大而成立, 不会回头 ⇒ 有限步收敛到不动点。
 /// 候选与 frontier 都按字典序处理: 区域建立在 `HashMap` 的迭代序上就会外泄进产物字节。
-fn loop_exit_region(func: &Function, header: &str, body: &HashSet<String>) -> HashSet<String> {
+fn loop_exit_region(
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+    doms: &HashMap<String, HashSet<String>>,
+) -> HashSet<String> {
     let mut region: HashSet<String> = body.clone();
     region.insert(header.to_string());
     let mut scanned: HashSet<String> = HashSet::new();
@@ -201,7 +206,7 @@ fn loop_exit_region(func: &Function, header: &str, body: &HashSet<String>) -> Ha
         candidates.sort();
         let mut next: Vec<String> = Vec::new();
         for c in candidates.iter() {
-            if exit_class_of(c, func, header, &region) == ExitClass::Inline
+            if exit_class_of(c, func, header, &region, doms) == ExitClass::Inline
                 && region.insert(c.clone())
             {
                 next.push(c.clone());
@@ -248,11 +253,35 @@ enum ExitClass {
     IntoPad,
 }
 
+/// 这个块作为「到达边就地展开的尾巴」是否会**走出当前循环**：它的某个后继落在循环头的
+/// 支配集里（且不是循环头自己）⇒ 从它继续必须跳回外层构造（外层循环头 / 循环前的块）。
+/// 内联进当前循环体后，那条边只剩「`break` 退一层」一档 —— 退的是当前循环而不是外层，
+/// 语义不等价。实测 torture `pr104814.c`（`for (;c;--c) { for (int i…); b--; }`）：
+/// 内层循环的出口区被一路吞到 `for.step`，`for.step` 的 `c` 真分支指向**外层**头块
+/// `for.body`，重建把它发成内层循环的 `break`，于是外层循环第一圈就落出、`b` 只减一次。
+fn tail_escapes_outer(
+    t: &str,
+    func: &Function,
+    header: &str,
+    doms: &HashMap<String, HashSet<String>>,
+) -> bool {
+    let Some(bb) = func.blocks.get(t) else {
+        return true;
+    };
+    let Some(hd) = doms.get(header) else {
+        return true;
+    };
+    term_succs(&bb.term)
+        .into_iter()
+        .any(|s| s != header && hd.contains(s))
+}
+
 fn exit_class_of(
     folded: &str,
     func: &Function,
     header: &str,
     inside: &HashSet<String>,
+    doms: &HashMap<String, HashSet<String>>,
 ) -> ExitClass {
     let Some(bb) = func.blocks.get(folded) else {
         return ExitClass::Shared;
@@ -271,6 +300,11 @@ fn exit_class_of(
     // 体内纯 `return`: 与 `is_loop_exit_pure_return` 同一判据 (Ret + 无 phi + 单一前驱)。
     if is_loop_exit_pure_return(folded, func) {
         return ExitClass::Ret;
+    }
+    // 尾巴会走回外层构造的块不能内联 (见 [`tail_escapes_outer`]): 它必须由循环之后的
+    // 续体按**外层**上下文重新发射一次，`break` 只退一层表达不了。
+    if tail_escapes_outer(folded, func, header, doms) {
+        return ExitClass::Shared;
     }
     if bb.phis.is_empty()
         && !bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind))
@@ -295,7 +329,7 @@ pub(super) fn loop_exit_plan(
     let in_loop = |x: &str| x == header || body.contains(x);
     // 出口边的口径 = **发射器走到的区域** (见 [`loop_exit_region`])。自然循环体只是它的
     // 起点: `if` 的 then 区会被就地展开进 `while` 体, 它自己的出口边同样是出口边。
-    let region = loop_exit_region(func, header, body);
+    let region = loop_exit_region(func, header, body, doms);
     let fold = |x: &str| resolve_loop_exit_stub(x, func, header, &region);
 
     // 1. 出口边 (src -> raw target), 按 src 字典序保证确定性。
@@ -324,7 +358,7 @@ pub(super) fn loop_exit_plan(
     let mut edge_class: Vec<(String, String, ExitClass)> = Vec::new();
     for (src, tgt) in edges.iter() {
         let f = fold(tgt);
-        let c = exit_class_of(&f, func, header, &region);
+        let c = exit_class_of(&f, func, header, &region, doms);
         if c == ExitClass::Shared && !shared.iter().any(|e| *e == f) {
             shared.push(f.clone());
         }
@@ -510,7 +544,7 @@ fn owner_of(
     func: &Function,
     header: &str,
     inside: &HashSet<String>,
-    _doms: &HashMap<String, HashSet<String>>,
+    doms: &HashMap<String, HashSet<String>>,
 ) -> LoopExitOwner {
     let folded = resolve_loop_exit_stub(target, func, header, inside);
     if cont == Some(folded.as_str()) {
@@ -525,7 +559,7 @@ fn owner_of(
         // 桩块自身无语句: 折叠后的块如果是上述两类, 同样能在到达边安排
         ExitClass::Shared => {
             if folded != target {
-                match exit_class_of(&folded, func, header, inside) {
+                match exit_class_of(&folded, func, header, inside, doms) {
                     ExitClass::Ret => return LoopExitOwner::PureReturn,
                     ExitClass::Inline => return LoopExitOwner::InlineOnEdge,
                     ExitClass::IntoPad => return LoopExitOwner::InlineOnEdge,
@@ -553,8 +587,13 @@ pub(super) fn loop_exit_owner(
     // 分类口径必须与计划内部一致 (**发射区域**, 不是自然循环体): 用自然体就会把计划
     // 已经安排好的边重新判成另一类, 于是判据与发射器再次分叉。
     let inside = &plan.region;
-    let cls =
-        exit_class_of(&resolve_loop_exit_stub(target, func, header, inside), func, header, inside);
+    let cls = exit_class_of(
+        &resolve_loop_exit_stub(target, func, header, inside),
+        func,
+        header,
+        inside,
+        doms,
+    );
     owner_of(target, cls, plan.cont.as_deref(), func, header, inside, doms)
 }
 

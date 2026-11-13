@@ -920,7 +920,17 @@ impl Codegen {
         // complex 源：lvalue 直读内存对；rvalue gen_expr 一次后读 result_off。
         // src_isz 是源分量宽度（f=4/d=8/LD=16），用于 rvalue 区的 imag 偏移。
         let src_isz = src_inner.size() as i64;
-        let is_lvalue = self.gen_lvalue_addr(e, Self::EVAL_BASE);
+        // lvalue 捷径只对「复数对象本体」成立 (变量/成员/下标/解引用直读内存对)。
+        // `Expr::Cast` **不可**走这条轴: `gen_lvalue_addr` 对 Cast 是穿透到内层
+        // (`Cast => gen_lvalue_addr(inner)`), 于是 `(CL)i` 会拿 4 字节 int 变量的
+        // 地址当 32 字节复数对读 (实测实部 0、虚部 -nan); 复数→复数的 Cast 也会
+        // 绕过逐分量转换。这类源一律走 rvalue 路径 (gen_expr 按 complex rvalue
+        // 约定把转换结果物化到 result_off)。
+        let is_cx_object = matches!(
+            e,
+            Expr::Ident { .. } | Expr::Index { .. } | Expr::Member { .. } | Expr::Deref { .. }
+        );
+        let is_lvalue = is_cx_object && self.gen_lvalue_addr(e, Self::EVAL_BASE);
         if !is_lvalue {
             self.gen_expr(e, Self::EVAL_BASE);
         }
@@ -3407,11 +3417,24 @@ impl Codegen {
                     // 实部被污染)。
                     if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(0, &name.name);
+                        self.emit_load_mem_typed(v_isz as usize, &v_inner);
                     } else {
-                        let off = self.var_offset(&name.name);
-                        self.emit_lea_r13(0, off);
+                        // 经「家」的**单一读入口**取值：变量可能被 P12 分配器放到
+                        // 寄存器里（`home`），那个 `r13+off` 栈槽从声明起就没人写过——
+                        // 直接 lea 会读到栈上残留。实测 torture `pr104604`：
+                        //     unsigned char v = g;  return v + _Complex unsigned t;
+                        // `v` 被分到 `%ebx`，复数的整数提升分支却从 r13 槽读，
+                        // 读到前一场的 10，于是 `foo(7)` 返回 10（gcc 是 0）。
+                        match self.home_for(&name.name) {
+                            crate::location::Location::Stack(_) => {
+                                let off = self.var_offset(&name.name);
+                                self.emit_lea_r13(0, off);
+                                self.emit_load_mem_typed(v_isz as usize, &v_inner);
+                            },
+                            // `Reg` / `Spill`：按声明类型宽度经家读取（含零/符号扩展）。
+                            _ => self.mov_from_stack(0, &name.name),
+                        }
                     }
-                    self.emit_load_mem_typed(v_isz as usize, &v_inner);
                     if is_float_inner {
                         let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                         self.emit_insn(&Insn::cvt2sd_reg(true, width, 0, 0));

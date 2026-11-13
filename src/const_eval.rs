@@ -692,7 +692,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             Err(ConstEvalError::NotConstant)
         },
         Expr::Assign {
-            l: _,
+            l,
             r,
             op: _,
             ty,
@@ -708,6 +708,18 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             // 也已在 parser 展开成 `target = (target op rhs)`，所以这里只要按
             // 左值类型收口即可。左值是 `_Bool` 时归一化为 0/1（6.3.1.2p1）：
             // `v = (lb = 0x200)` 必须得 1，按原值传播就会得到 512（§5.30）。
+            //
+            // 【位域左值拒绝求值】位域不是独立类型：赋值表达式的值是**写回该位域后**
+            // 再读出的值 —— 先截断到 bit_width、再按字段符号性扩展（C11 6.5.16p3），
+            // 而 `ty` 只是字段的声明类型（`int`），上面那条「按左值类型收口」收不住它。
+            // 这里不做 store，算不出那个值；旧实现直接返回 RHS，于是
+            // `(l.m = 1081) == 1081`（`signed int m:11`）被折成常量真，-O1 把 abort
+            // 那一臂以外的代码连同那次 store 一起删掉（实测
+            // gcc.c-torture/execute/921016-1.c；`while ((x = 0));` 式的条件求值删除
+            // 同族）。宁可判 NotConstant，让运行期代码发出来。
+            if lvalue_is_bitfield_member(l) {
+                return Err(ConstEvalError::NotConstant);
+            }
             let v = eval_full(r, fenv_access)?;
             if matches!(ty, Type::Bool) {
                 return Ok(ConstValue::Int(if truthy_value(&v)? { 1 } else { 0 }));
@@ -1855,6 +1867,29 @@ pub fn truth_by_int_range(e: &Expr) -> Option<bool> {
         Expr::Comma { r, .. } => truth_by_int_range(r),
         Expr::Binop { op, l, r, .. } => cmp_by_int_range(*op, l, r),
         _ => None,
+    }
+}
+
+/// 左值是不是位域成员（`s.m` / `p->m` / `arr[i].m`；嵌套成员只取最外层字段，
+/// 内层基类型已经是那条 Member 的 `ty()`，与 `expr_bitfield_width` 同一判法）。
+fn lvalue_is_bitfield_member(e: &Expr) -> bool {
+    let Expr::Member {
+        expr: inner, field, ..
+    } = e
+    else {
+        return false;
+    };
+    let inner_ty = inner.ty();
+    let struct_ty = match &inner_ty {
+        Type::Ptr(p) => &p.base,
+        Type::Array(elem, _) => &elem.base,
+        other => other,
+    };
+    match struct_ty {
+        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => find_field(fields, &field.name)
+            .map(|(f, _)| f.bit_width.is_some())
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
